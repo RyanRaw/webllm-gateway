@@ -1121,7 +1121,11 @@ def _normalize_candidates(candidates: list[Any], context: ToolBridgeContext) -> 
                 else:
                     return [], BridgeError("unknown_tool", f"未知工具：{normalized.name}", repairable=True)
             if not isinstance(normalized.input, dict):
-                return [], BridgeError("invalid_input", f"工具 {normalized.name} 的 input 必须是对象")
+                shell_replacement = _safe_replacement_for_shell_string_input(normalized, canonical_name, context.tools)
+                if shell_replacement:
+                    normalized = shell_replacement
+                else:
+                    return [], BridgeError("invalid_input", f"工具 {normalized.name} 的 input 必须是对象")
             replacement = _safe_replacement_for_expensive_glob(normalized, canonical_name, context.tools)
             if replacement:
                 normalized = replacement
@@ -1150,18 +1154,36 @@ def _normalize_candidates(candidates: list[Any], context: ToolBridgeContext) -> 
 
 
 def _safe_replacement_for_cli_tool(call: ToolCallDraft, tools: list[ToolSpec]) -> ToolCallDraft | None:
-    if not isinstance(call.input, dict) or not _is_cli_tool_name(call.name):
+    if not _is_cli_tool_name(call.name):
         return None
     bash_tool = _select_bash_tool(tools)
     if not bash_tool:
         return None
-    command = _cli_tool_command(call.name, call.input)
+    if isinstance(call.input, dict):
+        command = _cli_tool_command(call.name, call.input)
+    elif isinstance(call.input, str):
+        command = _cli_tool_string_command(call.name, call.input)
+    else:
+        return None
     if not command:
         return None
     return ToolCallDraft(
         id=call.id,
         name=bash_tool.name,
         input={_shell_command_key(bash_tool): _normalize_windows_paths_for_bash(command)},
+    )
+
+
+def _safe_replacement_for_shell_string_input(call: ToolCallDraft, canonical_name: str, tools: list[ToolSpec]) -> ToolCallDraft | None:
+    if not isinstance(call.input, str):
+        return None
+    shell_tool = _tool_by_name(tools, canonical_name)
+    if not _is_shell_execution_tool(shell_tool, canonical_name):
+        return None
+    return ToolCallDraft(
+        id=call.id,
+        name=call.name,
+        input={_shell_command_key(shell_tool) if shell_tool else "command": _normalize_windows_paths_for_bash(call.input.strip())},
     )
 
 
@@ -1296,6 +1318,16 @@ def _cli_tool_command(name: str, input_value: dict[str, Any]) -> str:
     if not input_value:
         return command_name
     return ""
+
+
+def _cli_tool_string_command(name: str, input_value: str) -> str:
+    command_name = name.strip()
+    command = input_value.strip()
+    if not command:
+        return command_name
+    if _is_shell_wrapper_tool_name(command_name):
+        return command
+    return command if _command_starts_with_cli_name(command, command_name) else f"{command_name} {command}"
 
 
 def _is_shell_wrapper_tool_name(name: str) -> bool:
@@ -1588,7 +1620,7 @@ def _normalize_item(item: Any) -> ToolCallDraft | None:
         args = fn.get("arguments")
     if isinstance(args, str) and args.strip():
         parsed = _loads(args)
-        args = parsed if isinstance(parsed, dict) else {}
+        args = parsed if isinstance(parsed, dict) else args.strip()
     if args is None:
         args = {}
     if not isinstance(args, dict):

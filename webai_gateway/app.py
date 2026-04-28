@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import deque
 import inspect
 import json
+import re
 import secrets
 from pathlib import Path
 from typing import Any
@@ -54,6 +55,11 @@ from webai_gateway.web_auth import (
 
 LOCAL_ADMIN_HOSTS = {"127.0.0.1", "::1", "localhost", "testclient"}
 TOOL_BRIDGE_EVENT_LIMIT = 200
+_SENSITIVE_BEARER_RE = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+")
+_SENSITIVE_ASSIGNMENT_RE = re.compile(
+    r"(?i)((?:api[_-]?key|authorization|bearer|cookie|session|token|secret|qwen_session|ds_session_id)"
+    r"[\w.-]*\s*[\"']?\s*[:=]\s*[\"']?)([^\"'\s,;}]+)"
+)
 
 
 def create_app(
@@ -333,27 +339,25 @@ def create_app(
         data = response.json()
         if not isinstance(data, dict):
             raise HTTPException(status_code=502, detail="Upstream response must be a JSON object")
-        parsed, bridge_result = parse_chat_response(
+        model = str(payload.get("model") or cfg.upstream.model)
+
+        def retry_upstream(retry_payload: dict[str, Any]) -> dict[str, Any] | None:
+            retry_response = post_upstream(client, cfg, retry_payload)
+            retry_response.raise_for_status()
+            retry_data = retry_response.json()
+            return retry_data if isinstance(retry_data, dict) else None
+
+        parsed, bridge_result = await run_in_threadpool(
+            _parse_bridge_chat_data,
             data,
+            app=app,
+            payload=payload,
             bridge=bridge,
             allowed_tools=allowed_tools,
-            model=cfg.upstream.model,
             bridge_context=bridge_context,
-            return_bridge_result=True,
+            model=model,
+            retry_chat=retry_upstream,
         )
-        if bridge_result.error and bridge_result.error.repairable:
-            repair_response = await run_in_threadpool(post_upstream, client, cfg, build_repair_payload(payload, bridge_result))
-            repair_response.raise_for_status()
-            repair_data = repair_response.json()
-            if isinstance(repair_data, dict):
-                parsed, bridge_result = parse_chat_response(
-                    repair_data,
-                    bridge=bridge,
-                    allowed_tools=allowed_tools,
-                    model=cfg.upstream.model,
-                    bridge_context=bridge_context,
-                    return_bridge_result=True,
-                )
         return JSONResponse(parsed, headers=bridge_error_headers(bridge_result))
 
     @app.post("/v1/messages/count_tokens")
@@ -399,27 +403,24 @@ def create_app(
                 data = response.json()
                 if not isinstance(data, dict):
                     raise HTTPException(status_code=502, detail="Upstream response must be a JSON object")
-                parsed, bridge_result = parse_chat_response(
+
+                def retry_upstream(retry_payload: dict[str, Any]) -> dict[str, Any] | None:
+                    retry_response = post_upstream(client, cfg, retry_payload)
+                    retry_response.raise_for_status()
+                    retry_data = retry_response.json()
+                    return retry_data if isinstance(retry_data, dict) else None
+
+                parsed, bridge_result = await run_in_threadpool(
+                    _parse_bridge_chat_data,
                     data,
+                    app=app,
+                    payload=payload,
                     bridge=bridge,
                     allowed_tools=allowed_tools,
                     model=model,
                     bridge_context=bridge_context,
-                    return_bridge_result=True,
+                    retry_chat=retry_upstream,
                 )
-                if bridge_result.error and bridge_result.error.repairable:
-                    repair_response = await run_in_threadpool(post_upstream, client, cfg, build_repair_payload(payload, bridge_result))
-                    repair_response.raise_for_status()
-                    repair_data = repair_response.json()
-                    if isinstance(repair_data, dict):
-                        parsed, bridge_result = parse_chat_response(
-                            repair_data,
-                            bridge=bridge,
-                            allowed_tools=allowed_tools,
-                            model=model,
-                            bridge_context=bridge_context,
-                            return_bridge_result=True,
-                        )
         anthropic_message = openai_response_to_anthropic(
             parsed,
             original_model=str(body.get("model") or openai_body.get("model") or cfg.upstream.model),
@@ -546,6 +547,97 @@ def _tool_call_event_fields(data: dict[str, Any]) -> dict[str, Any]:
     return fields
 
 
+def _bridge_result_event_fields(
+    bridge_result: Any,
+    *,
+    model: str,
+    allowed_tools: set[str],
+) -> dict[str, Any]:
+    fields: dict[str, Any] = {
+        "model": model,
+        "allowedToolCount": len(allowed_tools),
+    }
+    if allowed_tools and len(allowed_tools) <= 32:
+        fields["allowedTools"] = sorted(allowed_tools)
+    elif allowed_tools:
+        fields["allowedTools"] = sorted(allowed_tools)[:32]
+        fields["allowedToolsTruncated"] = len(allowed_tools) - 32
+    error = getattr(bridge_result, "error", None)
+    if error is not None:
+        fields["errorKind"] = str(getattr(error, "kind", "") or "")
+        fields["errorMessage"] = _preview_text(str(getattr(error, "message", "") or ""), max_chars=360)
+        fields["repairable"] = bool(getattr(error, "repairable", False))
+    warning = getattr(bridge_result, "warning", None)
+    if warning:
+        fields["warning"] = _preview_text(str(warning), max_chars=360)
+    tool_calls = getattr(bridge_result, "tool_calls", None)
+    if isinstance(tool_calls, list) and tool_calls:
+        fields["tools"] = [str(getattr(call, "name", "") or "") for call in tool_calls]
+        command = _first_tool_command(tool_calls)
+        if command:
+            fields["commandPreview"] = _preview_text(command)
+    raw_content = str(getattr(bridge_result, "raw_content", "") or "")
+    if raw_content:
+        fields["rawPreview"] = _preview_text(_redact_sensitive_text(raw_content), max_chars=500)
+    return fields
+
+
+def _record_bridge_parse_event(
+    app: FastAPI,
+    bridge_result: Any,
+    *,
+    model: str,
+    allowed_tools: set[str],
+    stage: str,
+) -> None:
+    if getattr(bridge_result, "error", None) is not None:
+        kind = "tool_bridge_error"
+    elif getattr(bridge_result, "tool_calls", None):
+        kind = "tool_bridge_tool_calls"
+    elif getattr(bridge_result, "warning", None):
+        kind = "tool_bridge_warning"
+    else:
+        return
+    _record_tool_bridge_event(
+        app,
+        kind,
+        stage=stage,
+        **_bridge_result_event_fields(bridge_result, model=model, allowed_tools=allowed_tools),
+    )
+
+
+def _record_bridge_rejection_event(
+    app: FastAPI,
+    bridge_result: Any,
+    *,
+    model: str,
+    allowed_tools: set[str],
+) -> None:
+    if getattr(bridge_result, "error", None) is None:
+        return
+    _record_tool_bridge_event(
+        app,
+        "tool_bridge_rejection",
+        **_bridge_result_event_fields(bridge_result, model=model, allowed_tools=allowed_tools),
+    )
+
+
+def _first_tool_command(tool_calls: list[Any]) -> str:
+    for call in tool_calls:
+        input_value = getattr(call, "input", None)
+        if not isinstance(input_value, dict):
+            continue
+        command = input_value.get("command") if isinstance(input_value.get("command"), str) else input_value.get("cmd")
+        if isinstance(command, str):
+            return command
+    return ""
+
+
+def _redact_sensitive_text(value: str) -> str:
+    redacted = _SENSITIVE_BEARER_RE.sub(r"\1[redacted]", value or "")
+    return _SENSITIVE_ASSIGNMENT_RE.sub(r"\1[redacted]", redacted)
+
+
 def _preview_text(value: str, *, max_chars: int = 240) -> str:
     text = " ".join((value or "").split())
     if len(text) <= max_chars:
@@ -623,6 +715,7 @@ def _local_preflight_response(app: FastAPI, body: dict[str, Any], model: str, br
 def _parse_bridge_chat_data(
     data: dict[str, Any],
     *,
+    app: FastAPI,
     payload: dict[str, Any],
     bridge: bool,
     allowed_tools: set[str],
@@ -643,7 +736,17 @@ def _parse_bridge_chat_data(
         bridge_context=bridge_context,
         return_bridge_result=True,
     )
+    if bridge:
+        _record_bridge_parse_event(app, bridge_result, model=model, allowed_tools=allowed_tools, stage="initial")
     if bridge_result.error and bridge_result.error.repairable:
+        _record_tool_bridge_event(
+            app,
+            "tool_bridge_retry",
+            stage="repair",
+            model=model,
+            errorKind=bridge_result.error.kind,
+            errorMessage=_preview_text(bridge_result.error.message, max_chars=360),
+        )
         repair_data = retry_chat(build_repair_payload(payload, bridge_result))
         if isinstance(repair_data, dict):
             parsed, bridge_result = parse_chat_response(
@@ -654,7 +757,17 @@ def _parse_bridge_chat_data(
                 bridge_context=bridge_context,
                 return_bridge_result=True,
             )
+            if bridge:
+                _record_bridge_parse_event(app, bridge_result, model=model, allowed_tools=allowed_tools, stage="repair")
         if bridge_result.error and bridge_result.error.kind == "unknown_tool":
+            _record_tool_bridge_event(
+                app,
+                "tool_bridge_retry",
+                stage="unknown_tool_recovery",
+                model=model,
+                errorKind=bridge_result.error.kind,
+                errorMessage=_preview_text(bridge_result.error.message, max_chars=360),
+            )
             recovery_data = retry_chat(
                 build_unknown_tool_recovery_payload(payload, bridge_result, allowed_tools=allowed_tools)
             )
@@ -667,7 +780,17 @@ def _parse_bridge_chat_data(
                     bridge_context=bridge_context,
                     return_bridge_result=True,
                 )
+                if bridge:
+                    _record_bridge_parse_event(app, bridge_result, model=model, allowed_tools=allowed_tools, stage="unknown_tool_recovery")
         elif _should_retry_tool_refusal_recovery(bridge_result):
+            _record_tool_bridge_event(
+                app,
+                "tool_bridge_retry",
+                stage="tool_refusal_recovery",
+                model=model,
+                errorKind=bridge_result.error.kind,
+                errorMessage=_preview_text(bridge_result.error.message, max_chars=360),
+            )
             recovery_data = retry_chat(
                 build_tool_refusal_recovery_payload(payload, bridge_result, allowed_tools=allowed_tools)
             )
@@ -680,7 +803,10 @@ def _parse_bridge_chat_data(
                     bridge_context=bridge_context,
                     return_bridge_result=True,
                 )
+                if bridge:
+                    _record_bridge_parse_event(app, bridge_result, model=model, allowed_tools=allowed_tools, stage="tool_refusal_recovery")
     elif should_retry_incomplete_response(data):
+        _record_tool_bridge_event(app, "tool_bridge_retry", stage="incomplete_response", model=model)
         retry_data = retry_chat(
             build_incomplete_response_retry_payload(payload, _openai_response_content(data), bridge=bridge)
         )
@@ -693,7 +819,17 @@ def _parse_bridge_chat_data(
                 bridge_context=bridge_context,
                 return_bridge_result=True,
             )
+            if bridge:
+                _record_bridge_parse_event(app, bridge_result, model=model, allowed_tools=allowed_tools, stage="incomplete_response")
             if bridge_result.error and bridge_result.error.repairable:
+                _record_tool_bridge_event(
+                    app,
+                    "tool_bridge_retry",
+                    stage="incomplete_repair",
+                    model=model,
+                    errorKind=bridge_result.error.kind,
+                    errorMessage=_preview_text(bridge_result.error.message, max_chars=360),
+                )
                 repair_data = retry_chat(build_repair_payload(payload, bridge_result))
                 if isinstance(repair_data, dict):
                     parsed, bridge_result = parse_chat_response(
@@ -704,7 +840,17 @@ def _parse_bridge_chat_data(
                         bridge_context=bridge_context,
                         return_bridge_result=True,
                     )
+                    if bridge:
+                        _record_bridge_parse_event(app, bridge_result, model=model, allowed_tools=allowed_tools, stage="incomplete_repair")
                 if _should_retry_tool_refusal_recovery(bridge_result):
+                    _record_tool_bridge_event(
+                        app,
+                        "tool_bridge_retry",
+                        stage="incomplete_tool_refusal_recovery",
+                        model=model,
+                        errorKind=bridge_result.error.kind,
+                        errorMessage=_preview_text(bridge_result.error.message, max_chars=360),
+                    )
                     recovery_data = retry_chat(
                         build_tool_refusal_recovery_payload(payload, bridge_result, allowed_tools=allowed_tools)
                     )
@@ -717,6 +863,16 @@ def _parse_bridge_chat_data(
                             bridge_context=bridge_context,
                             return_bridge_result=True,
                         )
+                        if bridge:
+                            _record_bridge_parse_event(
+                                app,
+                                bridge_result,
+                                model=model,
+                                allowed_tools=allowed_tools,
+                                stage="incomplete_tool_refusal_recovery",
+                            )
+    if bridge:
+        _record_bridge_rejection_event(app, bridge_result, model=model, allowed_tools=allowed_tools)
     return parsed, bridge_result
 
 
@@ -749,6 +905,7 @@ def _deepseek_web_chat(app: FastAPI, client: httpx.Client, body: dict[str, Any],
         raise HTTPException(status_code=502, detail="DeepSeek Web 响应必须是 JSON 对象")
     parsed, bridge_result = _parse_bridge_chat_data(
         data,
+        app=app,
         payload=payload,
         bridge=bridge,
         allowed_tools=allowed_tools,
@@ -812,6 +969,7 @@ def _qwen_web_chat(app: FastAPI, client: httpx.Client, body: dict[str, Any], con
         raise HTTPException(status_code=502, detail="Qwen Web 响应必须是 JSON 对象")
     parsed, bridge_result = _parse_bridge_chat_data(
         data,
+        app=app,
         payload=payload,
         bridge=bridge,
         allowed_tools=allowed_tools,
@@ -882,6 +1040,7 @@ def _qwen_coder_chat(app: FastAPI, client: httpx.Client, body: dict[str, Any], c
         raise HTTPException(status_code=502, detail="Qwen Coder Web 响应必须是 JSON 对象")
     parsed, bridge_result = _parse_bridge_chat_data(
         data,
+        app=app,
         payload=payload,
         bridge=bridge,
         allowed_tools=allowed_tools,

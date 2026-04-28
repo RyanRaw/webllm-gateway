@@ -526,6 +526,43 @@ def test_strict_tool_bridge_reports_repair_failure_without_tool_call() -> None:
     assert choice["message"]["webai_tool_bridge"]["error"] == "unknown_tool"
 
 
+def test_openai_upstream_tool_bridge_runs_unknown_tool_recovery_after_repair() -> None:
+    requests: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content.decode("utf-8")))
+        if len(requests) <= 2:
+            return httpx.Response(
+                200,
+                json=_openai_response(
+                    '```tool_json\n{"calls":[{"id":"call_1","name":"Task","input":{"description":"inspect"}}]}\n```'
+                ),
+                request=request,
+            )
+        return httpx.Response(200, json=_openai_response("已改用最终答案，不再请求未列出的工具。"), request=request)
+
+    client = _client(handler)
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers=_headers(),
+        json={
+            "model": "web-model",
+            "messages": [{"role": "user", "content": "inspect repository"}],
+            "tools": [{"type": "function", "function": {"name": "Read", "parameters": {"type": "object"}}}],
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(requests) == 3
+    recovery_prompt = "\n".join(str(message.get("content", "")) for message in requests[2]["messages"])
+    assert "不要再请求未列出的工具" in recovery_prompt
+    choice = response.json()["choices"][0]
+    assert choice["finish_reason"] == "stop"
+    assert choice["message"]["content"] == "已改用最终答案，不再请求未列出的工具。"
+    assert "tool_calls" not in choice["message"]
+
+
 def test_converts_tool_messages_for_web_upstream() -> None:
     seen: dict[str, Any] = {}
 
@@ -2878,6 +2915,118 @@ def test_qwen_coder_local_repo_update_preflights_before_model_guess(tmp_path: Pa
         "git -C E:/ProjectX/mindcraft/MediaCrawler remote -v && "
         "git -C E:/ProjectX/mindcraft/MediaCrawler status --short"
     )
+
+
+def test_qwen_coder_accepts_bash_string_input_after_tool_loop(tmp_path: Path) -> None:
+    seen_payloads: list[dict[str, Any]] = []
+
+    class StringInputQwenCoderClient:
+        def __init__(self, credential: dict[str, Any], http_client: httpx.Client | None = None) -> None:
+            self.credential = credential
+
+        def chat_completions(self, payload: dict[str, Any]) -> dict[str, Any]:
+            seen_payloads.append(payload)
+            return _openai_response(
+                '```tool_json\n'
+                '{"calls":[{"id":"call_1","name":"Bash",'
+                '"input":"git -C \\"E:\\\\ProjectX\\\\mindcraft\\\\MediaCrawler\\" pull origin main"}]}'
+                "\n```"
+            )
+
+    config = GatewayConfig(
+        server=ServerConfig(api_key="local-dev-key"),
+        upstream=UpstreamConfig(base_url="http://upstream.test/v1", model="web-model"),
+        provider_runtime=ProviderRuntimeConfig(native_web_search_policy="auto"),
+        tool_bridge=ToolBridgeConfig(activation_policy="auto", exposure_policy="all"),
+    )
+    client = TestClient(
+        create_app(
+            config=config,
+            credential_store=_qwen_coder_credential_store(tmp_path),
+            qwen_coder_client_factory=StringInputQwenCoderClient,
+            http_client=_not_found_client(),
+        )
+    )
+
+    response = client.post(
+        "/v1/messages",
+        headers={**_headers(), "anthropic-version": "2023-06-01"},
+        json={
+            "model": "qwen-coder/qwen-coder-plus",
+            "messages": _repo_update_after_tool_loop_messages(),
+            "tools": [{"name": "Bash", "description": "Run shell commands", "input_schema": {"type": "object"}}],
+            "max_tokens": 1024,
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(seen_payloads) == 1
+    assert response.json()["content"] == [
+        {
+            "type": "tool_use",
+            "id": "toolu_call_1",
+            "name": "Bash",
+            "input": {"command": 'git -C "E:/ProjectX/mindcraft/MediaCrawler" pull origin main'},
+        }
+    ]
+
+
+def test_qwen_coder_tool_bridge_rejection_is_recorded_with_safe_details(tmp_path: Path) -> None:
+    seen_payloads: list[dict[str, Any]] = []
+
+    class RepeatingUnknownToolQwenCoderClient:
+        def __init__(self, credential: dict[str, Any], http_client: httpx.Client | None = None) -> None:
+            self.credential = credential
+
+        def chat_completions(self, payload: dict[str, Any]) -> dict[str, Any]:
+            seen_payloads.append(payload)
+            return _openai_response(
+                '```tool_json\n'
+                '{"calls":[{"id":"call_1","name":"Task",'
+                '"input":{"description":"inspect","token":"session-secret"}}]}'
+                "\n```"
+            )
+
+    config = GatewayConfig(
+        server=ServerConfig(api_key="local-dev-key"),
+        upstream=UpstreamConfig(base_url="http://upstream.test/v1", model="web-model"),
+        provider_runtime=ProviderRuntimeConfig(native_web_search_policy="auto"),
+        tool_bridge=ToolBridgeConfig(activation_policy="auto", exposure_policy="all"),
+    )
+    client = TestClient(
+        create_app(
+            config=config,
+            credential_store=_qwen_coder_credential_store(tmp_path),
+            qwen_coder_client_factory=RepeatingUnknownToolQwenCoderClient,
+            http_client=_not_found_client(),
+        )
+    )
+
+    response = client.post(
+        "/v1/messages",
+        headers={**_headers(), "anthropic-version": "2023-06-01"},
+        json={
+            "model": "qwen-coder/qwen-coder-plus",
+            "messages": [{"role": "user", "content": "inspect repository"}],
+            "tools": [{"name": "Read", "description": "Read files", "input_schema": {"type": "object"}}],
+            "max_tokens": 1024,
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(seen_payloads) == 3
+    assert response.json()["content"][0]["type"] == "text"
+    events_response = client.get("/api/admin/tool-bridge/events")
+    assert events_response.status_code == 200
+    events = events_response.json()["events"]
+    rejection = [event for event in events if event["kind"] == "tool_bridge_rejection"][-1]
+    assert rejection["model"] == "qwen-coder/qwen-coder-plus"
+    assert rejection["errorKind"] == "unknown_tool"
+    assert rejection["allowedTools"] == ["Read"]
+    assert "未知工具：Task" in rejection["errorMessage"]
+    assert "Task" in rejection["rawPreview"]
+    assert "session-secret" not in rejection["rawPreview"]
+    assert "[redacted]" in rejection["rawPreview"]
 
 
 def test_qwen_coder_repairs_incomplete_git_clone_before_tool_use(tmp_path: Path) -> None:
