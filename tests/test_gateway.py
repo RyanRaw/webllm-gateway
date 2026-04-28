@@ -2744,7 +2744,7 @@ def test_qwen_coder_repairs_incomplete_git_clone_before_tool_use(tmp_path: Path)
                     '```tool_json\n{"calls":[{"id":"call_1","name":"Bash","input":{"command":"git clone"}}]}\n```'
                 )
             return _openai_response(
-                '```tool_json\n{"calls":[{"id":"call_2","name":"Bash","input":{"command":"git clone https://github.com/NanmiCoder/MediaCrawler.git E:\\\\ProjectX\\\\mindcraft\\\\MediaCrawler"}}]}\n```'
+                '```tool_json\n{"calls":[{"id":"call_2","name":"Bash","input":{"command":"git -C E:\\\\ProjectX\\\\mindcraft\\\\MediaCrawler remote -v && git -C E:\\\\ProjectX\\\\mindcraft\\\\MediaCrawler status --short"}}]}\n```'
             )
 
     config = GatewayConfig(
@@ -2785,7 +2785,128 @@ def test_qwen_coder_repairs_incomplete_git_clone_before_tool_use(tmp_path: Path)
             "id": "toolu_call_2",
             "name": "Bash",
             "input": {
-                "command": "git clone https://github.com/NanmiCoder/MediaCrawler.git E:/ProjectX/mindcraft/MediaCrawler"
+                "command": "git -C E:/ProjectX/mindcraft/MediaCrawler remote -v && git -C E:/ProjectX/mindcraft/MediaCrawler status --short"
+            },
+        }
+    ]
+
+
+def test_qwen_coder_repairs_premature_repo_clarification_to_local_probe(tmp_path: Path) -> None:
+    seen_payloads: list[dict[str, Any]] = []
+
+    class ClarifyingQwenCoderClient:
+        def __init__(self, credential: dict[str, Any], http_client: httpx.Client | None = None) -> None:
+            self.credential = credential
+
+        def chat_completions(self, payload: dict[str, Any]) -> dict[str, Any]:
+            seen_payloads.append(payload)
+            if len(seen_payloads) == 1:
+                return _openai_response(
+                    "请确认 MediaCrawler 是指哪个具体的 GitHub 仓库？也请说明您想更新哪些具体内容。"
+                )
+            return _openai_response(
+                '```tool_json\n{"calls":[{"id":"call_1","name":"Bash","input":{"command":"git -C E:\\\\ProjectX\\\\mindcraft\\\\MediaCrawler remote -v && git -C E:\\\\ProjectX\\\\mindcraft\\\\MediaCrawler status --short"}}]}\n```'
+            )
+
+    config = GatewayConfig(
+        server=ServerConfig(api_key="local-dev-key"),
+        upstream=UpstreamConfig(base_url="http://upstream.test/v1", model="web-model"),
+        provider_runtime=ProviderRuntimeConfig(native_web_search_policy="auto"),
+        tool_bridge=ToolBridgeConfig(activation_policy="auto", exposure_policy="all"),
+    )
+    client = TestClient(
+        create_app(
+            config=config,
+            credential_store=_qwen_coder_credential_store(tmp_path),
+            qwen_coder_client_factory=ClarifyingQwenCoderClient,
+            http_client=_not_found_client(),
+        )
+    )
+
+    response = client.post(
+        "/v1/messages",
+        headers={**_headers(), "anthropic-version": "2023-06-01"},
+        json={
+            "model": "qwen-coder/qwen-coder-plus",
+            "messages": [{"role": "user", "content": r"E:\ProjectX\mindcraft\MediaCrawler 这个原始的github项目帮我更新一下"}],
+            "tools": [
+                {"name": "Bash", "description": "Run shell commands", "input_schema": {"type": "object"}},
+                {"name": "Read", "description": "Read files", "input_schema": {"type": "object"}},
+            ],
+            "max_tokens": 1024,
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(seen_payloads) == 2
+    retry_prompt = "\n".join(str(message.get("content", "")) for message in seen_payloads[1]["messages"])
+    assert "asked the user to provide repository details" in retry_prompt
+    assert response.json()["content"] == [
+        {
+            "type": "tool_use",
+            "id": "toolu_call_1",
+            "name": "Bash",
+            "input": {
+                "command": "git -C E:/ProjectX/mindcraft/MediaCrawler remote -v && git -C E:/ProjectX/mindcraft/MediaCrawler status --short"
+            },
+        }
+    ]
+
+
+def test_qwen_coder_repairs_clone_to_requested_local_path_to_probe(tmp_path: Path) -> None:
+    seen_payloads: list[dict[str, Any]] = []
+
+    class CloneFirstQwenCoderClient:
+        def __init__(self, credential: dict[str, Any], http_client: httpx.Client | None = None) -> None:
+            self.credential = credential
+
+        def chat_completions(self, payload: dict[str, Any]) -> dict[str, Any]:
+            seen_payloads.append(payload)
+            if len(seen_payloads) == 1:
+                return _openai_response(
+                    '```tool_json\n{"calls":[{"id":"call_1","name":"Bash","input":{"command":"git clone https://github.com/NanmiCoder/MediaCrawler.git E:\\\\ProjectX\\\\mindcraft\\\\MediaCrawler"}}]}\n```'
+                )
+            return _openai_response(
+                '```tool_json\n{"calls":[{"id":"call_2","name":"Bash","input":{"command":"git -C E:\\\\ProjectX\\\\mindcraft\\\\MediaCrawler remote -v && git -C E:\\\\ProjectX\\\\mindcraft\\\\MediaCrawler status --short"}}]}\n```'
+            )
+
+    config = GatewayConfig(
+        server=ServerConfig(api_key="local-dev-key"),
+        upstream=UpstreamConfig(base_url="http://upstream.test/v1", model="web-model"),
+        provider_runtime=ProviderRuntimeConfig(native_web_search_policy="auto"),
+        tool_bridge=ToolBridgeConfig(activation_policy="auto", exposure_policy="all"),
+    )
+    client = TestClient(
+        create_app(
+            config=config,
+            credential_store=_qwen_coder_credential_store(tmp_path),
+            qwen_coder_client_factory=CloneFirstQwenCoderClient,
+            http_client=_not_found_client(),
+        )
+    )
+
+    response = client.post(
+        "/v1/messages",
+        headers={**_headers(), "anthropic-version": "2023-06-01"},
+        json={
+            "model": "qwen-coder/qwen-coder-plus",
+            "messages": [{"role": "user", "content": r"E:\ProjectX\mindcraft\MediaCrawler 这个原始的github项目帮我更新一下"}],
+            "tools": [{"name": "Bash", "description": "Run shell commands", "input_schema": {"type": "object"}}],
+            "max_tokens": 1024,
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(seen_payloads) == 2
+    retry_prompt = "\n".join(str(message.get("content", "")) for message in seen_payloads[1]["messages"])
+    assert "git clone targets the local path named by the task" in retry_prompt
+    assert response.json()["content"] == [
+        {
+            "type": "tool_use",
+            "id": "toolu_call_2",
+            "name": "Bash",
+            "input": {
+                "command": "git -C E:/ProjectX/mindcraft/MediaCrawler remote -v && git -C E:/ProjectX/mindcraft/MediaCrawler status --short"
             },
         }
     ]

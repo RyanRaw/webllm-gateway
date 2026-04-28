@@ -48,7 +48,16 @@ _DEFERRED_TOOL_ACTION_RE = re.compile(
 )
 _QUOTED_WINDOWS_PATH_RE = re.compile(r"(?P<quote>[\"'])(?P<path>[A-Za-z]:\\[^\"'\r\n]+)(?P=quote)")
 _UNQUOTED_WINDOWS_PATH_RE = re.compile(r"(?<![\w/])(?P<path>[A-Za-z]:\\[^\s&|;<>]*)")
+_WINDOWS_DRIVE_PATH_RE = re.compile(r"(?<![\w/])(?P<path>[A-Za-z]:[\\/][^\s\"'&|;<>]*)")
 _SHELL_COMMAND_SPLIT_RE = re.compile(r"\s*(?:&&|\|\||;)\s*")
+_CLARIFICATION_REQUEST_RE = re.compile(
+    r"(\?|？|请(?:确认|提供|说明|告诉)|需要(?:确认|提供|说明)|which|what|please\s+(?:confirm|provide|specify))",
+    re.IGNORECASE,
+)
+_REPO_CLARIFICATION_RE = re.compile(
+    r"(github|git\s*hub|repository|repo|仓库|项目|更新|MediaCrawler|目录|路径)",
+    re.IGNORECASE,
+)
 _READ_ONLY_PREFIXES = ("read", "list", "search", "fetch", "get", "show", "find", "query")
 _READ_ONLY_NAMES = frozenset(
     {
@@ -154,6 +163,7 @@ class ToolBridgeContext:
     mode: str
     tools: list[ToolSpec]
     options: ToolBridgeConfig
+    task_text: str = ""
 
     @property
     def allowed_names(self) -> set[str]:
@@ -228,16 +238,24 @@ def build_context(
 
 
 def prefer_local_tools_for_local_agent_task(context: ToolBridgeContext, messages: Any) -> ToolBridgeContext:
-    if not context.enabled or not _looks_like_local_agent_task(_latest_user_text(messages)):
+    latest = _latest_user_text(messages)
+    if not context.enabled or not _looks_like_local_agent_task(latest):
         return context
     local_tools = [tool for tool in context.tools if _provider_search_tool_score(tool) <= 0]
-    if not local_tools or len(local_tools) == len(context.tools):
-        return context
+    if not local_tools:
+        return ToolBridgeContext(
+            enabled=context.enabled,
+            mode=context.mode,
+            tools=context.tools,
+            options=context.options,
+            task_text=latest,
+        )
     return ToolBridgeContext(
         enabled=bool(local_tools) and context.mode != "off",
         mode=context.mode,
         tools=local_tools,
         options=context.options,
+        task_text=latest,
     )
 
 
@@ -522,6 +540,18 @@ def parse_tool_response(text: str, context: ToolBridgeContext) -> BridgeResult:
                 error=BridgeError(
                     "deferred_tool_action_without_call",
                     "模型承诺研究、读取、搜索或检查，但没有发起工具调用",
+                    repairable=True,
+                ),
+                warning=warning,
+                raw_content=raw,
+            )
+        if _is_premature_clarification_without_tool_call(raw, context):
+            return BridgeResult(
+                content=raw,
+                tool_calls=[],
+                error=BridgeError(
+                    "premature_clarification_without_tool_call",
+                    "The model asked the user to provide repository details before using available local tools. Inspect the local path/repo first with Bash/Read/Glob.",
                     repairable=True,
                 ),
                 warning=warning,
@@ -894,6 +924,16 @@ def _is_allowed_tool_denial(text: str, context: ToolBridgeContext) -> bool:
     return any(name.lower() in lowered for name in context.allowed_names)
 
 
+def _is_premature_clarification_without_tool_call(text: str, context: ToolBridgeContext) -> bool:
+    if not context.allowed_names:
+        return False
+    raw = text or ""
+    if not (_CLARIFICATION_REQUEST_RE.search(raw) and _REPO_CLARIFICATION_RE.search(raw)):
+        return False
+    allowed = {name.strip().lower() for name in context.allowed_names}
+    return any(name in allowed for name in {"bash", "read", "glob", "ls", "grep"})
+
+
 def _loads_summary_input(raw: str) -> dict[str, Any]:
     variants = [raw]
     if '\\"' in raw:
@@ -1020,7 +1060,7 @@ def _normalize_candidates(candidates: list[Any], context: ToolBridgeContext) -> 
                 if expensive_glob:
                     return [], BridgeError("expensive_tool_input", expensive_glob, repairable=True)
             normalized = _normalize_shell_tool_command(normalized, canonical_name, context.tools)
-            shell_error = _shell_tool_command_error(normalized, canonical_name, context.tools)
+            shell_error = _shell_tool_command_error(normalized, canonical_name, context)
             if shell_error:
                 return [], shell_error
             call_id = normalized.id or f"call_web_{len(out) + 1}"
@@ -1070,15 +1110,15 @@ def _normalize_shell_tool_command(call: ToolCallDraft, canonical_name: str, tool
     return ToolCallDraft(id=call.id, name=call.name, input=updated)
 
 
-def _shell_tool_command_error(call: ToolCallDraft, canonical_name: str, tools: list[ToolSpec]) -> BridgeError | None:
+def _shell_tool_command_error(call: ToolCallDraft, canonical_name: str, context: ToolBridgeContext) -> BridgeError | None:
     if not _is_bash_tool_name(canonical_name):
         return None
-    bash_tool = next((tool for tool in tools if tool.name == canonical_name), None)
+    bash_tool = next((tool for tool in context.tools if tool.name == canonical_name), None)
     command_key = _shell_command_key(bash_tool) if bash_tool else "command"
     command = call.input.get(command_key)
     if not isinstance(command, str) or not command.strip():
         return BridgeError("incomplete_shell_command", "Bash command is empty; provide a complete command string.", repairable=True)
-    return _incomplete_shell_command_error(command)
+    return _incomplete_shell_command_error(command) or _unsafe_contextual_shell_command_error(command, context)
 
 
 def _is_cli_tool_name(name: str) -> bool:
@@ -1217,6 +1257,36 @@ def _incomplete_shell_command_error(command: str) -> BridgeError | None:
                     repairable=True,
                 )
     return None
+
+
+def _unsafe_contextual_shell_command_error(command: str, context: ToolBridgeContext) -> BridgeError | None:
+    if not _looks_like_update_existing_repo_task(context.task_text):
+        return None
+    task_paths = {_normalize_path_for_compare(match.group("path")) for match in _WINDOWS_DRIVE_PATH_RE.finditer(context.task_text)}
+    if not task_paths:
+        return None
+    for segment in _SHELL_COMMAND_SPLIT_RE.split(command):
+        words = _shell_words(segment.strip())
+        if len(words) >= 2 and words[0] == "git" and words[1] == "clone":
+            meaningful_args = _meaningful_git_clone_args(words[2:])
+            if len(meaningful_args) >= 2 and _normalize_path_for_compare(meaningful_args[-1]) in task_paths:
+                return BridgeError(
+                    "unsafe_clone_to_requested_local_path",
+                    "git clone targets the local path named by the task. Inspect the existing local repository first with git -C <path> remote -v and git -C <path> status before cloning or replacing it.",
+                    repairable=True,
+                )
+    return None
+
+
+def _looks_like_update_existing_repo_task(text: str) -> bool:
+    lowered = (text or "").lower()
+    if not _WINDOWS_DRIVE_PATH_RE.search(text or ""):
+        return False
+    return any(marker in lowered for marker in ("更新", "update", "pull", "sync", "upgrade"))
+
+
+def _normalize_path_for_compare(path: str) -> str:
+    return (path or "").strip().strip("\"'").replace("\\", "/").rstrip("/").lower()
 
 
 def _shell_words(segment: str) -> list[str]:
