@@ -1149,6 +1149,36 @@ def test_tool_bridge_rewrites_terminal_tool_name_to_bash_without_prefixing_wrapp
     ]
 
 
+def test_tool_bridge_normalizes_windows_paths_in_bash_command() -> None:
+    context = build_context(
+        [
+            {
+                "type": "function",
+                "function": {
+                    "name": "Bash",
+                    "description": "Run shell commands",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"command": {"type": "string"}},
+                        "required": ["command"],
+                    },
+                },
+            }
+        ],
+        ToolBridgeConfig(exposure_policy="all"),
+    )
+
+    result = parse_tool_response(
+        '```tool_json\n{"calls":[{"id":"call_1","name":"Bash","input":{"command":"cd E:\\\\ProjectX\\\\mindcraft\\\\MediaCrawler && git fetch origin && git status"}}]}\n```',
+        context,
+    )
+
+    assert result.error is None
+    assert [(call.id, call.name, call.input) for call in result.tool_calls] == [
+        ("call_1", "Bash", {"command": "cd E:/ProjectX/mindcraft/MediaCrawler && git fetch origin && git status"})
+    ]
+
+
 def test_tool_bridge_does_not_rewrite_cli_name_without_bash() -> None:
     context = build_context(
         [

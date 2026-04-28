@@ -46,6 +46,8 @@ _DEFERRED_TOOL_ACTION_RE = re.compile(
     r")",
     re.IGNORECASE | re.DOTALL,
 )
+_QUOTED_WINDOWS_PATH_RE = re.compile(r"(?P<quote>[\"'])(?P<path>[A-Za-z]:\\[^\"'\r\n]+)(?P=quote)")
+_UNQUOTED_WINDOWS_PATH_RE = re.compile(r"(?<![\w/])(?P<path>[A-Za-z]:\\[^\s&|;<>]*)")
 _READ_ONLY_PREFIXES = ("read", "list", "search", "fetch", "get", "show", "find", "query")
 _READ_ONLY_NAMES = frozenset(
     {
@@ -1002,6 +1004,7 @@ def _normalize_candidates(candidates: list[Any], context: ToolBridgeContext) -> 
                 expensive_glob = _expensive_glob_message(canonical_name, normalized.input)
                 if expensive_glob:
                     return [], BridgeError("expensive_tool_input", expensive_glob, repairable=True)
+            normalized = _normalize_shell_tool_command(normalized, canonical_name, context.tools)
             call_id = normalized.id or f"call_web_{len(out) + 1}"
             if call_id in seen_ids:
                 return [], BridgeError("duplicate_tool_call_id", f"重复的工具调用 id：{call_id}")
@@ -1029,8 +1032,24 @@ def _safe_replacement_for_cli_tool(call: ToolCallDraft, tools: list[ToolSpec]) -
     return ToolCallDraft(
         id=call.id,
         name=bash_tool.name,
-        input={_shell_command_key(bash_tool): command},
+        input={_shell_command_key(bash_tool): _normalize_windows_paths_for_bash(command)},
     )
+
+
+def _normalize_shell_tool_command(call: ToolCallDraft, canonical_name: str, tools: list[ToolSpec]) -> ToolCallDraft:
+    if not _is_bash_tool_name(canonical_name):
+        return call
+    bash_tool = next((tool for tool in tools if tool.name == canonical_name), None)
+    command_key = _shell_command_key(bash_tool) if bash_tool else "command"
+    command = call.input.get(command_key)
+    if not isinstance(command, str):
+        return call
+    normalized = _normalize_windows_paths_for_bash(command)
+    if normalized == command:
+        return call
+    updated = dict(call.input)
+    updated[command_key] = normalized
+    return ToolCallDraft(id=call.id, name=call.name, input=updated)
 
 
 def _is_cli_tool_name(name: str) -> bool:
@@ -1066,11 +1085,15 @@ def _is_cli_tool_name(name: str) -> bool:
 
 def _select_bash_tool(tools: list[ToolSpec]) -> ToolSpec | None:
     for tool in tools:
-        lowered = tool.name.strip().lower()
-        compact = re.sub(r"[^a-z0-9]+", "", lowered)
-        if lowered == "bash" or compact == "bash":
+        if _is_bash_tool_name(tool.name):
             return tool
     return None
+
+
+def _is_bash_tool_name(name: str) -> bool:
+    lowered = (name or "").strip().lower()
+    compact = re.sub(r"[^a-z0-9]+", "", lowered)
+    return lowered == "bash" or compact == "bash"
 
 
 def _cli_tool_command(name: str, input_value: dict[str, Any]) -> str:
@@ -1121,6 +1144,21 @@ def _shell_command_key(tool: ToolSpec) -> str:
             if key in properties:
                 return key
     return "command"
+
+
+def _normalize_windows_paths_for_bash(command: str) -> str:
+    def replace_quoted(match: re.Match[str]) -> str:
+        return f"{match.group('quote')}{_windows_path_to_bash_path(match.group('path'))}{match.group('quote')}"
+
+    def replace_unquoted(match: re.Match[str]) -> str:
+        return _windows_path_to_bash_path(match.group("path"))
+
+    normalized = _QUOTED_WINDOWS_PATH_RE.sub(replace_quoted, command)
+    return _UNQUOTED_WINDOWS_PATH_RE.sub(replace_unquoted, normalized)
+
+
+def _windows_path_to_bash_path(path: str) -> str:
+    return path.replace("\\", "/")
 
 
 def _safe_replacement_for_expensive_glob(
