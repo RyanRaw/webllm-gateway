@@ -2635,6 +2635,71 @@ def test_anthropic_messages_routes_qwen_coder_direct_provider(tmp_path: Path) ->
     assert _FakeQwenCoderClient.captured_payload["model"] == "qwen-coder/qwen-coder-plus"
 
 
+def test_qwen_coder_keeps_tool_bridge_for_windows_path_update_task(tmp_path: Path) -> None:
+    seen: dict[str, Any] = {}
+
+    class CapturingQwenCoderClient:
+        def __init__(self, credential: dict[str, Any], http_client: httpx.Client | None = None) -> None:
+            self.credential = credential
+
+        def chat_completions(self, payload: dict[str, Any]) -> dict[str, Any]:
+            seen["payload"] = payload
+            return _openai_response(
+                '```tool_json\n{"calls":[{"id":"call_1","name":"Bash","input":{"command":"cd E:\\\\ProjectX\\\\mindcraft\\\\MediaCrawler && git status --short"}}]}\n```'
+            )
+
+    config = GatewayConfig(
+        server=ServerConfig(api_key="local-dev-key"),
+        upstream=UpstreamConfig(base_url="http://upstream.test/v1", model="web-model"),
+        provider_runtime=ProviderRuntimeConfig(native_web_search_policy="auto"),
+        tool_bridge=ToolBridgeConfig(activation_policy="auto", exposure_policy="all"),
+    )
+    client = TestClient(
+        create_app(
+            config=config,
+            credential_store=_qwen_coder_credential_store(tmp_path),
+            qwen_coder_client_factory=CapturingQwenCoderClient,
+            http_client=_not_found_client(),
+        )
+    )
+
+    response = client.post(
+        "/v1/messages",
+        headers={**_headers(), "anthropic-version": "2023-06-01"},
+        json={
+            "model": "qwen-coder/qwen-coder-plus",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": r"E:\ProjectX\mindcraft\MediaCrawler 这个原始的github项目帮我更新一下",
+                }
+            ],
+            "tools": [
+                {"name": "Bash", "description": "Run shell commands", "input_schema": {"type": "object"}},
+                {"name": "web-search", "description": "Search the web", "input_schema": {"type": "object"}},
+            ],
+            "max_tokens": 1024,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = seen["payload"]
+    assert payload.get("_webai_native_web_search") is False
+    assert "tools" not in payload
+    prompt = "\n".join(str(message.get("content", "")) for message in payload["messages"])
+    assert "WebAI Gateway's strict tool bridge" in prompt
+    assert '"name": "Bash"' in prompt
+    assert '"name": "web-search"' not in prompt
+    assert response.json()["content"] == [
+        {
+            "type": "tool_use",
+            "id": "toolu_call_1",
+            "name": "Bash",
+            "input": {"command": "cd E:/ProjectX/mindcraft/MediaCrawler && git status --short"},
+        }
+    ]
+
+
 def test_qwen_coder_provider_does_not_claim_gateway_mcp_support() -> None:
     provider = PROVIDERS["qwen-coder"]
 

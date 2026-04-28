@@ -16,6 +16,7 @@ from webai_gateway.tool_bridge import (
     build_repair_messages,
     extract_tool_calls,
     parse_tool_response,
+    prefer_local_tools_for_local_agent_task,
     prepare_openai_messages,
     should_enable_native_web_search,
     should_bridge_tools,
@@ -93,6 +94,8 @@ def build_upstream_payload(
     )
     model = str(body.get("model") or config.upstream.model or "")
     bridge_context = build_context(tools, config.tool_bridge, mode=bridge_mode, model=model)
+    if bridge:
+        bridge_context = prefer_local_tools_for_local_agent_task(bridge_context, body.get("messages"))
     allowed_tools: set[str] = set()
     allowed_tools = bridge_context.allowed_names
     payload["model"] = model

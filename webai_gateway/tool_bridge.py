@@ -226,6 +226,20 @@ def build_context(
     return ToolBridgeContext(enabled=bool(specs) and bridge_mode != "off", mode=bridge_mode, tools=specs, options=cfg)
 
 
+def prefer_local_tools_for_local_agent_task(context: ToolBridgeContext, messages: Any) -> ToolBridgeContext:
+    if not context.enabled or not _looks_like_local_agent_task(_latest_user_text(messages)):
+        return context
+    local_tools = [tool for tool in context.tools if _provider_search_tool_score(tool) <= 0]
+    if not local_tools or len(local_tools) == len(context.tools):
+        return context
+    return ToolBridgeContext(
+        enabled=bool(local_tools) and context.mode != "off",
+        mode=context.mode,
+        tools=local_tools,
+        options=context.options,
+    )
+
+
 def normalize_openai_tools(tools: Any, *, max_tools: int = 32) -> list[ToolSpec]:
     if not isinstance(tools, list):
         return []
