@@ -42,7 +42,8 @@ _DEFERRED_TOOL_ACTION_RE = re.compile(
     r"(?:我(?:来|会|将|先|可以)?|让我|首先|先|需要|准备|接下来).{0,40}"
     r"(?:研究|查看|读取|检查|搜索|检索|分析|了解|调查|梳理|打开|访问)"
     r"|(?:i(?:'ll| will)|i’ll|let me|first|next|i need to|i am going to|i'm going to).{0,60}"
-    r"(?:inspect|read|search|check|review|analy[sz]e|look up|investigate|open|access)"
+    r"(?:inspect|read|search|check|review|analy[sz]e|look up|investigate|open|access|execute|run|update|pull|sync|stash|reset|apply|merge|push|commit)"
+    r"|(?:我(?:来|会|将)|让我|现在|接下来).{0,60}(?:执行|运行|更新|拉取|重置|合并|暂存|应用|删除)"
     r")",
     re.IGNORECASE | re.DOTALL,
 )
@@ -1042,7 +1043,7 @@ def build_repair_messages(messages: list[dict[str, Any]], bad_text: str, error: 
         f"Error: {reason}.\n"
         "The listed tools are available through the downstream client, not your own runtime. "
         "Do not say tools do not exist. Do not say you cannot access files or commands. "
-        "If your previous answer said you would research, inspect, read, search, check, or analyze something, it was incomplete because it did not request a tool. "
+        "If your previous answer said you would research, inspect, read, search, check, analyze, execute, run, update, pull, reset, or apply something, it was incomplete because it did not request a tool. "
         "没有发起工具调用时，不要说“我先研究/让我查看/正在搜索”。 "
         "If the task needs a listed tool, request it using the protocol below.\n"
         "Rewrite only one valid tool_json fenced block. Do not output explanation text. Required format:\n"
