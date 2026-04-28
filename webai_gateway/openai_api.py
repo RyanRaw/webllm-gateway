@@ -13,6 +13,7 @@ from webai_gateway.tool_bridge import (
     BridgeResult,
     ToolBridgeContext,
     build_context,
+    build_local_repo_preflight_tool_call,
     build_repair_messages,
     extract_tool_calls,
     parse_tool_response,
@@ -109,6 +110,29 @@ def build_upstream_payload(
     elif native_web_search:
         payload["messages"] = _with_native_web_search_instruction(payload.get("messages"))
     return payload, bridge, allowed_tools, bridge_context
+
+
+def build_preflight_chat_response(model: str, bridge_context: ToolBridgeContext) -> dict[str, Any] | None:
+    call = build_local_repo_preflight_tool_call(bridge_context)
+    if call is None:
+        return None
+    return {
+        "id": f"chatcmpl-{uuid.uuid4().hex}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": to_openai_tool_calls([call]),
+                },
+            }
+        ],
+    }
 
 
 def should_retry_native_web_search_response(data: dict[str, Any]) -> bool:

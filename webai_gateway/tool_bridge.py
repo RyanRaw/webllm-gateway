@@ -164,6 +164,7 @@ class ToolBridgeContext:
     tools: list[ToolSpec]
     options: ToolBridgeConfig
     task_text: str = ""
+    has_tool_loop: bool = False
 
     @property
     def allowed_names(self) -> set[str]:
@@ -239,8 +240,16 @@ def build_context(
 
 def prefer_local_tools_for_local_agent_task(context: ToolBridgeContext, messages: Any) -> ToolBridgeContext:
     latest = _latest_user_text(messages)
+    has_tool_loop = _messages_have_tool_loop(messages)
     if not context.enabled or not _looks_like_local_agent_task(latest):
-        return context
+        return ToolBridgeContext(
+            enabled=context.enabled,
+            mode=context.mode,
+            tools=context.tools,
+            options=context.options,
+            task_text=context.task_text,
+            has_tool_loop=has_tool_loop,
+        )
     local_tools = [tool for tool in context.tools if _provider_search_tool_score(tool) <= 0]
     if not local_tools:
         return ToolBridgeContext(
@@ -249,6 +258,7 @@ def prefer_local_tools_for_local_agent_task(context: ToolBridgeContext, messages
             tools=context.tools,
             options=context.options,
             task_text=latest,
+            has_tool_loop=has_tool_loop,
         )
     return ToolBridgeContext(
         enabled=bool(local_tools) and context.mode != "off",
@@ -256,6 +266,28 @@ def prefer_local_tools_for_local_agent_task(context: ToolBridgeContext, messages
         tools=local_tools,
         options=context.options,
         task_text=latest,
+        has_tool_loop=has_tool_loop,
+    )
+
+
+def build_local_repo_preflight_tool_call(context: ToolBridgeContext) -> ToolCallDraft | None:
+    if not context.enabled or context.has_tool_loop:
+        return None
+    if not _looks_like_update_existing_repo_task(context.task_text):
+        return None
+    tool = _select_shell_execution_tool(context.tools)
+    if not tool:
+        return None
+    match = _WINDOWS_DRIVE_PATH_RE.search(context.task_text)
+    if not match:
+        return None
+    repo_path = _windows_path_to_bash_path(match.group("path").strip("\"'"))
+    repo_arg = shlex.quote(repo_path) if re.search(r"\s", repo_path) else repo_path
+    command = f"git -C {repo_arg} remote -v && git -C {repo_arg} status --short"
+    return ToolCallDraft(
+        id="call_web_preflight_1",
+        name=tool.name,
+        input={_shell_command_key(tool): command},
     )
 
 
@@ -1095,10 +1127,10 @@ def _safe_replacement_for_cli_tool(call: ToolCallDraft, tools: list[ToolSpec]) -
 
 
 def _normalize_shell_tool_command(call: ToolCallDraft, canonical_name: str, tools: list[ToolSpec]) -> ToolCallDraft:
-    if not _is_bash_tool_name(canonical_name):
+    shell_tool = _tool_by_name(tools, canonical_name)
+    if not _is_shell_execution_tool(shell_tool, canonical_name):
         return call
-    bash_tool = next((tool for tool in tools if tool.name == canonical_name), None)
-    command_key = _shell_command_key(bash_tool) if bash_tool else "command"
+    command_key = _shell_command_key(shell_tool) if shell_tool else "command"
     command = call.input.get(command_key)
     if not isinstance(command, str):
         return call
@@ -1111,13 +1143,13 @@ def _normalize_shell_tool_command(call: ToolCallDraft, canonical_name: str, tool
 
 
 def _shell_tool_command_error(call: ToolCallDraft, canonical_name: str, context: ToolBridgeContext) -> BridgeError | None:
-    if not _is_bash_tool_name(canonical_name):
+    shell_tool = _tool_by_name(context.tools, canonical_name)
+    if not _is_shell_execution_tool(shell_tool, canonical_name):
         return None
-    bash_tool = next((tool for tool in context.tools if tool.name == canonical_name), None)
-    command_key = _shell_command_key(bash_tool) if bash_tool else "command"
+    command_key = _shell_command_key(shell_tool) if shell_tool else "command"
     command = call.input.get(command_key)
     if not isinstance(command, str) or not command.strip():
-        return BridgeError("incomplete_shell_command", "Bash command is empty; provide a complete command string.", repairable=True)
+        return BridgeError("incomplete_shell_command", "Shell command is empty; provide a complete command string.", repairable=True)
     return _incomplete_shell_command_error(command) or _unsafe_contextual_shell_command_error(command, context)
 
 
@@ -1129,6 +1161,8 @@ def _is_cli_tool_name(name: str) -> bool:
         "deno",
         "docker",
         "docker-compose",
+        "exec",
+        "execute",
         "gh",
         "git",
         "go",
@@ -1157,6 +1191,36 @@ def _select_bash_tool(tools: list[ToolSpec]) -> ToolSpec | None:
         if _is_bash_tool_name(tool.name):
             return tool
     return None
+
+
+def _select_shell_execution_tool(tools: list[ToolSpec]) -> ToolSpec | None:
+    bash_tool = _select_bash_tool(tools)
+    if bash_tool:
+        return bash_tool
+    for tool in tools:
+        if _is_shell_execution_tool(tool, tool.name):
+            return tool
+    return None
+
+
+def _tool_by_name(tools: list[ToolSpec], name: str) -> ToolSpec | None:
+    return next((tool for tool in tools if tool.name == name), None)
+
+
+def _is_shell_execution_tool(tool: ToolSpec | None, name: str) -> bool:
+    lowered = (name or "").strip().lower()
+    compact = re.sub(r"[^a-z0-9]+", "", lowered)
+    if compact in {"bash", "exec", "execute", "shell", "terminal", "command", "runcommand", "powershell", "cmd"}:
+        return True
+    if not tool or not _has_shell_command_property(tool):
+        return False
+    description = (tool.description or "").lower()
+    return any(marker in description for marker in ("shell", "terminal", "command", "execute", "run command", "bash", "powershell", "cmd"))
+
+
+def _has_shell_command_property(tool: ToolSpec) -> bool:
+    properties = tool.input_schema.get("properties") if isinstance(tool.input_schema, dict) else None
+    return isinstance(properties, dict) and any(key in properties for key in ("command", "cmd"))
 
 
 def _is_bash_tool_name(name: str) -> bool:
@@ -1196,7 +1260,9 @@ def _cli_tool_command(name: str, input_value: dict[str, Any]) -> str:
 
 
 def _is_shell_wrapper_tool_name(name: str) -> bool:
-    return (name or "").strip().lower() in {"shell", "terminal"}
+    lowered = (name or "").strip().lower()
+    compact = re.sub(r"[^a-z0-9]+", "", lowered)
+    return compact in {"exec", "execute", "shell", "terminal", "command", "runcommand"}
 
 
 def _command_starts_with_cli_name(command: str, name: str) -> bool:

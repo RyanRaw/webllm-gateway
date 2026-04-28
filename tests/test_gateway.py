@@ -1179,6 +1179,36 @@ def test_tool_bridge_normalizes_windows_paths_in_bash_command() -> None:
     ]
 
 
+def test_tool_bridge_normalizes_windows_paths_in_exec_command() -> None:
+    context = build_context(
+        [
+            {
+                "type": "function",
+                "function": {
+                    "name": "Exec",
+                    "description": "Execute a shell command",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"command": {"type": "string"}},
+                        "required": ["command"],
+                    },
+                },
+            }
+        ],
+        ToolBridgeConfig(exposure_policy="all"),
+    )
+
+    result = parse_tool_response(
+        '```tool_json\n{"calls":[{"id":"call_1","name":"Exec","input":{"command":"cd E:\\\\ProjectX\\\\mindcraft\\\\MediaCrawler && git pull origin main"}}]}\n```',
+        context,
+    )
+
+    assert result.error is None
+    assert [(call.id, call.name, call.input) for call in result.tool_calls] == [
+        ("call_1", "Exec", {"command": "cd E:/ProjectX/mindcraft/MediaCrawler && git pull origin main"})
+    ]
+
+
 def test_tool_bridge_rejects_incomplete_git_clone_command() -> None:
     context = build_context(
         [
@@ -2665,6 +2695,40 @@ def test_anthropic_messages_routes_qwen_coder_direct_provider(tmp_path: Path) ->
     assert _FakeQwenCoderClient.captured_payload["model"] == "qwen-coder/qwen-coder-plus"
 
 
+def _repo_update_after_tool_loop_messages() -> list[dict[str, Any]]:
+    return [
+        {
+            "role": "user",
+            "content": r"E:\ProjectX\mindcraft\MediaCrawler update this original GitHub repository",
+        },
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_probe",
+                    "name": "Bash",
+                    "input": {"command": "git -C E:/ProjectX/mindcraft/MediaCrawler remote -v"},
+                }
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_probe",
+                    "content": "origin https://github.com/NanmiCoder/MediaCrawler.git (fetch)",
+                }
+            ],
+        },
+        {
+            "role": "user",
+            "content": r"Continue update E:\ProjectX\mindcraft\MediaCrawler repository",
+        },
+    ]
+
+
 def test_qwen_coder_keeps_tool_bridge_for_windows_path_update_task(tmp_path: Path) -> None:
     seen: dict[str, Any] = {}
 
@@ -2701,7 +2765,7 @@ def test_qwen_coder_keeps_tool_bridge_for_windows_path_update_task(tmp_path: Pat
             "messages": [
                 {
                     "role": "user",
-                    "content": r"E:\ProjectX\mindcraft\MediaCrawler 这个原始的github项目帮我更新一下",
+                    "content": r"E:\ProjectX\mindcraft\MediaCrawler inspect this local repository",
                 }
             ],
             "tools": [
@@ -2726,6 +2790,58 @@ def test_qwen_coder_keeps_tool_bridge_for_windows_path_update_task(tmp_path: Pat
             "id": "toolu_call_1",
             "name": "Bash",
             "input": {"command": "cd E:/ProjectX/mindcraft/MediaCrawler && git status --short"},
+        }
+    ]
+
+
+def test_qwen_coder_local_repo_update_preflights_before_model_guess(tmp_path: Path) -> None:
+    class UnexpectedQwenCoderClient:
+        def __init__(self, credential: dict[str, Any], http_client: httpx.Client | None = None) -> None:
+            self.credential = credential
+
+        def chat_completions(self, payload: dict[str, Any]) -> dict[str, Any]:
+            raise AssertionError("local repository preflight should not call the web model")
+
+    config = GatewayConfig(
+        server=ServerConfig(api_key="local-dev-key"),
+        upstream=UpstreamConfig(base_url="http://upstream.test/v1", model="web-model"),
+        provider_runtime=ProviderRuntimeConfig(native_web_search_policy="auto"),
+        tool_bridge=ToolBridgeConfig(activation_policy="auto", exposure_policy="all"),
+    )
+    client = TestClient(
+        create_app(
+            config=config,
+            credential_store=_qwen_coder_credential_store(tmp_path),
+            qwen_coder_client_factory=UnexpectedQwenCoderClient,
+            http_client=_not_found_client(),
+        )
+    )
+
+    response = client.post(
+        "/v1/messages",
+        headers={**_headers(), "anthropic-version": "2023-06-01"},
+        json={
+            "model": "qwen-coder/qwen-coder-plus",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": r"E:\ProjectX\mindcraft\MediaCrawler update this original GitHub repository",
+                }
+            ],
+            "tools": [{"name": "Bash", "description": "Run shell commands", "input_schema": {"type": "object"}}],
+            "max_tokens": 1024,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["content"] == [
+        {
+            "type": "tool_use",
+            "id": "toolu_call_web_preflight_1",
+            "name": "Bash",
+            "input": {
+                "command": "git -C E:/ProjectX/mindcraft/MediaCrawler remote -v && git -C E:/ProjectX/mindcraft/MediaCrawler status --short"
+            },
         }
     ]
 
@@ -2767,9 +2883,7 @@ def test_qwen_coder_repairs_incomplete_git_clone_before_tool_use(tmp_path: Path)
         headers={**_headers(), "anthropic-version": "2023-06-01"},
         json={
             "model": "qwen-coder/qwen-coder-plus",
-            "messages": [
-                {"role": "user", "content": r"E:\ProjectX\mindcraft\MediaCrawler 这个项目更新到 https://github.com/NanmiCoder/MediaCrawler"}
-            ],
+            "messages": _repo_update_after_tool_loop_messages(),
             "tools": [{"name": "Bash", "description": "Run shell commands", "input_schema": {"type": "object"}}],
             "max_tokens": 1024,
         },
@@ -2828,7 +2942,7 @@ def test_qwen_coder_repairs_premature_repo_clarification_to_local_probe(tmp_path
         headers={**_headers(), "anthropic-version": "2023-06-01"},
         json={
             "model": "qwen-coder/qwen-coder-plus",
-            "messages": [{"role": "user", "content": r"E:\ProjectX\mindcraft\MediaCrawler 这个原始的github项目帮我更新一下"}],
+            "messages": _repo_update_after_tool_loop_messages(),
             "tools": [
                 {"name": "Bash", "description": "Run shell commands", "input_schema": {"type": "object"}},
                 {"name": "Read", "description": "Read files", "input_schema": {"type": "object"}},
@@ -2890,7 +3004,7 @@ def test_qwen_coder_repairs_clone_to_requested_local_path_to_probe(tmp_path: Pat
         headers={**_headers(), "anthropic-version": "2023-06-01"},
         json={
             "model": "qwen-coder/qwen-coder-plus",
-            "messages": [{"role": "user", "content": r"E:\ProjectX\mindcraft\MediaCrawler 这个原始的github项目帮我更新一下"}],
+            "messages": _repo_update_after_tool_loop_messages(),
             "tools": [{"name": "Bash", "description": "Run shell commands", "input_schema": {"type": "object"}}],
             "max_tokens": 1024,
         },

@@ -19,6 +19,7 @@ from webai_gateway.openai_api import (
     bridge_error_headers,
     build_incomplete_response_retry_payload,
     build_native_web_search_retry_payload,
+    build_preflight_chat_response,
     build_repair_payload,
     build_tool_refusal_recovery_payload,
     build_unknown_tool_recovery_payload,
@@ -308,6 +309,9 @@ def create_app(
         if is_qwen_coder_model(body.get("model")):
             return await run_in_threadpool(_qwen_coder_chat, app, client, body, cfg)
         payload, bridge, allowed_tools, bridge_context = build_upstream_payload(body, cfg)
+        preflight = _local_preflight_response(body, str(payload.get("model") or cfg.upstream.model), bridge_context)
+        if preflight is not None:
+            return preflight
         response = await run_in_threadpool(post_upstream, client, cfg, payload)
         response.raise_for_status()
         if bool(body.get("stream")):
@@ -376,32 +380,37 @@ def create_app(
             parsed = await run_in_threadpool(_qwen_coder_chat_payload, app, client, openai_body, cfg)
         else:
             payload, bridge, allowed_tools, bridge_context = build_upstream_payload(openai_body, cfg)
-            response = await run_in_threadpool(post_upstream, client, cfg, payload)
-            response.raise_for_status()
-            data = response.json()
-            if not isinstance(data, dict):
-                raise HTTPException(status_code=502, detail="Upstream response must be a JSON object")
-            parsed, bridge_result = parse_chat_response(
-                data,
-                bridge=bridge,
-                allowed_tools=allowed_tools,
-                model=str(openai_body.get("model") or cfg.upstream.model),
-                bridge_context=bridge_context,
-                return_bridge_result=True,
-            )
-            if bridge_result.error and bridge_result.error.repairable:
-                repair_response = await run_in_threadpool(post_upstream, client, cfg, build_repair_payload(payload, bridge_result))
-                repair_response.raise_for_status()
-                repair_data = repair_response.json()
-                if isinstance(repair_data, dict):
-                    parsed, bridge_result = parse_chat_response(
-                        repair_data,
-                        bridge=bridge,
-                        allowed_tools=allowed_tools,
-                        model=str(openai_body.get("model") or cfg.upstream.model),
-                        bridge_context=bridge_context,
-                        return_bridge_result=True,
-                    )
+            model = str(openai_body.get("model") or cfg.upstream.model)
+            preflight_data = build_preflight_chat_response(model, bridge_context)
+            if preflight_data is not None:
+                parsed = preflight_data
+            else:
+                response = await run_in_threadpool(post_upstream, client, cfg, payload)
+                response.raise_for_status()
+                data = response.json()
+                if not isinstance(data, dict):
+                    raise HTTPException(status_code=502, detail="Upstream response must be a JSON object")
+                parsed, bridge_result = parse_chat_response(
+                    data,
+                    bridge=bridge,
+                    allowed_tools=allowed_tools,
+                    model=model,
+                    bridge_context=bridge_context,
+                    return_bridge_result=True,
+                )
+                if bridge_result.error and bridge_result.error.repairable:
+                    repair_response = await run_in_threadpool(post_upstream, client, cfg, build_repair_payload(payload, bridge_result))
+                    repair_response.raise_for_status()
+                    repair_data = repair_response.json()
+                    if isinstance(repair_data, dict):
+                        parsed, bridge_result = parse_chat_response(
+                            repair_data,
+                            bridge=bridge,
+                            allowed_tools=allowed_tools,
+                            model=model,
+                            bridge_context=bridge_context,
+                            return_bridge_result=True,
+                        )
         anthropic_message = openai_response_to_anthropic(
             parsed,
             original_model=str(body.get("model") or openai_body.get("model") or cfg.upstream.model),
@@ -530,6 +539,21 @@ def _build_direct_payload(
     return payload, bridge, allowed_tools, bridge_context
 
 
+def _local_preflight_response(body: dict[str, Any], model: str, bridge_context: Any) -> Response | None:
+    preflight_data = build_preflight_chat_response(model, bridge_context)
+    if preflight_data is None:
+        return None
+    if bool(body.get("stream")):
+        choices = preflight_data.get("choices") if isinstance(preflight_data.get("choices"), list) else []
+        msg = choices[0].get("message") if choices and isinstance(choices[0], dict) else {}
+        tool_calls = msg.get("tool_calls") if isinstance(msg, dict) and isinstance(msg.get("tool_calls"), list) else []
+        return Response(
+            build_openai_tool_calls_sse(tool_calls, model=model),
+            media_type="text/event-stream",
+        )
+    return JSONResponse(preflight_data)
+
+
 def _parse_bridge_chat_data(
     data: dict[str, Any],
     *,
@@ -645,6 +669,9 @@ def _deepseek_web_chat(app: FastAPI, client: httpx.Client, body: dict[str, Any],
         default_model="deepseek-web/deepseek-chat",
     )
     model = str(payload.get("model") or "deepseek-web/deepseek-chat")
+    preflight = _local_preflight_response(body, model, bridge_context)
+    if preflight is not None:
+        return preflight
     try:
         web_client = app.state.deepseek_client_factory(credential, http_client=client)
         data = web_client.chat_completions(payload)
@@ -697,6 +724,9 @@ def _qwen_web_chat(app: FastAPI, client: httpx.Client, body: dict[str, Any], con
         provider_native_web_search=True,
     )
     model = str(payload.get("model") or "qwen-web/qwen3.5-plus")
+    preflight = _local_preflight_response(body, model, bridge_context)
+    if preflight is not None:
+        return preflight
     try:
         web_client = None
         web_client = _build_qwen_web_client(app.state.qwen_client_factory, credential, client, config)
@@ -764,6 +794,9 @@ def _qwen_coder_chat(app: FastAPI, client: httpx.Client, body: dict[str, Any], c
         provider_native_web_search=True,
     )
     model = str(payload.get("model") or "qwen-coder/qwen-coder-plus")
+    preflight = _local_preflight_response(body, model, bridge_context)
+    if preflight is not None:
+        return preflight
     try:
         web_client = None
         web_client = _build_qwen_coder_client(app.state.qwen_coder_client_factory, credential, client, config)
