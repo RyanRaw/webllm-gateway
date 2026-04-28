@@ -47,10 +47,18 @@ _DEFERRED_TOOL_ACTION_RE = re.compile(
     r")",
     re.IGNORECASE | re.DOTALL,
 )
-_QUOTED_WINDOWS_PATH_RE = re.compile(r"(?P<quote>[\"'])(?P<path>[A-Za-z]:\\[^\"'\r\n]+)(?P=quote)")
-_UNQUOTED_WINDOWS_PATH_RE = re.compile(r"(?<![\w/])(?P<path>[A-Za-z]:\\[^\s&|;<>]*)")
+_QUOTED_WINDOWS_PATH_RE = re.compile(r"(?P<quote>[\"'])(?P<path>[A-Za-z]:[\\/][^\"'\r\n]+)(?P=quote)")
+_UNQUOTED_WINDOWS_PATH_RE = re.compile(r"(?<![\w/])(?P<path>[A-Za-z]:[\\/][^\s&|;<>]*)")
 _WINDOWS_DRIVE_PATH_RE = re.compile(r"(?<![\w/])(?P<path>[A-Za-z]:[\\/][^\s\"'&|;<>]*)")
 _SHELL_COMMAND_SPLIT_RE = re.compile(r"\s*(?:&&|\|\||;)\s*")
+_SHELL_COMMAND_LINE_RE = re.compile(
+    r"(?m)^\s*(?P<command>(?:git|gh|bash|cmd|powershell|pwsh|python|python3|uv|npm|pnpm|npx|node|yarn|pytest|pip|pip3|ruff)\b[^\r\n]*)\s*$"
+)
+_SHELL_COMMAND_INTENT_RE = re.compile(
+    r"\b(?:i(?:'ll| will)|let me|this will|execute|run|update|pull|reset|stash|discard|apply|merge|push|commit|local changes|modifications)\b"
+    r"|(?:执行|运行|更新|拉取|重置|删除|本地修改)",
+    re.IGNORECASE,
+)
 _CLARIFICATION_REQUEST_RE = re.compile(
     r"(\?|？|请(?:确认|提供|说明|告诉)|需要(?:确认|提供|说明)|which|what|please\s+(?:confirm|provide|specify))",
     re.IGNORECASE,
@@ -556,6 +564,12 @@ def parse_tool_response(text: str, context: ToolBridgeContext) -> BridgeResult:
                 warning="provider_search_markup_without_search_tool",
                 raw_content=raw,
             )
+    used_unwrapped_shell = False
+    if not candidates:
+        shell_candidates = _extract_unwrapped_shell_command_candidates(raw, context)
+        if shell_candidates:
+            candidates.extend(shell_candidates)
+            used_unwrapped_shell = True
     if not candidates:
         warning = "tool_result_claim_without_tool_call" if _TOOL_RESULT_CLAIM_RE.search(raw) else None
         if _is_allowed_tool_denial(raw, context):
@@ -603,7 +617,7 @@ def parse_tool_response(text: str, context: ToolBridgeContext) -> BridgeResult:
     normalized, error = _normalize_candidates(candidates, context)
     if error is not None:
         return BridgeResult(content=raw, tool_calls=[], error=error, raw_content=raw)
-    if used_bare or used_embedded_json or marker_seen or used_summary or used_provider_search:
+    if used_bare or used_embedded_json or marker_seen or used_summary or used_provider_search or used_unwrapped_shell:
         return BridgeResult(content="", tool_calls=normalized, raw_content=raw)
     clean = _FENCED_TOOL_RE.sub("", raw)
     clean = _XML_TOOL_RE.sub("", clean)
@@ -1036,6 +1050,30 @@ def _looks_like_tool_json_candidate(value: Any) -> bool:
     return any(key in value for key in ("input", "args", "arguments")) or "arguments" in fn
 
 
+def _extract_unwrapped_shell_command_candidates(text: str, context: ToolBridgeContext) -> list[Any]:
+    shell_tool = _select_shell_execution_tool(context.tools)
+    if not shell_tool:
+        return []
+    if not (context.has_tool_loop or _looks_like_local_agent_task(context.task_text)):
+        return []
+    commands = [match.group("command").strip() for match in _SHELL_COMMAND_LINE_RE.finditer(text or "")]
+    if not commands:
+        return []
+    if len(commands) == 1 and not _SHELL_COMMAND_INTENT_RE.search(text or ""):
+        return []
+    return [
+        {
+            "calls": [
+                {
+                    "id": "call_web_shell_1",
+                    "name": shell_tool.name,
+                    "input": {_shell_command_key(shell_tool): " && ".join(commands)},
+                }
+            ]
+        }
+    ]
+
+
 def build_repair_messages(messages: list[dict[str, Any]], bad_text: str, error: BridgeError | None) -> list[dict[str, Any]]:
     reason = error.message if error else "tool call format is invalid"
     repair_instruction = (
@@ -1294,7 +1332,7 @@ def _normalize_windows_paths_for_bash(command: str) -> str:
 
 
 def _windows_path_to_bash_path(path: str) -> str:
-    return path.replace("\\", "/")
+    return re.sub(r"/+", "/", path.replace("\\", "/"))
 
 
 def _incomplete_shell_command_error(command: str) -> BridgeError | None:

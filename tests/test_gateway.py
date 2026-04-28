@@ -3075,9 +3075,7 @@ def test_qwen_coder_repairs_deferred_shell_execution_without_tool_call(tmp_path:
                     'git -C "E:/ProjectX/mindcraft/MediaCrawler" fetch origin\n'
                     'git -C "E:/ProjectX/mindcraft/MediaCrawler" reset --hard origin/main'
                 )
-            return _openai_response(
-                '```tool_json\n{"calls":[{"id":"call_1","name":"Bash","input":{"command":"git -C E:/ProjectX/mindcraft/MediaCrawler fetch origin && git -C E:/ProjectX/mindcraft/MediaCrawler reset --hard origin/main"}}]}\n```'
-            )
+            raise AssertionError("unwrapped shell commands should be converted without asking the web model to repair")
 
     config = GatewayConfig(
         server=ServerConfig(api_key="local-dev-key"),
@@ -3107,16 +3105,76 @@ def test_qwen_coder_repairs_deferred_shell_execution_without_tool_call(tmp_path:
     )
 
     assert response.status_code == 200
-    assert len(seen_payloads) == 2
-    retry_prompt = "\n".join(str(message.get("content", "")) for message in seen_payloads[1]["messages"])
-    assert "execute" in retry_prompt
+    assert len(seen_payloads) == 1
     assert response.json()["content"] == [
         {
             "type": "tool_use",
-            "id": "toolu_call_1",
+            "id": "toolu_call_web_shell_1",
             "name": "Bash",
             "input": {
-                "command": "git -C E:/ProjectX/mindcraft/MediaCrawler fetch origin && git -C E:/ProjectX/mindcraft/MediaCrawler reset --hard origin/main"
+                "command": 'git -C "E:/ProjectX/mindcraft/MediaCrawler" fetch origin && git -C "E:/ProjectX/mindcraft/MediaCrawler" reset --hard origin/main'
+            },
+        }
+    ]
+
+
+def test_qwen_coder_repairs_unwrapped_shell_command_block_without_tool_call(tmp_path: Path) -> None:
+    seen_payloads: list[dict[str, Any]] = []
+
+    class UnwrappedShellQwenCoderClient:
+        def __init__(self, credential: dict[str, Any], http_client: httpx.Client | None = None) -> None:
+            self.credential = credential
+
+        def chat_completions(self, payload: dict[str, Any]) -> dict[str, Any]:
+            seen_payloads.append(payload)
+            if len(seen_payloads) == 1:
+                return _openai_response(
+                    "I understand you'd like to discard the local changes and update the repository. "
+                    "Since you've confirmed it's okay to delete the local modifications, I'll use a simpler approach:\n\n"
+                    "# Discard all local changes and reset to match the remote\n"
+                    'git -C "E://ProjectX//mindcraft//MediaCrawler" reset --hard origin/main\n\n'
+                    "# Ensure we have the latest updates\n"
+                    'git -C "E://ProjectX//mindcraft//MediaCrawler" pull origin main\n\n'
+                    "This will completely discard your local changes and pull the 65 new commits."
+                )
+            raise AssertionError("unwrapped shell commands should be converted without asking the web model to repair")
+
+    config = GatewayConfig(
+        server=ServerConfig(api_key="local-dev-key"),
+        upstream=UpstreamConfig(base_url="http://upstream.test/v1", model="web-model"),
+        provider_runtime=ProviderRuntimeConfig(native_web_search_policy="auto"),
+        tool_bridge=ToolBridgeConfig(activation_policy="auto", exposure_policy="all"),
+    )
+    client = TestClient(
+        create_app(
+            config=config,
+            credential_store=_qwen_coder_credential_store(tmp_path),
+            qwen_coder_client_factory=UnwrappedShellQwenCoderClient,
+            http_client=_not_found_client(),
+        )
+    )
+
+    response = client.post(
+        "/v1/messages",
+        headers={**_headers(), "anthropic-version": "2023-06-01"},
+        json={
+            "model": "qwen-coder/qwen-coder-plus",
+            "messages": _repo_update_after_tool_loop_messages()
+            + [{"role": "user", "content": "好的，本地的修改可以删掉"}],
+            "tools": [{"name": "Bash", "description": "Run shell commands", "input_schema": {"type": "object"}}],
+            "max_tokens": 1024,
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(seen_payloads) == 1
+    assert response.json()["content"] == [
+        {
+            "type": "tool_use",
+            "id": "toolu_call_web_shell_1",
+            "name": "Bash",
+            "input": {
+                "command": 'git -C "E:/ProjectX/mindcraft/MediaCrawler" reset --hard origin/main && git -C "E:/ProjectX/mindcraft/MediaCrawler" pull origin main'
             },
         }
     ]
