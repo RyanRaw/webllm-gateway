@@ -1731,6 +1731,30 @@ def test_admin_routes_proxy_to_webai2api_sidecar_root(tmp_path: Path) -> None:
     assert seen["authorization"] == "Bearer webai2api-token"
 
 
+def test_admin_proxy_reports_sidecar_unavailable_without_crashing(tmp_path: Path) -> None:
+    native_dist = tmp_path / "webui" / "dist"
+    native_dist.mkdir(parents=True)
+    (native_dist / "index.html").write_text("<html>native</html>", encoding="utf-8")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("sidecar refused connection", request=request)
+
+    client = TestClient(
+        create_app(
+            config=_config(),
+            native_ui_dir=native_dist,
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+    )
+
+    response = client.get("/admin/status")
+
+    assert response.status_code == 502
+    body = response.json()
+    assert body["detail"]["code"] == "webai2api_sidecar_unavailable"
+    assert body["detail"]["upstream"] == "http://upstream.test/admin/status"
+
+
 def test_v1_routes_remain_gateway_owned_when_admin_proxy_exists(tmp_path: Path) -> None:
     native_dist = tmp_path / "webui" / "dist"
     native_dist.mkdir(parents=True)
@@ -2844,6 +2868,16 @@ def test_qwen_coder_local_repo_update_preflights_before_model_guess(tmp_path: Pa
             },
         }
     ]
+    events_response = client.get("/api/admin/tool-bridge/events")
+    assert events_response.status_code == 200
+    events = events_response.json()["events"]
+    assert events[-1]["kind"] == "local_repo_preflight"
+    assert events[-1]["model"] == "qwen-coder/qwen-coder-plus"
+    assert events[-1]["tool"] == "Bash"
+    assert events[-1]["commandPreview"] == (
+        "git -C E:/ProjectX/mindcraft/MediaCrawler remote -v && "
+        "git -C E:/ProjectX/mindcraft/MediaCrawler status --short"
+    )
 
 
 def test_qwen_coder_repairs_incomplete_git_clone_before_tool_use(tmp_path: Path) -> None:

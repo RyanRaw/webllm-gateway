@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 import inspect
 import json
 import secrets
@@ -52,6 +53,7 @@ from webai_gateway.web_auth import (
 
 
 LOCAL_ADMIN_HOSTS = {"127.0.0.1", "::1", "localhost", "testclient"}
+TOOL_BRIDGE_EVENT_LIMIT = 200
 
 
 def create_app(
@@ -80,6 +82,7 @@ def create_app(
     app.state.qwen_client_factory = qwen_client_factory or QwenWebClient
     app.state.qwen_coder_client_factory = qwen_coder_client_factory or QwenCoderClient
     app.state.web_auth_jobs = {}
+    app.state.tool_bridge_events = deque(maxlen=TOOL_BRIDGE_EVENT_LIMIT)
 
     static_dir = Path(__file__).with_name("static")
     webai2api_ui_dir = Path(native_ui_dir) if native_ui_dir is not None else _default_native_ui_dir()
@@ -129,6 +132,11 @@ def create_app(
     def admin_config(request: Request) -> dict[str, Any]:
         require_local_admin(request)
         return config_to_admin(current_config())
+
+    @app.get("/api/admin/tool-bridge/events")
+    def admin_tool_bridge_events(request: Request) -> dict[str, Any]:
+        require_local_admin(request)
+        return {"events": list(app.state.tool_bridge_events)}
 
     @app.get("/api/admin/onboarding")
     def admin_onboarding(request: Request) -> dict[str, Any]:
@@ -309,7 +317,7 @@ def create_app(
         if is_qwen_coder_model(body.get("model")):
             return await run_in_threadpool(_qwen_coder_chat, app, client, body, cfg)
         payload, bridge, allowed_tools, bridge_context = build_upstream_payload(body, cfg)
-        preflight = _local_preflight_response(body, str(payload.get("model") or cfg.upstream.model), bridge_context)
+        preflight = _local_preflight_response(app, body, str(payload.get("model") or cfg.upstream.model), bridge_context)
         if preflight is not None:
             return preflight
         response = await run_in_threadpool(post_upstream, client, cfg, payload)
@@ -383,6 +391,7 @@ def create_app(
             model = str(openai_body.get("model") or cfg.upstream.model)
             preflight_data = build_preflight_chat_response(model, bridge_context)
             if preflight_data is not None:
+                _record_tool_bridge_event(app, "local_repo_preflight", model=model, **_tool_call_event_fields(preflight_data))
                 parsed = preflight_data
             else:
                 response = await run_in_threadpool(post_upstream, client, cfg, payload)
@@ -479,13 +488,69 @@ async def _proxy_to_sidecar(client: httpx.Client, request: Request, root_url: st
         for key, value in request.headers.items()
         if key.lower() not in {"host", "content-length", "connection", "transfer-encoding"}
     }
-    upstream_response = await run_in_threadpool(client.request, request.method, target, content=body, headers=headers)
+    try:
+        upstream_response = await run_in_threadpool(client.request, request.method, target, content=body, headers=headers)
+    except httpx.HTTPError:
+        return JSONResponse(
+            {
+                "detail": {
+                    "code": "webai2api_sidecar_unavailable",
+                    "message": "WebAI2API sidecar 未启动或无法连接，请先启动 sidecar 后再刷新状态。",
+                    "upstream": target,
+                }
+            },
+            status_code=502,
+        )
     response_headers = {
         key: value
         for key, value in upstream_response.headers.items()
         if key.lower() not in {"content-length", "connection", "transfer-encoding"}
     }
     return Response(content=upstream_response.content, status_code=upstream_response.status_code, headers=response_headers)
+
+
+def _record_tool_bridge_event(app: FastAPI, kind: str, **fields: Any) -> None:
+    events = getattr(app.state, "tool_bridge_events", None)
+    if events is None:
+        return
+    event = {"at": utc_now(), "kind": kind}
+    for key, value in fields.items():
+        if value in (None, "", [], {}):
+            continue
+        event[key] = value
+    events.append(event)
+
+
+def _tool_call_event_fields(data: dict[str, Any]) -> dict[str, Any]:
+    choices = data.get("choices") if isinstance(data.get("choices"), list) else []
+    choice0 = choices[0] if choices and isinstance(choices[0], dict) else {}
+    message = choice0.get("message") if isinstance(choice0.get("message"), dict) else {}
+    tool_calls = message.get("tool_calls") if isinstance(message.get("tool_calls"), list) else []
+    if not tool_calls or not isinstance(tool_calls[0], dict):
+        return {}
+    call = tool_calls[0]
+    function = call.get("function") if isinstance(call.get("function"), dict) else {}
+    fields: dict[str, Any] = {
+        "tool": str(function.get("name") or ""),
+        "finishReason": str(choice0.get("finish_reason") or ""),
+    }
+    raw_args = function.get("arguments")
+    try:
+        args = json.loads(raw_args) if isinstance(raw_args, str) and raw_args.strip() else {}
+    except Exception:
+        args = {}
+    if isinstance(args, dict):
+        command = args.get("command") if isinstance(args.get("command"), str) else args.get("cmd")
+        if isinstance(command, str):
+            fields["commandPreview"] = _preview_text(command)
+    return fields
+
+
+def _preview_text(value: str, *, max_chars: int = 240) -> str:
+    text = " ".join((value or "").split())
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 1] + "…"
 
 
 async def _json_body(request: Request) -> dict[str, Any]:
@@ -539,10 +604,11 @@ def _build_direct_payload(
     return payload, bridge, allowed_tools, bridge_context
 
 
-def _local_preflight_response(body: dict[str, Any], model: str, bridge_context: Any) -> Response | None:
+def _local_preflight_response(app: FastAPI, body: dict[str, Any], model: str, bridge_context: Any) -> Response | None:
     preflight_data = build_preflight_chat_response(model, bridge_context)
     if preflight_data is None:
         return None
+    _record_tool_bridge_event(app, "local_repo_preflight", model=model, **_tool_call_event_fields(preflight_data))
     if bool(body.get("stream")):
         choices = preflight_data.get("choices") if isinstance(preflight_data.get("choices"), list) else []
         msg = choices[0].get("message") if choices and isinstance(choices[0], dict) else {}
@@ -669,7 +735,7 @@ def _deepseek_web_chat(app: FastAPI, client: httpx.Client, body: dict[str, Any],
         default_model="deepseek-web/deepseek-chat",
     )
     model = str(payload.get("model") or "deepseek-web/deepseek-chat")
-    preflight = _local_preflight_response(body, model, bridge_context)
+    preflight = _local_preflight_response(app, body, model, bridge_context)
     if preflight is not None:
         return preflight
     try:
@@ -724,7 +790,7 @@ def _qwen_web_chat(app: FastAPI, client: httpx.Client, body: dict[str, Any], con
         provider_native_web_search=True,
     )
     model = str(payload.get("model") or "qwen-web/qwen3.5-plus")
-    preflight = _local_preflight_response(body, model, bridge_context)
+    preflight = _local_preflight_response(app, body, model, bridge_context)
     if preflight is not None:
         return preflight
     try:
@@ -794,7 +860,7 @@ def _qwen_coder_chat(app: FastAPI, client: httpx.Client, body: dict[str, Any], c
         provider_native_web_search=True,
     )
     model = str(payload.get("model") or "qwen-coder/qwen-coder-plus")
-    preflight = _local_preflight_response(body, model, bridge_context)
+    preflight = _local_preflight_response(app, body, model, bridge_context)
     if preflight is not None:
         return preflight
     try:
