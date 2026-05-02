@@ -1,0 +1,80 @@
+{
+  "id": "created_file_result_without_assistant_tool_use_completion",
+  "description": "Rejects completion claims when a created-file tool_result survives but the matching assistant tool_use is absent from the client request history.",
+  "protocol": "anthropic_messages",
+  "model": "qwen-coder/qwen-coder-plus",
+  "tool_bridge_config": {
+    "mode": "strict",
+    "activationPolicy": "auto",
+    "exposurePolicy": "local-agent",
+    "toolProfile": "auto",
+    "maxCallsPerTurn": 4
+  },
+  "input": {
+    "task_text": "/using-superpowers implement the local codebase plan",
+    "messages": [
+      {
+        "role": "user",
+        "content": "/using-superpowers implement the local codebase plan"
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "toolu_call_1",
+            "content": "File created successfully at: E:/ProjectX/mindcraft/config/security.py"
+          }
+        ]
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "Read",
+          "description": "Read files.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Grep",
+          "description": "Search files.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Edit",
+          "description": "Edit files.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Write",
+          "description": "Write files.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      }
+    ],
+    "model_text": "Mindcraft project review completed. Code structure, security, and tests are improved. Project ready."
+  },
+  "expected": {
+    "error": "unverified_code_change_completion",
+    "tool_calls": [],
+    "warning_contains": null
+  }
+}

@@ -1,0 +1,85 @@
+{
+  "id": "openai_controller_final_with_evidence",
+  "description": "OpenAI controller allows a local review final only after discovery and read evidence exists.",
+  "protocol": "openai_chat_completions",
+  "tool_bridge_config": {
+    "mode": "strict",
+    "activationPolicy": "auto",
+    "exposurePolicy": "all",
+    "toolProfile": "all"
+  },
+  "request": {
+    "model": "web-model",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Review this local project."
+      },
+      {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "call_glob",
+            "type": "function",
+            "function": {
+              "name": "Glob",
+              "arguments": "{\"pattern\":\"**/*.py\"}"
+            }
+          },
+          {
+            "id": "call_read",
+            "type": "function",
+            "function": {
+              "name": "Read",
+              "arguments": "{\"file_path\":\"README.md\"}"
+            }
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "tool_call_id": "call_glob",
+        "content": "README.md\napp.py"
+      },
+      {
+        "role": "tool",
+        "tool_call_id": "call_read",
+        "content": "project readme"
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "Glob",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Read",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      }
+    ]
+  },
+  "upstream": {
+    "content": "Review summary: inspected the discovered files and found no critical issues."
+  },
+  "expected": {
+    "status": 200,
+    "upstreamCalls": 1,
+    "upstreamOmits": [
+      "tools",
+      "tool_choice"
+    ],
+    "finishReason": "stop",
+    "textContains": "Review summary"
+  }
+}

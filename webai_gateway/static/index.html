@@ -18,6 +18,8 @@
         </div>
         <nav class="nav" aria-label="控制台分区">
           <a href="#status" class="nav-link active">状态</a>
+          <a href="#diagnostics" class="nav-link">诊断</a>
+          <a href="#auto-research" class="nav-link">自我改进</a>
           <a href="#web-auth" class="nav-link">网页授权</a>
           <a href="#token" class="nav-link">令牌</a>
           <a href="#upstream" class="nav-link">上游</a>
@@ -53,6 +55,65 @@
             <strong id="modelName">未加载</strong>
             <small id="toolMode">工具模式：prompt</small>
           </div>
+        </section>
+
+        <section id="diagnostics" class="panel diagnostics-panel">
+          <div class="section-heading">
+            <div>
+              <h2>请求诊断</h2>
+              <p>查看最近请求的 ToolBridge 错误、Provider Prompt 压缩和响应摘要。</p>
+            </div>
+            <button id="refreshDiagnosticsButton" type="button" class="secondary">刷新诊断</button>
+          </div>
+          <div id="requestDiagnosticsStatus" class="diagnostics-status">尚未加载</div>
+          <div id="requestDiagnosticsList" class="diagnostics-list" aria-live="polite"></div>
+        </section>
+
+        <section id="auto-research" class="panel auto-research-panel">
+          <div class="section-heading">
+            <div>
+              <h2>自我改进</h2>
+              <p>跟踪 Claude Code 失败样本的采集、脱敏和 replay 回放结果。</p>
+            </div>
+            <button id="refreshAutoResearchButton" type="button" class="secondary">刷新成果</button>
+          </div>
+          <div class="auto-research-grid">
+            <div class="metric">
+              <span class="metric-label">状态</span>
+              <strong id="autoResearchStatus">未加载</strong>
+              <small id="autoResearchMessage">等待刷新</small>
+            </div>
+            <div class="metric">
+              <span class="metric-label">通过率</span>
+              <strong id="autoResearchPassRate">-</strong>
+              <small id="autoResearchReplayCount">0 个 replay</small>
+            </div>
+            <div class="metric">
+              <span class="metric-label">失败类型</span>
+              <strong id="autoResearchKindCount">0</strong>
+              <small>已沉淀为通用适配样本</small>
+            </div>
+            <div class="metric">
+              <span class="metric-label">最近样本</span>
+              <strong id="autoResearchLatest">-</strong>
+              <small id="autoResearchFixtureDir">未配置</small>
+            </div>
+          </div>
+          <div class="auto-research-body">
+            <div>
+              <span class="metric-label">类型分布</span>
+              <div id="autoResearchKinds" class="auto-research-list" aria-live="polite"></div>
+            </div>
+            <div>
+              <span class="metric-label">最近采集样本</span>
+              <div id="autoResearchRecent" class="auto-research-list" aria-live="polite"></div>
+            </div>
+            <div>
+              <span class="metric-label">运行时候选样本</span>
+              <div id="autoResearchCandidates" class="auto-research-list" aria-live="polite"></div>
+            </div>
+          </div>
+          <pre id="autoResearchCommands" class="output compact" aria-live="polite">尚未加载。</pre>
         </section>
 
         <section id="web-auth" class="panel">
@@ -92,7 +153,7 @@
             </label>
             <div class="snippet">
               <span class="snippet-label">可用模型名</span>
-              <code id="authModelName">deepseek-web/deepseek-chat</code>
+              <code id="authModelName">当前没有验证可用的模型</code>
             </div>
           </div>
           <div class="button-row">
@@ -169,6 +230,14 @@
                 <input id="providerRuntimePromptMaxChars" name="providerRuntimePromptMaxChars" type="number" min="4000" max="200000" />
               </label>
               <label class="field">
+                <span>默认回复语言</span>
+                <select id="providerRuntimeResponseLanguage" name="providerRuntimeResponseLanguage">
+                  <option value="zh-CN">简体中文（默认）</option>
+                  <option value="en-US">English</option>
+                  <option value="off">不注入语言约束</option>
+                </select>
+              </label>
+              <label class="field">
                 <span>Provider 原生联网</span>
                 <select id="nativeWebSearchPolicySelect" name="nativeWebSearchPolicySelect">
                   <option value="auto">自动（检测到联网/最新/官网等问题时启用）</option>
@@ -177,11 +246,24 @@
                 </select>
               </label>
               <label class="field">
+                <span>DeepSeek ds2api Base URL</span>
+                <input id="deepseekDs2apiBaseUrl" name="deepseekDs2apiBaseUrl" type="text" placeholder="http://127.0.0.1:9331/v1" />
+              </label>
+              <label class="field">
                 <span>工具暴露策略</span>
                 <select id="toolExposurePolicySelect" name="toolExposurePolicySelect">
                   <option value="safe">安全默认（隐藏 Bash/Edit/Write 等底层工具）</option>
+                  <option value="local-agent">本地 Agent 最小集（Read/Glob/Grep/Edit/Write/Bash/Skill）</option>
                   <option value="all">全工具优先（交给下游权限系统确认）</option>
                   <option value="allowlist">仅允许 allowlist</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>最终回答语义判别</span>
+                <select id="semanticFinalJudgeSelect" name="semanticFinalJudgeSelect">
+                  <option value="off">关闭（默认，仅使用严格最终门禁）</option>
+                  <option value="shadow">影子模式（记录结果，不影响返回）</option>
+                  <option value="enforce">强制模式（预留，低置信度仍走保守 repair）</option>
                 </select>
               </label>
               <label class="field">

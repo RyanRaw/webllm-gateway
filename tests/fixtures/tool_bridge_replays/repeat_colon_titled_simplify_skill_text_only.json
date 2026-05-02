@@ -1,0 +1,64 @@
+{
+  "id": "repeat_colon_titled_simplify_skill_text_only",
+  "description": "Rejects repeated Skill calls when a colon-titled injected skill document remains visible in conversation history.",
+  "protocol": "anthropic_messages",
+  "model": "qwen-web/qwen3.6-max-preview",
+  "tool_bridge_config": {
+    "mode": "strict",
+    "activationPolicy": "auto",
+    "exposurePolicy": "local-agent",
+    "toolProfile": "auto",
+    "maxCallsPerTurn": 4
+  },
+  "input": {
+    "task_text": "/using-superpowers review and improve the current project",
+    "messages": [
+      {
+        "role": "user",
+        "content": "/using-superpowers review and improve the current project"
+      },
+      {
+        "role": "user",
+        "content": "# Simplify: Code Review and Cleanup\n\nReview all changed files for reuse, quality, and efficiency. Fix any issues found.\n\n## Phase 1: Identify Changes\n\nRun `git diff` to see what changed.\n\n## Phase 2: Launch Review Agents"
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "Skill",
+          "description": "Load a named local skill.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Read",
+          "description": "Read files.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Glob",
+          "description": "Find files by glob pattern.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      }
+    ],
+    "model_text": "```tool_json\n{\"calls\":[{\"id\":\"call_2\",\"name\":\"Skill\",\"input\":{\"skill\":\"simplify\"}}]}\n```"
+  },
+  "expected": {
+    "error": "repeat_same_skill_without_progress",
+    "tool_calls": [],
+    "warning_contains": null
+  }
+}

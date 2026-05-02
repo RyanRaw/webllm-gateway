@@ -1,0 +1,102 @@
+{
+  "id": "unknown_ls_maps_to_glob",
+  "description": "Maps a web-model LS directory-listing alias to the real allowed Glob tool instead of ending the Claude Code turn with unknown_tool.",
+  "protocol": "anthropic_messages",
+  "model": "qwen-coder/qwen-coder-plus",
+  "tool_bridge_config": {
+    "mode": "strict",
+    "activationPolicy": "auto",
+    "exposurePolicy": "local-agent",
+    "toolProfile": "auto",
+    "maxCallsPerTurn": 4
+  },
+  "input": {
+    "task_text": "/using-superpowers 按计划落地改进",
+    "messages": [
+      {
+        "role": "user",
+        "content": "/using-superpowers 按计划落地改进"
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "call_1",
+            "name": "Read",
+            "input": {
+              "file_path": "tests/test_integration.py"
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "call_1",
+            "is_error": true,
+            "content": "File does not exist. Note: your current working directory is E:\\ProjectX\\mindcraft."
+          }
+        ]
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "Read",
+          "description": "Read files.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "file_path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "file_path"
+            ]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Glob",
+          "description": "Find files by glob pattern.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "pattern": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "pattern"
+            ]
+          }
+        }
+      }
+    ],
+    "model_text": "```tool_json\n{\"calls\":[{\"id\":\"call_2\",\"name\":\"LS\",\"input\":{\"path\":\".\"}}]}\n```"
+  },
+  "expected": {
+    "error": null,
+    "tool_calls": [
+      {
+        "id": "call_2",
+        "name": "Glob",
+        "input": {
+          "path": ".",
+          "pattern": "*"
+        }
+      }
+    ],
+    "warning_contains": null
+  }
+}

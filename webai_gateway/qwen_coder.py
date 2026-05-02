@@ -9,15 +9,53 @@ from typing import Any
 
 import httpx
 
+from .prompt_compaction import (
+    STATELESS_WEB_API_GUARD,
+    compact_role_messages_as_ds2api_history,
+    compact_web_prompt,
+    prompt_preserved_task_state_diagnostics,
+)
+
 
 QWEN_CODER_MODEL_PREFIX = "qwen-coder/"
 QWEN_CODER_BASE_URL = "https://coder.qwen.ai"
 DEFAULT_QWEN_CODER_REQUEST_TIMEOUT_SECONDS = 300  # 编程任务需要更长超时
+QWEN_CODER_MIN_PROMPT_MAX_CHARS = 32000
+QWEN_CODER_TOOL_BRIDGE_RUNAWAY_OUTPUT_CHARS = 12000
 QWEN_CODER_MODEL_ALIASES = {
     "qwen-coder-plus": "qwen3-coder-plus",
 }
 _DATA_URL_RE = re.compile(r"^data:(?P<media>[^;,]+);base64,(?P<data>.*)$", re.DOTALL)
 _TOOL_JSON_BLOCK_RE = re.compile(r"```tool_json\s*(.*?)```", re.IGNORECASE | re.DOTALL)
+_TOOL_CALLS_MARKUP_RE = re.compile(
+    r"<\s*(?!/)[^<>]{0,80}tool_calls(?=\s|[|｜>])[^<>]*>.*?</\s*[^<>]{0,80}tool_calls(?=\s|[|｜>])[^<>]*>",
+    re.IGNORECASE | re.DOTALL,
+)
+_QWEN_CODER_METADATA_KEYS = {
+    "chat_id",
+    "conversation_id",
+    "event",
+    "id",
+    "message_id",
+    "parent_id",
+    "phase",
+    "status",
+    "step",
+    "task",
+    "timestamp",
+    "title",
+    "type",
+    "uuid",
+}
+_QWEN_CODER_METADATA_SIGNAL_KEYS = {"event", "phase", "status", "step", "task", "title", "type"}
+_QWEN_CODER_FINAL_CONTENT_KEYS = {"answer", "calls", "content", "message", "text", "tool_calls"}
+QWEN_CODER_METADATA_RETRY_INSTRUCTION = (
+    "\n\n[WebAI Gateway API mode retry]\n"
+    "The previous Qwen Coder web response contained only workflow metadata, such as {\"title\": ...}, "
+    "or did not contain a final answer. Do not output JSON metadata, phase titles, task status, or "
+    "artifact-only workflow events. Output the final assistant answer directly. If tool use is required, "
+    "output only the DSML <|DSML|tool_calls> block specified above."
+)
 
 
 def is_qwen_coder_model(model: Any) -> bool:
@@ -31,20 +69,20 @@ def normalize_qwen_coder_model(model: str) -> str:
 
 class QwenCoderClient:
     """Qwen Coder 专用客户端，支持编程场景的特殊功能"""
-    
+
     def __init__(
         self,
         credential: dict[str, Any],
         http_client: httpx.Client | None = None,
         request_timeout_seconds: float = DEFAULT_QWEN_CODER_REQUEST_TIMEOUT_SECONDS,
-        prompt_max_chars: int = 12000,
-        enable_artifacts: bool = True,
+        prompt_max_chars: int = QWEN_CODER_MIN_PROMPT_MAX_CHARS,
+        enable_artifacts: bool = False,
         enable_mcp: bool = False,
-        enable_thinking: bool = True,
+        enable_thinking: bool = False,
     ) -> None:
         self.credential = credential
         self.request_timeout_seconds = max(60.0, float(request_timeout_seconds or DEFAULT_QWEN_CODER_REQUEST_TIMEOUT_SECONDS))
-        self.prompt_max_chars = max(4000, int(prompt_max_chars or 12000))
+        self.prompt_max_chars = max(QWEN_CODER_MIN_PROMPT_MAX_CHARS, int(prompt_max_chars or QWEN_CODER_MIN_PROMPT_MAX_CHARS))
         self.enable_artifacts = enable_artifacts
         self.enable_mcp = enable_mcp
         self.enable_thinking = enable_thinking
@@ -58,6 +96,7 @@ class QwenCoderClient:
             "prompt_max_chars": self.prompt_max_chars,
             "prompt_compacted": "Prompt content was compacted" in prompt,
             "message_count": len(payload.get("messages")) if isinstance(payload.get("messages"), list) else 0,
+            **prompt_preserved_task_state_diagnostics(prompt),
             "artifacts_enabled": self.enable_artifacts,
             "mcp_enabled": self.enable_mcp,
             "thinking_enabled": self.enable_thinking,
@@ -68,14 +107,32 @@ class QwenCoderClient:
             raise RuntimeError("Qwen Coder Web 直连暂不支持 multimodal 附件上传；请改用 WebAI2API Qwen 适配器或支持多模态的上游。")
         model = str(payload.get("model") or f"{QWEN_CODER_MODEL_PREFIX}qwen-coder-plus")
         chat = self.create_chat_session()
+        chat_id = str(chat.get("chatId") or chat.get("chat_id") or chat.get("id") or "")
         try:
             content = self.send_chat(
-                chat_id=str(chat.get("chatId") or chat.get("chat_id") or chat.get("id") or ""),
+                chat_id=chat_id,
                 prompt=prompt,
                 model=normalize_qwen_coder_model(model),
                 files=files,
                 enable_web_search=bool(payload.get("_webai_native_web_search")),
             )
+            metadata_retry_count = 0
+            if _is_qwen_coder_non_answer_text(content):
+                metadata_retry_count = 1
+                self.last_diagnostic["metadata_only_response"] = True
+                content = self.send_chat(
+                    chat_id=chat_id,
+                    prompt=prompt.rstrip() + QWEN_CODER_METADATA_RETRY_INSTRUCTION,
+                    model=normalize_qwen_coder_model(model),
+                    files=files,
+                    enable_web_search=bool(payload.get("_webai_native_web_search")),
+                )
+            self.last_diagnostic["metadata_retry_count"] = metadata_retry_count
+            if _is_qwen_coder_non_answer_text(content):
+                self.last_diagnostic["metadata_retry_succeeded"] = False
+                content = ""
+            elif metadata_retry_count:
+                self.last_diagnostic["metadata_retry_succeeded"] = True
         except TimeoutError as exc:
             stream_diagnostic = getattr(exc, "diagnostic", {})
             if isinstance(stream_diagnostic, dict):
@@ -122,18 +179,16 @@ class QwenCoderClient:
         qwen_files = files or []
         if qwen_files:
             raise RuntimeError("Qwen Coder Web 直连暂不支持 multimodal 附件上传；请改用 WebAI2API Qwen 适配器或支持多模态的上游。")
-        
+
         # Qwen Coder 特有的 feature 配置
-        feature_config = {
-            "thinking_enabled": self.enable_thinking,
-            "output_schema": "phase",
-            "artifacts_enabled": self.enable_artifacts,
-        }
+        feature_config = {"thinking_enabled": self.enable_thinking}
+        if self.enable_artifacts:
+            feature_config["artifacts_enabled"] = True
         if self.enable_mcp:
             feature_config["mcp_enabled"] = True
         if enable_web_search:
             feature_config["auto_search"] = True
-            
+
         request_body = {
             "stream": True,
             "version": "2.1",
@@ -160,7 +215,7 @@ class QwenCoderClient:
         }
         if enable_web_search:
             request_body["search"] = True
-            
+
         with self.http_client.stream(
             "POST",
             f"{QWEN_CODER_BASE_URL}/api/v2/chat/completions",
@@ -173,7 +228,13 @@ class QwenCoderClient:
                 text = response.read().decode(response.encoding or "utf-8", errors="replace")
                 _raise_for_qwen_coder_stream_error(text)
                 return parse_qwen_coder_stream_text(text)
-            return _collect_qwen_coder_stream_lines(response.iter_lines(), deadline_seconds=self.request_timeout_seconds)
+            return _collect_qwen_coder_stream_lines(
+                response.iter_lines(),
+                deadline_seconds=self.request_timeout_seconds,
+                max_output_chars_without_tool_json=(
+                    QWEN_CODER_TOOL_BRIDGE_RUNAWAY_OUTPUT_CHARS if _is_tool_bridge_prompt(prompt) else None
+                ),
+            )
 
     def headers(self, *, accept: str) -> dict[str, str]:
         headers = {
@@ -196,7 +257,8 @@ class QwenCoderClient:
 def qwen_coder_messages_to_prompt_and_files(messages: Any, *, max_prompt_chars: int | None = None) -> tuple[str, list[dict[str, Any]]]:
     if not isinstance(messages, list):
         return "", []
-    parts: list[str] = []
+    parts: list[str] = [f"System: {STATELESS_WEB_API_GUARD}"]
+    role_entries: list[tuple[str, str]] = [("system", STATELESS_WEB_API_GUARD)]
     files: list[dict[str, Any]] = []
     for message in messages:
         if not isinstance(message, dict):
@@ -206,6 +268,7 @@ def qwen_coder_messages_to_prompt_and_files(messages: Any, *, max_prompt_chars: 
         files.extend(message_files)
         if not text:
             continue
+        role_entries.append((role, text))
         if role == "system":
             parts.append(f"System: {text}")
         elif role == "assistant":
@@ -213,31 +276,17 @@ def qwen_coder_messages_to_prompt_and_files(messages: Any, *, max_prompt_chars: 
         else:
             parts.append(f"User: {text}")
     prompt = "\n\n".join(parts)
-    if max_prompt_chars:
-        prompt = _compact_web_prompt(prompt, max_chars=max_prompt_chars)
+    if max_prompt_chars and len(prompt) > int(max_prompt_chars):
+        prompt = compact_role_messages_as_ds2api_history(role_entries, max_chars=max_prompt_chars)
     return prompt, files
 
 
 def _compact_web_prompt(prompt: str, *, max_chars: int) -> str:
-    limit = max(1000, int(max_chars or 12000))
-    raw = prompt or ""
-    if len(raw) <= limit:
-        return raw
-    notice = (
-        "\n\n[Prompt content was compacted by WebAI Gateway for a web-model prompt budget. "
-        f"Original length: {len(raw)} characters. Earlier middle content omitted.]\n\n"
-    )
-    head_len = min(2000, max(80, limit // 10))
-    tail_len = max(200, limit - head_len - len(notice))
-    protocol_marker = "You are using WebAI Gateway's strict tool bridge."
-    marker_index = raw.find(protocol_marker)
-    tail_source = raw[marker_index:] if marker_index >= 0 else raw[-tail_len:]
-    if len(tail_source) > tail_len:
-        tail_source = tail_source[-tail_len:]
-    compacted = raw[:head_len].rstrip() + notice + tail_source.lstrip()
-    if len(compacted) > limit:
-        compacted = compacted[:limit]
-    return compacted
+    return compact_web_prompt(prompt, max_chars=max_chars)
+
+
+def _is_tool_bridge_prompt(prompt: str) -> bool:
+    return "WebAI Gateway's strict tool bridge" in (prompt or "")
 
 
 def _qwen_coder_content_to_text_and_files(content: Any, *, start_index: int) -> tuple[str, list[dict[str, Any]]]:
@@ -330,24 +379,35 @@ def _collect_qwen_coder_stream_lines(
     *,
     deadline_seconds: float,
     monotonic: Callable[[], float] = time.monotonic,
+    max_output_chars_without_tool_json: int | None = None,
 ) -> str:
     output: list[str] = []
     think_output: list[str] = []
-    artifact_output: list[str] = []  # 收集 artifacts 输出
+    artifact_output: list[str] = []
     stream_events = 0
     json_events = 0
     started_at = monotonic()
     for raw_line in lines:
         line = raw_line.decode("utf-8", errors="replace").strip() if isinstance(raw_line, bytes) else str(raw_line).strip()
+        stream_events += 1
+        elapsed = monotonic() - started_at
+        if elapsed > deadline_seconds:
+            exc = TimeoutError(f"Qwen Coder Web request exceeded {deadline_seconds:g}s")
+            exc.diagnostic = {  # type: ignore[attr-defined]
+                "stream_events": stream_events,
+                "json_events": json_events,
+                "output_chars": len("".join(output)),
+                "think_chars": len("".join(think_output)),
+                "artifact_chars": len("".join(artifact_output)),
+            }
+            raise exc
         if not line:
             continue
-        stream_events += 1
         data_text = line[5:].strip() if line.startswith("data:") else line
         if not data_text:
             continue
         if data_text == "[DONE]":
-            # 优先返回 artifact 内容，其次是普通输出
-            return "".join(artifact_output or output or think_output)
+            return _select_qwen_coder_output(output, think_output, artifact_output)
         if not data_text.startswith(("{", "[")):
             continue
         try:
@@ -359,8 +419,10 @@ def _collect_qwen_coder_stream_lines(
         if message:
             raise RuntimeError(f"Qwen Coder API error: {message}")
         _collect_qwen_coder_text(data, output, think_output, artifact_output)
-        current = "".join(output or think_output or artifact_output)
+        current = _select_qwen_coder_output(output, think_output, artifact_output)
         if _has_complete_tool_json(current):
+            return current
+        if max_output_chars_without_tool_json and len(current) >= max_output_chars_without_tool_json:
             return current
         elapsed = monotonic() - started_at
         if elapsed > deadline_seconds:
@@ -373,10 +435,45 @@ def _collect_qwen_coder_stream_lines(
                 "artifact_chars": len("".join(artifact_output)),
             }
             raise exc
-    return "".join(artifact_output or output or think_output)
+    return _select_qwen_coder_output(output, think_output, artifact_output)
 
+
+def _select_qwen_coder_output(output: list[str], think_output: list[str], artifact_output: list[str]) -> str:
+    for chunks in (output, artifact_output, think_output):
+        text = "".join(chunks)
+        if text and not _is_qwen_coder_non_answer_text(text):
+            return text
+    return ""
+
+
+def _is_qwen_coder_non_answer_text(text: str) -> bool:
+    stripped = (text or "").strip()
+    if not stripped:
+        return True
+    if _has_complete_tool_json(stripped):
+        return False
+    try:
+        parsed = json.loads(stripped)
+    except Exception:
+        return False
+    return _is_qwen_coder_metadata_only(parsed)
+
+
+def _is_qwen_coder_metadata_only(value: Any) -> bool:
+    if isinstance(value, list):
+        return bool(value) and all(_is_qwen_coder_metadata_only(item) for item in value)
+    if not isinstance(value, dict):
+        return False
+    keys = {str(key) for key in value}
+    if not keys or keys & _QWEN_CODER_FINAL_CONTENT_KEYS:
+        return False
+    if not keys <= _QWEN_CODER_METADATA_KEYS:
+        return False
+    return bool(keys & _QWEN_CODER_METADATA_SIGNAL_KEYS)
 
 def _has_complete_tool_json(text: str) -> bool:
+    if _TOOL_CALLS_MARKUP_RE.search(text or ""):
+        return True
     for match in _TOOL_JSON_BLOCK_RE.finditer(text or ""):
         try:
             parsed = json.loads(match.group(1))
@@ -399,20 +496,20 @@ def _collect_qwen_coder_text(data: Any, output: list[str], think_output: list[st
         delta = choices[0].get("delta") if isinstance(choices[0].get("delta"), dict) else {}
         message = choices[0].get("message") if isinstance(choices[0].get("message"), dict) else {}
         phase = str(delta.get("phase") or message.get("phase") or choices[0].get("phase") or "").lower()
-        
+
         # 处理 artifacts 内容
         artifact = delta.get("artifact") or message.get("artifact") or {}
         if isinstance(artifact, dict):
             artifact_content = artifact.get("content") or artifact.get("code") or artifact.get("text")
             if isinstance(artifact_content, str):
                 artifact_output.append(artifact_content)
-        
+
         # 处理 thinking 和普通内容
         target = think_output if phase == "think" else output
         for candidate in (delta.get("content"), message.get("content")):
             if isinstance(candidate, str):
                 target.append(candidate)
-    
+
     # 其他路径的内容收集
     for path in (
         ("output", "text"),

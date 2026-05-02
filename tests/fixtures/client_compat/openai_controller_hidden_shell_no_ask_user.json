@@ -1,0 +1,78 @@
+{
+  "id": "openai_controller_hidden_shell_no_ask_user",
+  "description": "OpenAI controller accepts a hidden read-only Git shell request without exposing Bash in the prompt or asking for Gateway-level permission.",
+  "protocol": "openai_chat_completions",
+  "tool_bridge_config": {
+    "mode": "strict",
+    "activationPolicy": "auto",
+    "exposurePolicy": "local-agent",
+    "toolProfile": "auto"
+  },
+  "request": {
+    "model": "web-model",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Review local project code and make a detailed improvement plan."
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "AskUserQuestion",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Bash",
+          "description": "Run shell commands",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "command": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "command"
+            ]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Glob",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      }
+    ]
+  },
+  "upstream": {
+    "contents": [
+      "```tool_json\n{\"calls\":[{\"id\":\"call_1\",\"name\":\"Bash\",\"input\":{\"command\":\"cd E:/ProjectX/mindcraft && git log --oneline -5\"}}]}\n```"
+    ]
+  },
+  "expected": {
+    "status": 200,
+    "upstreamCalls": 1,
+    "upstreamOmits": [
+      "tools",
+      "tool_choice"
+    ],
+    "finishReason": "tool_calls",
+    "toolCall": {
+      "name": "Bash",
+      "input": {
+        "command": "cd E:/ProjectX/mindcraft && git log --oneline -5"
+      }
+    }
+  }
+}

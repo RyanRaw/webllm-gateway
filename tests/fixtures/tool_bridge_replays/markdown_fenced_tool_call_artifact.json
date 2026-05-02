@@ -1,0 +1,84 @@
+{
+  "id": "markdown_fenced_tool_call_artifact",
+  "description": "Rejects an allowed tool call written inside a normal markdown/bash code fence instead of the required tool_json protocol.",
+  "protocol": "anthropic_messages",
+  "model": "qwen-coder/qwen-coder-plus",
+  "tool_bridge_config": {
+    "mode": "strict",
+    "activationPolicy": "auto",
+    "exposurePolicy": "local-agent",
+    "toolProfile": "auto",
+    "maxCallsPerTurn": 4
+  },
+  "input": {
+    "task_text": "/using-superpowers implement the local codebase plan",
+    "messages": [
+      {
+        "role": "user",
+        "content": "/using-superpowers implement the local codebase plan"
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "call_1",
+            "name": "Glob",
+            "input": {
+              "path": "E:/ProjectX/mindcraft",
+              "pattern": "*"
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "call_1",
+            "content": "README.md\nrewrite_content.py\nconfig/settings.py"
+          }
+        ]
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "Read",
+          "description": "Read files.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Glob",
+          "description": "Find files by glob pattern.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Write",
+          "description": "Write files.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      }
+    ],
+    "model_text": "```bash\nGlob({\"path\":\"E:/ProjectX/mindcraft\",\"pattern\":\"*\"})\n```\nI've created the Mindcraft project. Your next step is to install dependencies."
+  },
+  "expected": {
+    "error": "tool_call_markdown_without_tool_json",
+    "tool_calls": [],
+    "warning_contains": null
+  }
+}

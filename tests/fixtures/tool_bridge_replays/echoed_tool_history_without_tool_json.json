@@ -1,0 +1,74 @@
+{
+  "id": "echoed_tool_history_without_tool_json",
+  "description": "Rejects web-model output that copies prior Claude Code tool-call history and tool_result text instead of emitting a current tool_json block.",
+  "protocol": "anthropic_messages",
+  "model": "qwen-coder/qwen-coder-plus",
+  "tool_bridge_config": {
+    "mode": "strict",
+    "activationPolicy": "auto",
+    "exposurePolicy": "local-agent",
+    "toolProfile": "auto",
+    "maxCallsPerTurn": 4
+  },
+  "input": {
+    "task_text": "Review the current local project code and make an improvement plan.",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Review the current local project code and make an improvement plan."
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "toolu_call_3",
+            "name": "Glob",
+            "input": {
+              "path": "E:/ProjectX/mindcraft",
+              "pattern": "*.py"
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "toolu_call_3",
+            "content": "[\"E:/ProjectX/mindcraft/rewrite_content.py\"]"
+          }
+        ]
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "Glob",
+          "description": "List files.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Read",
+          "description": "Read files.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      }
+    ],
+    "model_text": "Assistant requested tool calls:\n- Glob({\"pattern\":\"*.py\",\"path\":\"E:/ProjectX/mindcraft\"})\nUser: Tool result for Glob (call id: toolu_call_3, is_error: false):\n[\"E:/ProjectX/mindcraft/rewrite_content.py\"]\nUse this tool result to continue the task.\nAssistant: Assistant requested tool calls:\n- Read({\"file_path\":\"E:/ProjectX/mindcraft/rewrite_content.py\"})"
+  },
+  "expected": {
+    "error": "echoed_tool_history_without_tool_json",
+    "tool_calls": [],
+    "warning_contains": "tool_result_claim_without_tool_call"
+  }
+}

@@ -123,12 +123,13 @@ qwen-web/qwen3.5-plus
 qwen-web/qwen3-max
 ```
 
-DeepSeek Web 本地直连模型：
+DeepSeek Web 已改为通过本地 `ds2api` sidecar 接入。完成浏览器网页登录授权后，前端和 `/v1/models` 只展示已经做过端到端验证的模型：
 
 ```text
-deepseek-web/deepseek-chat
-deepseek-web/deepseek-reasoner
+deepseek-v4-pro
 ```
+
+默认 sidecar 地址是 `http://127.0.0.1:9331/v1`，可在控制台设置页通过 `providerRuntime.deepseekDs2apiBaseUrl` 调整。
 
 WebAI2API 支持的站点和模型会继续透传并合并到 `/v1/models`。模型元数据里会包含非标准字段：
 
@@ -159,7 +160,10 @@ WebAI2API 支持的站点和模型会继续透传并合并到 `/v1/models`。模
   },
   "providerRuntime": {
     "requestTimeoutSeconds": 180,
-    "promptMaxChars": 12000
+    "promptMaxChars": 12000,
+    "nativeWebSearchPolicy": "auto",
+    "responseLanguage": "zh-CN",
+    "deepseekDs2apiBaseUrl": "http://127.0.0.1:9331/v1"
   },
   "tool_bridge": {
     "mode": "strict",

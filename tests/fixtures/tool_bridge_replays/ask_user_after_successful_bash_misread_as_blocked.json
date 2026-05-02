@@ -1,0 +1,95 @@
+{
+  "id": "ask_user_after_successful_bash_misread_as_blocked",
+  "description": "Rejects AskUserQuestion when the model claims Bash was blocked even though the immediately preceding Bash tool_result succeeded.",
+  "protocol": "anthropic_messages",
+  "model": "qwen-web/qwen3.6-max-preview",
+  "tool_bridge_config": {
+    "mode": "strict",
+    "activationPolicy": "auto",
+    "exposurePolicy": "local-agent",
+    "toolProfile": "auto",
+    "maxCallsPerTurn": 4
+  },
+  "input": {
+    "task_text": "/using-superpowers 落地改进",
+    "messages": [
+      {
+        "role": "user",
+        "content": "/using-superpowers 落地改进"
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "call_1",
+            "name": "Bash",
+            "input": {
+              "command": "cd E:/ProjectX/mindcraft && git diff HEAD",
+              "description": "Get git diff to identify changed files"
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "call_1",
+            "content": "(Bash completed with no output)",
+            "is_error": false
+          }
+        ]
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "AskUserQuestion",
+          "description": "Ask the user a short question.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Bash",
+          "description": "Run a shell command.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Glob",
+          "description": "Find files by glob pattern.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Read",
+          "description": "Read files.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      }
+    ],
+    "model_text": "```tool_json\n{\"calls\":[{\"id\":\"call_2\",\"name\":\"AskUserQuestion\",\"input\":{\"questions\":[{\"header\":\"获取 Diff\",\"question\":\"Bash 命令被阻止。请手动运行 `git diff HEAD` 并将输出粘贴给我，或者授权我执行 Bash 命令以继续代码审查。\",\"options\":[{\"label\":\"粘贴 git diff 输出\",\"description\":\"用户手动提供变更内容\"},{\"label\":\"授权 Bash\",\"description\":\"允许代理执行 git 命令\"}]}]}}]}\n```"
+  },
+  "expected": {
+    "error": "successful_tool_misread_as_blocked_question",
+    "tool_calls": [],
+    "warning_contains": null
+  }
+}

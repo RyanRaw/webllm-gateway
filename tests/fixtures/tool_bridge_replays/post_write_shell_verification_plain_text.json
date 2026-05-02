@@ -1,0 +1,74 @@
+{
+  "id": "post_write_shell_verification_plain_text",
+  "description": "Rejects final text that claims a write succeeded and gives shell verification commands instead of requesting another tool.",
+  "protocol": "anthropic_messages",
+  "model": "qwen-coder/qwen-coder-plus",
+  "tool_bridge_config": {
+    "mode": "strict",
+    "activationPolicy": "auto",
+    "exposurePolicy": "local-agent",
+    "toolProfile": "auto",
+    "maxCallsPerTurn": 4
+  },
+  "input": {
+    "task_text": "/using-superpowers implement the local codebase plan",
+    "messages": [
+      {
+        "role": "user",
+        "content": "/using-superpowers implement the local codebase plan"
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "toolu_write",
+            "name": "Write",
+            "input": {
+              "file_path": "E:/ProjectX/mindcraft/config/manager.py",
+              "content": "class ConfigManager:\n    pass\n"
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "toolu_write",
+            "content": "File created successfully at: E:/ProjectX/mindcraft/config/manager.py"
+          }
+        ]
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "Read",
+          "description": "Read files.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Write",
+          "description": "Write files.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      }
+    ],
+    "model_text": "Next, verify the configuration file:\n```bash\nls -l E:/ProjectX/mindcraft/config/manager.py\n```\n\nTest configuration loading:\n```bash\npython -c \"from config.manager import get_config; print(get_config('wechat.timeout'))\"\n```"
+  },
+  "expected": {
+    "error": "unexecuted_verification_command_after_write",
+    "tool_calls": [],
+    "warning_contains": null
+  }
+}

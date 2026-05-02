@@ -1,0 +1,63 @@
+{
+  "id": "multiline_agent_summary",
+  "description": "Natural-language Agent summary should be recovered as Agent tool calls.",
+  "protocol": "anthropic_messages",
+  "model": "qwen-coder/qwen-coder-plus",
+  "tool_bridge_config": {
+    "mode": "strict",
+    "activationPolicy": "auto",
+    "exposurePolicy": "all",
+    "toolProfile": "all",
+    "maxCallsPerTurn": 4
+  },
+  "input": {
+    "task_text": "审查当前项目代码并制定改进计划。",
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "Agent",
+          "description": "Launch a focused analysis agent.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "prompt": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "prompt",
+              "description"
+            ]
+          }
+        }
+      }
+    ],
+    "model_text": "I will inspect the project with focused agents.\n\nAssistant requested tool calls:\n- Agent({\n\"prompt\": \"Review the gateway tool bridge parser and summarize risky paths.\",\n\"description\": \"Review parser behavior\"\n})\n- Agent({\n\"prompt\": \"Inspect existing tests for replay-style coverage.\",\n\"description\": \"Inspect replay coverage\"\n})"
+  },
+  "expected": {
+    "error": null,
+    "tool_calls": [
+      {
+        "id": "toolu_summary_1",
+        "name": "Agent",
+        "input": {
+          "prompt": "Review the gateway tool bridge parser and summarize risky paths.",
+          "description": "Review parser behavior"
+        }
+      },
+      {
+        "id": "toolu_summary_2",
+        "name": "Agent",
+        "input": {
+          "prompt": "Inspect existing tests for replay-style coverage.",
+          "description": "Inspect replay coverage"
+        }
+      }
+    ],
+    "warning_contains": null
+  }
+}

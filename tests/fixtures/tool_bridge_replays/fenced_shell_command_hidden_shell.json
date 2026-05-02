@@ -1,0 +1,96 @@
+{
+  "id": "fenced_shell_command_hidden_shell",
+  "description": "Rejects fenced shell commands as final text when Bash is hidden by the local-agent exposure policy.",
+  "protocol": "anthropic_messages",
+  "model": "qwen-coder/qwen-coder-plus",
+  "tool_bridge_config": {
+    "mode": "strict",
+    "activationPolicy": "auto",
+    "exposurePolicy": "local-agent",
+    "toolProfile": "auto",
+    "maxCallsPerTurn": 4
+  },
+  "input": {
+    "task_text": "继续",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Review local project code."
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "toolu_preflight",
+            "name": "Bash",
+            "input": {
+              "command": "git -C E:/ProjectX/mindcraft status --short"
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "toolu_preflight",
+            "content": ""
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": "继续"
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "Bash",
+          "description": "Run shell commands.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "command": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "command"
+            ]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Glob",
+          "description": "List files.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "pattern": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "pattern"
+            ]
+          }
+        }
+      }
+    ],
+    "model_text": "```bash cd E:/ProjectX/mindcraft && ls -la ```"
+  },
+  "expected": {
+    "error": "unsafe_local_shell_command",
+    "tool_calls": [],
+    "warning_contains": null
+  }
+}

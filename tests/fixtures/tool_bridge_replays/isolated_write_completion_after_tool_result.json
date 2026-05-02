@@ -1,0 +1,94 @@
+{
+  "id": "isolated_write_completion_after_tool_result",
+  "description": "A local coding task must not accept a final completion claim after only writing an isolated new file.",
+  "protocol": "anthropic_messages",
+  "model": "qwen-coder/qwen-coder-plus",
+  "tool_bridge_config": {
+    "mode": "strict",
+    "activationPolicy": "auto",
+    "exposurePolicy": "local-agent",
+    "toolProfile": "auto",
+    "maxCallsPerTurn": 4
+  },
+  "input": {
+    "task_text": "/using-superpowers actually land a real code change in the project.",
+    "messages": [
+      {
+        "role": "user",
+        "content": "/using-superpowers actually land a real code change in the project."
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "call_1",
+            "name": "Write",
+            "input": {
+              "file_path": "E:/ProjectX/mindcraft/security.py",
+              "content": "def validate_url(url):\n    return True\n"
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "call_1",
+            "content": "File created successfully at: E:/ProjectX/mindcraft/security.py"
+          }
+        ]
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "Read",
+          "description": "Read files.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Grep",
+          "description": "Search files.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Edit",
+          "description": "Edit files.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Write",
+          "description": "Write files.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      }
+    ],
+    "model_text": "Project code changed. Security module added at E:/ProjectX/mindcraft/security.py."
+  },
+  "expected": {
+    "error": "unverified_code_change_completion",
+    "tool_calls": [],
+    "warning_contains": null
+  }
+}

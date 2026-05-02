@@ -1,0 +1,87 @@
+{
+  "id": "chinese_unproven_review_next_step_without_tool_json",
+  "description": "Rejects a short Chinese review conclusion that claims risks and promises next-step implementation without a tool call.",
+  "protocol": "anthropic_messages",
+  "model": "qwen-coder/qwen-coder-plus",
+  "tool_bridge_config": {
+    "mode": "strict",
+    "activationPolicy": "auto",
+    "exposurePolicy": "local-agent",
+    "toolProfile": "auto",
+    "maxCallsPerTurn": 4
+  },
+  "input": {
+    "task_text": "Review mindcraft project code and create improvement plan.",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Review mindcraft project code and create improvement plan."
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "toolu_read",
+            "name": "Read",
+            "input": {
+              "file_path": "E:/ProjectX/mindcraft/README.md"
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "toolu_read",
+            "content": "README exists"
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": "\u7ee7\u7eed"
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "Glob",
+          "description": "List files.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Read",
+          "description": "Read files.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Edit",
+          "description": "Edit files.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      }
+    ],
+    "model_text": "\u5ba1\u67e5mindcraft\u9879\u76ee\u4ee3\u7801\u53d1\u73b0\u5b89\u5168\u6f0f\u6d1e\u548c\u8d28\u91cf\u95ee\u9898\u3002\u9700\u7acb\u5373\u4fee\u590dSQL\u6ce8\u5165\u3001\u786c\u7f16\u7801\u5bc6\u94a5\u7b49\u98ce\u9669\u3002\u4e0b\u4e00\u6b65\u5b9e\u65bd\u53c2\u6570\u5316\u67e5\u8be2\u548c\u5bc6\u94a5\u7ba1\u7406\u3002"
+  },
+  "expected": {
+    "error": "unproven_final_answer_without_tool_call",
+    "tool_calls": [],
+    "warning_contains": null
+  }
+}

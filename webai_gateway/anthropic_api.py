@@ -8,7 +8,11 @@ from typing import Any
 from webai_gateway.tool_bridge import normalize_anthropic_tools
 
 
-def anthropic_body_to_openai(body: dict[str, Any]) -> dict[str, Any]:
+def anthropic_body_to_openai(
+    body: dict[str, Any],
+    *,
+    tool_call_registry: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     messages = body.get("messages")
     if not isinstance(messages, list):
         raise ValueError("Anthropic messages must be a list")
@@ -23,7 +27,11 @@ def anthropic_body_to_openai(body: dict[str, Any]) -> dict[str, Any]:
         role = str(message.get("role") or "").strip()
         if role not in {"user", "assistant"}:
             raise ValueError(f"Unsupported Anthropic role: {role}")
-        converted = _anthropic_message_to_openai(message, tool_call_names=tool_call_names)
+        converted = _anthropic_message_to_openai(
+            message,
+            tool_call_names=tool_call_names,
+            tool_call_registry=tool_call_registry,
+        )
         out_messages.extend(converted)
     openai_body: dict[str, Any] = {
         "model": str(body.get("model") or ""),
@@ -204,7 +212,12 @@ def anthropic_response_to_sse(message: dict[str, Any]) -> str:
     return "".join(chunks)
 
 
-def _anthropic_message_to_openai(message: dict[str, Any], *, tool_call_names: dict[str, str]) -> list[dict[str, Any]]:
+def _anthropic_message_to_openai(
+    message: dict[str, Any],
+    *,
+    tool_call_names: dict[str, str],
+    tool_call_registry: dict[str, dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     role = str(message.get("role") or "").strip()
     content = message.get("content")
     if isinstance(content, str):
@@ -256,6 +269,17 @@ def _anthropic_message_to_openai(message: dict[str, Any], *, tool_call_names: di
             tool_use_id = str(block.get("tool_use_id") or "").strip()
             if not tool_use_id:
                 raise ValueError("Anthropic tool_result block missing tool_use_id")
+            registered_call = _registered_tool_call(tool_call_registry, tool_use_id)
+            if registered_call and tool_use_id not in tool_call_names:
+                out.append(
+                    {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [registered_call],
+                    }
+                )
+                function = registered_call.get("function") if isinstance(registered_call.get("function"), dict) else {}
+                tool_call_names[tool_use_id] = str(function.get("name") or "tool")
             content_text = _anthropic_tool_result_to_text(block.get("content"))
             converted_tool = {
                 "role": "tool",
@@ -283,6 +307,29 @@ def _anthropic_message_to_openai(message: dict[str, Any], *, tool_call_names: di
         content_value: Any = content_parts if has_non_text else "\n".join(part for part in text_parts if part).strip()
         out.insert(0, {"role": role, "content": content_value})
     return out
+
+
+def _registered_tool_call(registry: dict[str, dict[str, Any]] | None, tool_use_id: str) -> dict[str, Any] | None:
+    if not registry or not tool_use_id:
+        return None
+    raw = registry.get(tool_use_id)
+    if not isinstance(raw, dict):
+        return None
+    function = raw.get("function") if isinstance(raw.get("function"), dict) else {}
+    name = str(function.get("name") or "").strip()
+    if not name:
+        return None
+    arguments = function.get("arguments")
+    if not isinstance(arguments, str):
+        arguments = "{}"
+    return {
+        "id": str(raw.get("id") or tool_use_id),
+        "type": "function",
+        "function": {
+            "name": name,
+            "arguments": arguments,
+        },
+    }
 
 
 def _anthropic_system_to_text(system: Any) -> str:

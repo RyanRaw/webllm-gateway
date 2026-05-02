@@ -1,0 +1,24 @@
+{
+  "id": "anthropic_plain_text",
+  "description": "Anthropic Messages client receives normal assistant text.",
+  "protocol": "anthropic_messages",
+  "request": {
+    "model": "web-model",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Say hello briefly."
+      }
+    ],
+    "max_tokens": 256
+  },
+  "upstream": {
+    "content": "plain anthropic ok"
+  },
+  "expected": {
+    "status": 200,
+    "upstreamCalls": 1,
+    "stopReason": "end_turn",
+    "textContains": "plain anthropic ok"
+  }
+}

@@ -1,0 +1,50 @@
+{
+  "id": "prose_completion_claim_with_tool_summary_bad_bash",
+  "description": "ds2api-style all profile extracts declared Bash calls from prose summaries and passes them through.",
+  "protocol": "anthropic_messages",
+  "model": "qwen-coder/qwen-coder-plus",
+  "tool_bridge_config": {
+    "mode": "strict",
+    "activationPolicy": "auto",
+    "exposurePolicy": "all",
+    "toolProfile": "all",
+    "maxCallsPerTurn": 4
+  },
+  "input": {
+    "task_text": "Implement the improvement plan in this local codebase.",
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "Bash",
+          "description": "Run shell commands.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "command": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "command"
+            ]
+          }
+        }
+      }
+    ],
+    "model_text": "All improvement work is complete.\n\nAssistant requested tool calls:\n- Bash({\"command\":\"python-dotenv>=1.0.0 && pytest>=7.0.0\"})\n\nSuperbrain mode completed successfully."
+  },
+  "expected": {
+    "error": null,
+    "tool_calls": [
+      {
+        "id": "toolu_summary_1",
+        "name": "Bash",
+        "input": {
+          "command": "python-dotenv>=1.0.0 && pytest>=7.0.0"
+        }
+      }
+    ],
+    "warning_contains": null
+  }
+}

@@ -1,0 +1,57 @@
+{
+  "id": "anthropic_tool_result_observation",
+  "description": "Anthropic tool_result blocks continue as normal assistant text after bridge observation.",
+  "protocol": "anthropic_messages",
+  "request": {
+    "model": "web-model",
+    "messages": [
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "toolu_read",
+            "name": "read_file",
+            "input": {
+              "path": "README.md"
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "toolu_read",
+            "content": "file text"
+          }
+        ]
+      }
+    ],
+    "tools": [
+      {
+        "name": "read_file",
+        "description": "Read a file",
+        "input_schema": {
+          "type": "object"
+        }
+      }
+    ],
+    "max_tokens": 1024
+  },
+  "upstream": {
+    "content": "observation handled"
+  },
+  "expected": {
+    "status": 200,
+    "upstreamCalls": 1,
+    "upstreamOmits": [
+      "tools",
+      "tool_choice"
+    ],
+    "upstreamMessageContains": "file text",
+    "stopReason": "end_turn",
+    "textContains": "observation handled"
+  }
+}

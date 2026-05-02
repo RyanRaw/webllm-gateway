@@ -1,0 +1,111 @@
+{
+  "id": "repeat_read_after_unchanged_result",
+  "description": "Rejects a repeated Read on the same file after Claude reports the previous Read result is unchanged and still current.",
+  "protocol": "anthropic_messages",
+  "model": "qwen-coder/qwen-coder-plus",
+  "tool_bridge_config": {
+    "mode": "strict",
+    "activationPolicy": "auto",
+    "exposurePolicy": "local-agent",
+    "toolProfile": "auto",
+    "maxCallsPerTurn": 4
+  },
+  "input": {
+    "task_text": "/using-superpowers implement the local codebase plan",
+    "messages": [
+      {
+        "role": "user",
+        "content": "/using-superpowers implement the local codebase plan"
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "call_1",
+            "name": "Read",
+            "input": {
+              "file_path": "E:/ProjectX/mindcraft/rewrite_content.py"
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "call_1",
+            "content": "File unchanged since last read. The content from the earlier Read tool_result in this conversation is still current - refer to that instead of re-reading."
+          }
+        ]
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "Read",
+          "description": "Read files.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "file_path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "file_path"
+            ]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Glob",
+          "description": "Find files by glob pattern.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Grep",
+          "description": "Search file contents.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Edit",
+          "description": "Edit files.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Write",
+          "description": "Write files.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      }
+    ],
+    "model_text": "```tool_json\n{\"calls\":[{\"id\":\"call_2\",\"name\":\"Read\",\"input\":{\"file_path\":\"E:/ProjectX/mindcraft/rewrite_content.py\"}}]}\n```"
+  },
+  "expected": {
+    "error": "repeat_unchanged_read_without_progress",
+    "tool_calls": [],
+    "warning_contains": null
+  }
+}

@@ -1,0 +1,94 @@
+{
+  "id": "optional_scope_question_without_need",
+  "description": "Rejects optional focus or scope questions when the agent already has enough local evidence to continue.",
+  "protocol": "anthropic_messages",
+  "model": "qwen-web/qwen3.6-max-preview",
+  "tool_bridge_config": {
+    "mode": "strict",
+    "activationPolicy": "auto",
+    "exposurePolicy": "all",
+    "toolProfile": "agent",
+    "maxCallsPerTurn": 4
+  },
+  "input": {
+    "task_text": "Review local project code and make a detailed improvement plan.",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Review local project code and make a detailed improvement plan."
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "call_read",
+            "name": "Read",
+            "input": {
+              "file_path": "E:/ProjectX/mindcraft/README.md"
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "call_read",
+            "content": "project overview",
+            "is_error": false
+          }
+        ]
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "AskUserQuestion",
+          "description": "Ask the user a short question.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Read",
+          "description": "Read files.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Glob",
+          "description": "Find files by glob pattern.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Grep",
+          "description": "Search files.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      }
+    ],
+    "model_text": "```tool_json\n{\"calls\":[{\"id\":\"call_scope\",\"name\":\"AskUserQuestion\",\"input\":{\"questions\":[{\"header\":\"Focus\",\"question\":\"Improvement plan focus?\",\"options\":[{\"label\":\"Architecture/Code quality\",\"description\":\"Refactor, patterns, testing\"},{\"label\":\"All of above\",\"description\":\"Comprehensive roadmap\"}]}]}}]}\n```"
+  },
+  "expected": {
+    "error": "optional_scope_question_without_need",
+    "tool_calls": [],
+    "warning_contains": null
+  }
+}

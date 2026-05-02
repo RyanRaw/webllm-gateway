@@ -1,0 +1,144 @@
+{
+  "id": "ask_user_after_recent_successful_bash_misread_as_blocked",
+  "description": "Rejects AskUserQuestion when a recent Bash tool_result succeeded before an intervening answered AskUserQuestion.",
+  "protocol": "anthropic_messages",
+  "model": "qwen-web/qwen3.6-max-preview",
+  "tool_bridge_config": {
+    "mode": "strict",
+    "activationPolicy": "auto",
+    "exposurePolicy": "local-agent",
+    "toolProfile": "auto",
+    "maxCallsPerTurn": 4
+  },
+  "input": {
+    "task_text": "/using-superpowers review, fix, and implement improvements in the current project",
+    "messages": [
+      {
+        "role": "user",
+        "content": "/using-superpowers review, fix, and implement improvements in the current project"
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "call_bash",
+            "name": "Bash",
+            "input": {
+              "command": "cd E:/ProjectX/mindcraft && git diff HEAD",
+              "description": "Get full git diff for review"
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "call_bash",
+            "content": "(Bash completed with no output)",
+            "is_error": false
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "call_scope",
+            "name": "AskUserQuestion",
+            "input": {
+              "questions": [
+                {
+                  "header": "Scope",
+                  "question": "Review scope: entire project or only top-level scripts?",
+                  "options": [
+                    {
+                      "label": "Entire project",
+                      "description": "Review everything"
+                    },
+                    {
+                      "label": "Top-level only",
+                      "description": "Skip subdirectories"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "call_scope",
+            "content": "User has answered your questions: \"Review scope: entire project or only top-level scripts?\"=\"Entire project\". You can now continue with the user's answers in mind.",
+            "is_error": false
+          }
+        ]
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "AskUserQuestion",
+          "description": "Ask the user a short question.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Bash",
+          "description": "Run a shell command.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Glob",
+          "description": "Find files by glob pattern.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Read",
+          "description": "Read files.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Skill",
+          "description": "Load a named local skill.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      }
+    ],
+    "model_text": "```tool_json\n{\"calls\":[{\"id\":\"call_3\",\"name\":\"AskUserQuestion\",\"input\":{\"questions\":[{\"header\":\"Bash Permission\",\"question\":\"Need git diff to review changes. Grant Bash permission for `git diff`?\",\"options\":[{\"label\":\"Grant Bash\",\"description\":\"Allow running git diff via Bash\"},{\"label\":\"Specify Files\",\"description\":\"Manually list files to review instead\"}]}]}}]}\n```"
+  },
+  "expected": {
+    "error": "successful_tool_misread_as_blocked_question",
+    "tool_calls": [],
+    "warning_contains": null
+  }
+}

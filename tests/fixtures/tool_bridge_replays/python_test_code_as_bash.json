@@ -1,0 +1,50 @@
+{
+  "id": "python_test_code_as_bash",
+  "description": "ds2api-style all profile passes declared Bash Python test snippets through as tool calls.",
+  "protocol": "anthropic_messages",
+  "model": "qwen-coder/qwen-coder-plus",
+  "tool_bridge_config": {
+    "mode": "strict",
+    "activationPolicy": "auto",
+    "exposurePolicy": "all",
+    "toolProfile": "all",
+    "maxCallsPerTurn": 4
+  },
+  "input": {
+    "task_text": "Implement the improvement plan in this local codebase.",
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "Bash",
+          "description": "Run shell commands.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "command": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "command"
+            ]
+          }
+        }
+      }
+    ],
+    "model_text": "```tool_json\n{\"calls\":[{\"id\":\"call_1\",\"name\":\"Bash\",\"input\":{\"command\":\"pytest.fail('expected failure') && pytest.fail('second failure')\"}}]}\n```"
+  },
+  "expected": {
+    "error": null,
+    "tool_calls": [
+      {
+        "id": "call_1",
+        "name": "Bash",
+        "input": {
+          "command": "pytest.fail('expected failure') && pytest.fail('second failure')"
+        }
+      }
+    ],
+    "warning_contains": null
+  }
+}

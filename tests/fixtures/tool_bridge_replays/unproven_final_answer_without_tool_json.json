@@ -1,0 +1,77 @@
+{
+  "id": "unproven_final_answer_without_tool_json",
+  "description": "Rejects short plain text that still describes a next action in an active local-agent tool loop.",
+  "protocol": "anthropic_messages",
+  "model": "qwen-coder/qwen-coder-plus",
+  "tool_bridge_config": {
+    "mode": "strict",
+    "activationPolicy": "auto",
+    "exposurePolicy": "local-agent",
+    "toolProfile": "auto",
+    "maxCallsPerTurn": 4
+  },
+  "input": {
+    "task_text": "Review mindcraft project code and create improvement plan.",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Review mindcraft project code and create improvement plan."
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "toolu_read",
+            "name": "Read",
+            "input": {
+              "file_path": "E:/ProjectX/mindcraft/README.md"
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "toolu_read",
+            "content": "README exists"
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": "继续"
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "Glob",
+          "description": "List files.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Read",
+          "description": "Read files.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      }
+    ],
+    "model_text": "Need a better project map before proceeding. Continue with another file path."
+  },
+  "expected": {
+    "error": "unproven_final_answer_without_tool_call",
+    "tool_calls": [],
+    "warning_contains": null
+  }
+}

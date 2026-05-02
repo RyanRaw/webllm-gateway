@@ -1,0 +1,55 @@
+{
+  "id": "openai_controller_safe_diagnostic_after_budget",
+  "description": "OpenAI controller returns declared Bash calls unchanged in ds2api-style all profile.",
+  "protocol": "openai_chat_completions",
+  "tool_bridge_config": {
+    "mode": "strict",
+    "activationPolicy": "auto",
+    "exposurePolicy": "all",
+    "toolProfile": "all"
+  },
+  "request": {
+    "model": "web-model",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Implement the improvement plan in this local codebase."
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "Bash",
+          "description": "Run shell commands",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "command": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    ]
+  },
+  "upstream": {
+    "content": "```tool_json\n{\"calls\":[{\"id\":\"call_bad\",\"name\":\"Bash\",\"input\":{\"command\":\"python-dotenv>=1.0.0 && pytest>=7.0.0\"}}]}\n```"
+  },
+  "expected": {
+    "status": 200,
+    "upstreamCalls": 1,
+    "upstreamOmits": [
+      "tools",
+      "tool_choice"
+    ],
+    "finishReason": "tool_calls",
+    "toolCall": {
+      "name": "Bash",
+      "input": {
+        "command": "python-dotenv>=1.0.0 && pytest>=7.0.0"
+      }
+    }
+  }
+}

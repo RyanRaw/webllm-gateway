@@ -11,20 +11,36 @@
     "toolMode": "prompt"
   },
   "providerRuntime": {
-    "requestTimeoutSeconds": 180,
-    "promptMaxChars": 12000,
-    "nativeWebSearchPolicy": "auto"
+    "requestTimeoutSeconds": 300,
+    "promptMaxChars": 32000,
+    "nativeWebSearchPolicy": "auto",
+    "responseLanguage": "zh-CN",
+    "deepseekDs2apiBaseUrl": "http://127.0.0.1:9331/v1"
   },
   "tool_bridge": {
     "mode": "strict",
     "activationPolicy": "auto",
     "maxToolsInPrompt": 32,
-    "maxCallsPerTurn": 1,
-    "maxReadonlyCallsPerTurn": 4,
+    "maxCallsPerTurn": 4,
+    "maxReadonlyCallsPerTurn": 32,
     "toolPromptMaxChars": 8000,
     "observationMaxChars": 4000,
-    "exposurePolicy": "safe",
+    "exposurePolicy": "all",
+    "toolProfile": "all",
+    "semanticFinalJudge": "off",
     "allowedToolNames": [],
+    "readonlyToolNames": [
+      "Read",
+      "Glob",
+      "Grep"
+    ],
+    "writeToolNames": [
+      "Edit",
+      "Write"
+    ],
+    "shellToolNames": [
+      "Bash"
+    ],
     "observationPolicy": {
       "summarizePathLists": true,
       "excludedPathParts": [

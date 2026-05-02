@@ -56,9 +56,11 @@ class ObservationPolicyConfig:
 
 @dataclass(frozen=True)
 class ProviderRuntimeConfig:
-    request_timeout_seconds: int = 180
-    prompt_max_chars: int = 12000
+    request_timeout_seconds: int = 300
+    prompt_max_chars: int = 32000
     native_web_search_policy: str = "auto"
+    response_language: str = "zh-CN"
+    deepseek_ds2api_base_url: str = "http://127.0.0.1:9331/v1"
 
 
 @dataclass(frozen=True)
@@ -67,11 +69,16 @@ class ToolBridgeConfig:
     activation_policy: str = "auto"
     max_tools_in_prompt: int = 32
     max_calls_per_turn: int = 1
-    max_readonly_calls_per_turn: int = 8
+    max_readonly_calls_per_turn: int = 32
     tool_prompt_max_chars: int = 8000
     observation_max_chars: int = 4000
     exposure_policy: str = "safe"
+    tool_profile: str = "auto"
+    semantic_final_judge: str = "off"
     allowed_tool_names: tuple[str, ...] = ()
+    readonly_tool_names: tuple[str, ...] = ()
+    write_tool_names: tuple[str, ...] = ()
+    shell_tool_names: tuple[str, ...] = ()
     observation_policy: ObservationPolicyConfig = field(default_factory=ObservationPolicyConfig)
 
 
@@ -101,6 +108,9 @@ def load_config(path: str | Path = "config.json") -> GatewayConfig:
     allowed_tool_names = tool_bridge_raw.get("allowedToolNames", tool_bridge_raw.get("allowed_tool_names", ()))
     if not isinstance(allowed_tool_names, list):
         allowed_tool_names = []
+    readonly_tool_names = tool_bridge_raw.get("readonlyToolNames", tool_bridge_raw.get("readonly_tool_names", ()))
+    write_tool_names = tool_bridge_raw.get("writeToolNames", tool_bridge_raw.get("write_tool_names", ()))
+    shell_tool_names = tool_bridge_raw.get("shellToolNames", tool_bridge_raw.get("shell_tool_names", ()))
     return GatewayConfig(
         server=ServerConfig(
             host=str(server_raw.get("host") or "127.0.0.1"),
@@ -116,14 +126,22 @@ def load_config(path: str | Path = "config.json") -> GatewayConfig:
         provider_runtime=ProviderRuntimeConfig(
             request_timeout_seconds=max(
                 30,
-                int(provider_runtime_raw.get("requestTimeoutSeconds") or provider_runtime_raw.get("request_timeout_seconds") or 180),
+                int(provider_runtime_raw.get("requestTimeoutSeconds") or provider_runtime_raw.get("request_timeout_seconds") or 300),
             ),
             prompt_max_chars=max(
                 4000,
-                int(provider_runtime_raw.get("promptMaxChars") or provider_runtime_raw.get("prompt_max_chars") or 12000),
+                int(provider_runtime_raw.get("promptMaxChars") or provider_runtime_raw.get("prompt_max_chars") or 32000),
             ),
             native_web_search_policy=str(
                 provider_runtime_raw.get("nativeWebSearchPolicy") or provider_runtime_raw.get("native_web_search_policy") or "auto"
+            ),
+            response_language=str(
+                provider_runtime_raw.get("responseLanguage") or provider_runtime_raw.get("response_language") or "zh-CN"
+            ),
+            deepseek_ds2api_base_url=str(
+                provider_runtime_raw.get("deepseekDs2apiBaseUrl")
+                or provider_runtime_raw.get("deepseek_ds2api_base_url")
+                or "http://127.0.0.1:9331/v1"
             ),
         ),
         tool_bridge=ToolBridgeConfig(
@@ -132,12 +150,19 @@ def load_config(path: str | Path = "config.json") -> GatewayConfig:
             max_tools_in_prompt=int(tool_bridge_raw.get("maxToolsInPrompt") or tool_bridge_raw.get("max_tools_in_prompt") or 32),
             max_calls_per_turn=int(tool_bridge_raw.get("maxCallsPerTurn") or tool_bridge_raw.get("max_calls_per_turn") or 1),
             max_readonly_calls_per_turn=int(
-                tool_bridge_raw.get("maxReadonlyCallsPerTurn") or tool_bridge_raw.get("max_readonly_calls_per_turn") or 8
+                tool_bridge_raw.get("maxReadonlyCallsPerTurn") or tool_bridge_raw.get("max_readonly_calls_per_turn") or 32
             ),
             tool_prompt_max_chars=int(tool_bridge_raw.get("toolPromptMaxChars") or tool_bridge_raw.get("tool_prompt_max_chars") or 8000),
             observation_max_chars=int(tool_bridge_raw.get("observationMaxChars") or tool_bridge_raw.get("observation_max_chars") or 4000),
             exposure_policy=str(tool_bridge_raw.get("exposurePolicy") or tool_bridge_raw.get("exposure_policy") or "safe"),
+            tool_profile=str(tool_bridge_raw.get("toolProfile") or tool_bridge_raw.get("tool_profile") or "auto"),
+            semantic_final_judge=str(
+                tool_bridge_raw.get("semanticFinalJudge") or tool_bridge_raw.get("semantic_final_judge") or "off"
+            ),
             allowed_tool_names=tuple(str(name) for name in allowed_tool_names if str(name).strip()),
+            readonly_tool_names=_string_tuple(readonly_tool_names),
+            write_tool_names=_string_tuple(write_tool_names),
+            shell_tool_names=_string_tuple(shell_tool_names),
             observation_policy=_load_observation_policy(tool_bridge_raw),
         ),
     )
@@ -155,6 +180,8 @@ def config_to_public(config: GatewayConfig) -> dict[str, Any]:
             "requestTimeoutSeconds": config.provider_runtime.request_timeout_seconds,
             "promptMaxChars": config.provider_runtime.prompt_max_chars,
             "nativeWebSearchPolicy": config.provider_runtime.native_web_search_policy,
+            "responseLanguage": config.provider_runtime.response_language,
+            "deepseekDs2apiBaseUrl": config.provider_runtime.deepseek_ds2api_base_url,
         },
         "tool_bridge": {
             "mode": config.tool_bridge.mode,
@@ -165,7 +192,12 @@ def config_to_public(config: GatewayConfig) -> dict[str, Any]:
             "toolPromptMaxChars": config.tool_bridge.tool_prompt_max_chars,
             "observationMaxChars": config.tool_bridge.observation_max_chars,
             "exposurePolicy": config.tool_bridge.exposure_policy,
+            "toolProfile": config.tool_bridge.tool_profile,
+            "semanticFinalJudge": config.tool_bridge.semantic_final_judge,
             "allowedToolNames": list(config.tool_bridge.allowed_tool_names),
+            "readonlyToolNames": list(config.tool_bridge.readonly_tool_names),
+            "writeToolNames": list(config.tool_bridge.write_tool_names),
+            "shellToolNames": list(config.tool_bridge.shell_tool_names),
             "observationPolicy": _observation_policy_to_json(config.tool_bridge.observation_policy),
         },
     }
@@ -188,6 +220,8 @@ def config_to_admin(config: GatewayConfig) -> dict[str, Any]:
             "requestTimeoutSeconds": config.provider_runtime.request_timeout_seconds,
             "promptMaxChars": config.provider_runtime.prompt_max_chars,
             "nativeWebSearchPolicy": config.provider_runtime.native_web_search_policy,
+            "responseLanguage": config.provider_runtime.response_language,
+            "deepseekDs2apiBaseUrl": config.provider_runtime.deepseek_ds2api_base_url,
         },
         "tool_bridge": {
             "mode": config.tool_bridge.mode,
@@ -198,7 +232,12 @@ def config_to_admin(config: GatewayConfig) -> dict[str, Any]:
             "toolPromptMaxChars": config.tool_bridge.tool_prompt_max_chars,
             "observationMaxChars": config.tool_bridge.observation_max_chars,
             "exposurePolicy": config.tool_bridge.exposure_policy,
+            "toolProfile": config.tool_bridge.tool_profile,
+            "semanticFinalJudge": config.tool_bridge.semantic_final_judge,
             "allowedToolNames": list(config.tool_bridge.allowed_tool_names),
+            "readonlyToolNames": list(config.tool_bridge.readonly_tool_names),
+            "writeToolNames": list(config.tool_bridge.write_tool_names),
+            "shellToolNames": list(config.tool_bridge.shell_tool_names),
             "observationPolicy": _observation_policy_to_json(config.tool_bridge.observation_policy),
         },
     }
@@ -228,6 +267,21 @@ def update_config(config: GatewayConfig, payload: dict[str, Any]) -> GatewayConf
     )
     if not isinstance(allowed_tool_names, list):
         allowed_tool_names = list(config.tool_bridge.allowed_tool_names)
+    readonly_tool_names = (
+        tool_bridge_raw.get("readonlyToolNames")
+        if "readonlyToolNames" in tool_bridge_raw
+        else tool_bridge_raw.get("readonly_tool_names", list(config.tool_bridge.readonly_tool_names))
+    )
+    write_tool_names = (
+        tool_bridge_raw.get("writeToolNames")
+        if "writeToolNames" in tool_bridge_raw
+        else tool_bridge_raw.get("write_tool_names", list(config.tool_bridge.write_tool_names))
+    )
+    shell_tool_names = (
+        tool_bridge_raw.get("shellToolNames")
+        if "shellToolNames" in tool_bridge_raw
+        else tool_bridge_raw.get("shell_tool_names", list(config.tool_bridge.shell_tool_names))
+    )
     return GatewayConfig(
         server=ServerConfig(
             host=str(server_raw.get("host") or config.server.host),
@@ -261,6 +315,16 @@ def update_config(config: GatewayConfig, payload: dict[str, Any]) -> GatewayConf
                 provider_runtime_raw.get("nativeWebSearchPolicy")
                 if "nativeWebSearchPolicy" in provider_runtime_raw
                 else provider_runtime_raw.get("native_web_search_policy", config.provider_runtime.native_web_search_policy)
+            ),
+            response_language=str(
+                provider_runtime_raw.get("responseLanguage")
+                if "responseLanguage" in provider_runtime_raw
+                else provider_runtime_raw.get("response_language", config.provider_runtime.response_language)
+            ),
+            deepseek_ds2api_base_url=str(
+                provider_runtime_raw.get("deepseekDs2apiBaseUrl")
+                if "deepseekDs2apiBaseUrl" in provider_runtime_raw
+                else provider_runtime_raw.get("deepseek_ds2api_base_url", config.provider_runtime.deepseek_ds2api_base_url)
             ),
         ),
         tool_bridge=ToolBridgeConfig(
@@ -300,7 +364,20 @@ def update_config(config: GatewayConfig, payload: dict[str, Any]) -> GatewayConf
                 if "exposurePolicy" in tool_bridge_raw
                 else tool_bridge_raw.get("exposure_policy", config.tool_bridge.exposure_policy)
             ),
+            tool_profile=str(
+                tool_bridge_raw.get("toolProfile")
+                if "toolProfile" in tool_bridge_raw
+                else tool_bridge_raw.get("tool_profile", config.tool_bridge.tool_profile)
+            ),
+            semantic_final_judge=str(
+                tool_bridge_raw.get("semanticFinalJudge")
+                if "semanticFinalJudge" in tool_bridge_raw
+                else tool_bridge_raw.get("semantic_final_judge", config.tool_bridge.semantic_final_judge)
+            ),
             allowed_tool_names=tuple(str(name) for name in allowed_tool_names if str(name).strip()),
+            readonly_tool_names=_string_tuple(readonly_tool_names, default=config.tool_bridge.readonly_tool_names),
+            write_tool_names=_string_tuple(write_tool_names, default=config.tool_bridge.write_tool_names),
+            shell_tool_names=_string_tuple(shell_tool_names, default=config.tool_bridge.shell_tool_names),
             observation_policy=_load_observation_policy(tool_bridge_raw, default=config.tool_bridge.observation_policy),
         ),
     )

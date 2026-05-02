@@ -1,0 +1,73 @@
+{
+  "id": "incomplete_fix_stub_without_tool_json",
+  "description": "Rejects short incomplete code-fix stubs as final text in an active local-agent tool loop.",
+  "protocol": "anthropic_messages",
+  "model": "qwen-coder/qwen-coder-plus",
+  "tool_bridge_config": {
+    "mode": "strict",
+    "activationPolicy": "auto",
+    "exposurePolicy": "local-agent",
+    "toolProfile": "auto",
+    "maxCallsPerTurn": 4
+  },
+  "input": {
+    "task_text": "Review the current local project code and make an improvement plan.",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Review the current local project code and make an improvement plan."
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "call_1",
+            "name": "Read",
+            "input": {
+              "file_path": "auth.py"
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "call_1",
+            "content": "def expired(token): return token.exp < now"
+          }
+        ]
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "Read",
+          "description": "Read files.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Edit",
+          "description": "Edit files.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      }
+    ],
+    "model_text": "Bug in auth middleware. Token expiry check uses `<` not `<=`. Fix:"
+  },
+  "expected": {
+    "error": "incomplete_fix_stub_without_tool_call",
+    "tool_calls": [],
+    "warning_contains": null
+  }
+}

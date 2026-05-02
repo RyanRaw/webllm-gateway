@@ -9,12 +9,25 @@ from typing import Any
 
 import httpx
 
+from .prompt_compaction import (
+    STATELESS_WEB_API_GUARD,
+    compact_role_messages_as_ds2api_history,
+    compact_web_prompt,
+    prompt_preserved_task_state_diagnostics,
+)
+
 
 QWEN_MODEL_PREFIX = "qwen-web/"
 QWEN_BASE_URL = "https://chat.qwen.ai"
-DEFAULT_QWEN_REQUEST_TIMEOUT_SECONDS = 180
+DEFAULT_QWEN_REQUEST_TIMEOUT_SECONDS = 300
+DEFAULT_QWEN_PROMPT_MAX_CHARS = 32000
+QWEN_TOOL_BRIDGE_RUNAWAY_OUTPUT_CHARS = 12000
 _DATA_URL_RE = re.compile(r"^data:(?P<media>[^;,]+);base64,(?P<data>.*)$", re.DOTALL)
 _TOOL_JSON_BLOCK_RE = re.compile(r"```tool_json\s*(.*?)```", re.IGNORECASE | re.DOTALL)
+_TOOL_CALLS_MARKUP_RE = re.compile(
+    r"<\s*(?!/)[^<>]{0,80}tool_calls(?=\s|[|｜>])[^<>]*>.*?</\s*[^<>]{0,80}tool_calls(?=\s|[|｜>])[^<>]*>",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 def is_qwen_web_model(model: Any) -> bool:
@@ -31,11 +44,11 @@ class QwenWebClient:
         credential: dict[str, Any],
         http_client: httpx.Client | None = None,
         request_timeout_seconds: float = DEFAULT_QWEN_REQUEST_TIMEOUT_SECONDS,
-        prompt_max_chars: int = 12000,
+        prompt_max_chars: int = DEFAULT_QWEN_PROMPT_MAX_CHARS,
     ) -> None:
         self.credential = credential
         self.request_timeout_seconds = max(30.0, float(request_timeout_seconds or DEFAULT_QWEN_REQUEST_TIMEOUT_SECONDS))
-        self.prompt_max_chars = max(4000, int(prompt_max_chars or 12000))
+        self.prompt_max_chars = max(4000, int(prompt_max_chars or DEFAULT_QWEN_PROMPT_MAX_CHARS))
         self.last_diagnostic: dict[str, Any] = {}
         self.http_client = http_client or httpx.Client(timeout=self.request_timeout_seconds, trust_env=False)
 
@@ -46,6 +59,7 @@ class QwenWebClient:
             "prompt_max_chars": self.prompt_max_chars,
             "prompt_compacted": "Prompt content was compacted" in prompt,
             "message_count": len(payload.get("messages")) if isinstance(payload.get("messages"), list) else 0,
+            **prompt_preserved_task_state_diagnostics(prompt),
         }
         if not prompt.strip():
             raise ValueError("没有可发送给 Qwen 网页模型的消息")
@@ -148,7 +162,13 @@ class QwenWebClient:
                 text = response.read().decode(response.encoding or "utf-8", errors="replace")
                 _raise_for_qwen_stream_error(text)
                 return parse_qwen_stream_text(text)
-            return _collect_qwen_stream_lines(response.iter_lines(), deadline_seconds=self.request_timeout_seconds)
+            return _collect_qwen_stream_lines(
+                response.iter_lines(),
+                deadline_seconds=self.request_timeout_seconds,
+                max_output_chars_without_tool_json=(
+                    QWEN_TOOL_BRIDGE_RUNAWAY_OUTPUT_CHARS if _is_tool_bridge_prompt(prompt) else None
+                ),
+            )
 
     def headers(self, *, accept: str) -> dict[str, str]:
         headers = {
@@ -171,7 +191,8 @@ class QwenWebClient:
 def qwen_messages_to_prompt_and_files(messages: Any, *, max_prompt_chars: int | None = None) -> tuple[str, list[dict[str, Any]]]:
     if not isinstance(messages, list):
         return "", []
-    parts: list[str] = []
+    parts: list[str] = [f"System: {STATELESS_WEB_API_GUARD}"]
+    role_entries: list[tuple[str, str]] = [("system", STATELESS_WEB_API_GUARD)]
     files: list[dict[str, Any]] = []
     for message in messages:
         if not isinstance(message, dict):
@@ -181,6 +202,7 @@ def qwen_messages_to_prompt_and_files(messages: Any, *, max_prompt_chars: int | 
         files.extend(message_files)
         if not text:
             continue
+        role_entries.append((role, text))
         if role == "system":
             parts.append(f"System: {text}")
         elif role == "assistant":
@@ -188,31 +210,17 @@ def qwen_messages_to_prompt_and_files(messages: Any, *, max_prompt_chars: int | 
         else:
             parts.append(f"User: {text}")
     prompt = "\n\n".join(parts)
-    if max_prompt_chars:
-        prompt = _compact_web_prompt(prompt, max_chars=max_prompt_chars)
+    if max_prompt_chars and len(prompt) > int(max_prompt_chars):
+        prompt = compact_role_messages_as_ds2api_history(role_entries, max_chars=max_prompt_chars)
     return prompt, files
 
 
 def _compact_web_prompt(prompt: str, *, max_chars: int) -> str:
-    limit = max(1000, int(max_chars or 12000))
-    raw = prompt or ""
-    if len(raw) <= limit:
-        return raw
-    notice = (
-        "\n\n[Prompt content was compacted by WebAI Gateway for a web-model prompt budget. "
-        f"Original length: {len(raw)} characters. Earlier middle content omitted.]\n\n"
-    )
-    head_len = min(2000, max(80, limit // 10))
-    tail_len = max(200, limit - head_len - len(notice))
-    protocol_marker = "You are using WebAI Gateway's strict tool bridge."
-    marker_index = raw.find(protocol_marker)
-    tail_source = raw[marker_index:] if marker_index >= 0 else raw[-tail_len:]
-    if len(tail_source) > tail_len:
-        tail_source = tail_source[-tail_len:]
-    compacted = raw[:head_len].rstrip() + notice + tail_source.lstrip()
-    if len(compacted) > limit:
-        compacted = compacted[:limit]
-    return compacted
+    return compact_web_prompt(prompt, max_chars=max_chars)
+
+
+def _is_tool_bridge_prompt(prompt: str) -> bool:
+    return "WebAI Gateway's strict tool bridge" in (prompt or "")
 
 
 def _qwen_content_to_text_and_files(content: Any, *, start_index: int) -> tuple[str, list[dict[str, Any]]]:
@@ -305,6 +313,7 @@ def _collect_qwen_stream_lines(
     *,
     deadline_seconds: float,
     monotonic: Callable[[], float] = time.monotonic,
+    max_output_chars_without_tool_json: int | None = None,
 ) -> str:
     output: list[str] = []
     think_output: list[str] = []
@@ -313,9 +322,19 @@ def _collect_qwen_stream_lines(
     started_at = monotonic()
     for raw_line in lines:
         line = raw_line.decode("utf-8", errors="replace").strip() if isinstance(raw_line, bytes) else str(raw_line).strip()
+        stream_events += 1
+        elapsed = monotonic() - started_at
+        if elapsed > deadline_seconds:
+            exc = TimeoutError(f"Qwen Web request exceeded {deadline_seconds:g}s")
+            exc.diagnostic = {  # type: ignore[attr-defined]
+                "stream_events": stream_events,
+                "json_events": json_events,
+                "output_chars": len("".join(output)),
+                "think_chars": len("".join(think_output)),
+            }
+            raise exc
         if not line:
             continue
-        stream_events += 1
         data_text = line[5:].strip() if line.startswith("data:") else line
         if not data_text:
             continue
@@ -335,6 +354,8 @@ def _collect_qwen_stream_lines(
         current = "".join(output or think_output)
         if _has_complete_tool_json(current):
             return current
+        if max_output_chars_without_tool_json and len(current) >= max_output_chars_without_tool_json:
+            return current
         elapsed = monotonic() - started_at
         if elapsed > deadline_seconds:
             exc = TimeoutError(f"Qwen Web request exceeded {deadline_seconds:g}s")
@@ -349,6 +370,8 @@ def _collect_qwen_stream_lines(
 
 
 def _has_complete_tool_json(text: str) -> bool:
+    if _TOOL_CALLS_MARKUP_RE.search(text or ""):
+        return True
     for match in _TOOL_JSON_BLOCK_RE.finditer(text or ""):
         try:
             parsed = json.loads(match.group(1))

@@ -3,6 +3,9 @@ const state = {
   tokenVisible: false,
   providers: [],
   authJobTimer: null,
+  requestDiagnostics: [],
+  autoResearch: null,
+  autoResearchCandidates: [],
 };
 
 const $ = (id) => document.getElementById(id);
@@ -90,11 +93,14 @@ function applyConfig(config) {
   $("upstreamApiKey").value = config.upstream.apiKey || "";
   $("upstreamModel").value = config.upstream.model || "";
   $("toolModeSelect").value = config.upstream.toolMode || "prompt";
-  $("providerRuntimeTimeoutSeconds").value = config.providerRuntime?.requestTimeoutSeconds || 180;
-  $("providerRuntimePromptMaxChars").value = config.providerRuntime?.promptMaxChars || 12000;
+  $("providerRuntimeTimeoutSeconds").value = config.providerRuntime?.requestTimeoutSeconds || 300;
+  $("providerRuntimePromptMaxChars").value = config.providerRuntime?.promptMaxChars || 32000;
+  $("providerRuntimeResponseLanguage").value = config.providerRuntime?.responseLanguage || "zh-CN";
   $("nativeWebSearchPolicySelect").value = config.providerRuntime?.nativeWebSearchPolicy || "auto";
+  $("deepseekDs2apiBaseUrl").value = config.providerRuntime?.deepseekDs2apiBaseUrl || "http://127.0.0.1:9331/v1";
   $("toolActivationPolicySelect").value = config.tool_bridge?.activationPolicy || "auto";
   $("toolExposurePolicySelect").value = config.tool_bridge?.exposurePolicy || "safe";
+  $("semanticFinalJudgeSelect").value = config.tool_bridge?.semanticFinalJudge || "off";
   const observationPolicy = config.tool_bridge?.observationPolicy || {};
   $("observationPolicyPathSummary").value = observationPolicy.summarizePathLists === false ? "false" : "true";
   $("observationPolicyPathParts").value = (observationPolicy.excludedPathParts || []).join("\n");
@@ -141,6 +147,177 @@ async function refreshStatus() {
   }
 }
 
+function renderToolBridgeSummary(event) {
+  const parts = [];
+  if (event.toolBridgeError) {
+    const repairText = event.toolBridgeRepairable ? "可修复" : "硬拒绝";
+    parts.push(`ToolBridge 错误：${event.toolBridgeError}（${repairText}）`);
+  }
+  if (event.toolBridgeWarning) {
+    parts.push(`ToolBridge 警告：${event.toolBridgeWarning}`);
+  }
+  if (event.toolBridgeTools?.length) {
+    parts.push(`工具调用：${event.toolBridgeTools.join(" / ")}`);
+  } else if (event.responseToolNames?.length) {
+    parts.push(`工具调用：${event.responseToolNames.join(" / ")}`);
+  }
+  if (event.toolBridgeControllerState) {
+    const reason = event.toolBridgeControllerReason ? ` / ${event.toolBridgeControllerReason}` : "";
+    const budget = event.toolBridgeRetryBudget ? ` / ${event.toolBridgeRetryBudget}` : "";
+    parts.push(`Controller：${event.toolBridgeControllerState}${reason}${budget}`);
+  }
+  if (event.semanticFinalJudgeMode) {
+    const verdict = event.semanticFinalJudgeVerdict || "unknown";
+    const confidence = typeof event.semanticFinalJudgeConfidence === "number" ? ` / ${Math.round(event.semanticFinalJudgeConfidence * 100)}%` : "";
+    const reason = event.semanticFinalJudgeReason ? ` / ${event.semanticFinalJudgeReason}` : "";
+    parts.push(`Semantic Judge：${event.semanticFinalJudgeMode} / ${verdict}${confidence}${reason}`);
+  }
+  if (event.providerPromptCompacted === true) {
+    parts.push(`Provider Prompt 已压缩：${event.providerPromptChars || 0}/${event.providerPromptMaxChars || 0}`);
+  }
+  if (event.providerMetadataOnlyResponse === true) {
+    parts.push("Provider 返回 metadata-only，已触发恢复路径");
+  }
+  if (event.responseContentPreview) {
+    parts.push(`响应摘要：${event.responseContentPreview}`);
+  }
+  return parts.length ? parts.join(" · ") : "未发现工具桥异常";
+}
+
+function renderRequestDiagnostics(events) {
+  const list = $("requestDiagnosticsList");
+  const status = $("requestDiagnosticsStatus");
+  state.requestDiagnostics = Array.isArray(events) ? events : [];
+  list.innerHTML = "";
+  if (!state.requestDiagnostics.length) {
+    status.textContent = "暂无请求诊断记录";
+    return;
+  }
+  status.textContent = `最近 ${state.requestDiagnostics.length} 条请求诊断`;
+  const recent = state.requestDiagnostics.slice(-8).reverse();
+  for (const event of recent) {
+    const item = document.createElement("article");
+    item.className = event.toolBridgeError ? "diagnostic-item is-error" : "diagnostic-item";
+    const title = document.createElement("div");
+    title.className = "diagnostic-title";
+    title.textContent = `${event.endpoint || "请求"} · ${event.route || "unknown"} · ${event.model || "model"}`;
+    const meta = document.createElement("div");
+    meta.className = "diagnostic-meta";
+    meta.textContent = `${event.at ? new Date(event.at).toLocaleString() : "未知时间"} · ${event.responseKind || "响应"} · bridge=${event.bridge === true ? "是" : "否"}`;
+    const summary = document.createElement("p");
+    summary.textContent = renderToolBridgeSummary(event);
+    item.append(title, meta, summary);
+    list.append(item);
+  }
+}
+
+async function loadRequestDiagnostics() {
+  const res = await fetch("/api/admin/request-diagnostics");
+  if (!res.ok) {
+    throw new Error(`请求诊断读取失败：HTTP ${res.status}`);
+  }
+  const data = await res.json();
+  renderRequestDiagnostics(data.events || []);
+}
+
+function renderAutoResearchStatus(data) {
+  state.autoResearch = data || null;
+  const available = data?.available === true;
+  const total = Number(data?.total || 0);
+  const passed = Number(data?.passed || 0);
+  const failed = Number(data?.failed || 0);
+  $("autoResearchStatus").textContent = available ? (failed ? "需修复" : "已通过") : "未就绪";
+  $("autoResearchStatus").className = available ? (failed ? "is-error" : "is-ok") : "is-warning";
+  $("autoResearchMessage").textContent = data?.message || "尚未采集失败样本";
+  $("autoResearchPassRate").textContent = total ? `${Math.round((data.passRate || 0) * 1000) / 10}%` : "-";
+  $("autoResearchReplayCount").textContent = `${passed}/${total} 个 replay 通过`;
+  $("autoResearchKindCount").textContent = String(data?.failureKinds?.length || 0);
+  $("autoResearchLatest").textContent = data?.recent?.[0]?.error || "-";
+  $("autoResearchFixtureDir").textContent = data?.fixtureDir || "未配置";
+
+  const kinds = $("autoResearchKinds");
+  kinds.innerHTML = "";
+  if (!data?.failureKinds?.length) {
+    kinds.textContent = "暂无失败类型样本";
+  } else {
+    for (const item of data.failureKinds) {
+      const row = document.createElement("div");
+      row.className = "auto-research-row";
+      const name = document.createElement("strong");
+      name.textContent = item.kind;
+      const count = document.createElement("span");
+      count.textContent = `${item.count} 个`;
+      row.append(name, count);
+      kinds.append(row);
+    }
+  }
+
+  const recent = $("autoResearchRecent");
+  recent.innerHTML = "";
+  if (!data?.recent?.length) {
+    recent.textContent = "暂无采集样本";
+  } else {
+    for (const item of data.recent) {
+      const row = document.createElement("article");
+      row.className = "auto-research-row stacked";
+      const title = document.createElement("strong");
+      title.textContent = item.id;
+      const meta = document.createElement("span");
+      const updatedAt = item.updatedAt ? new Date(item.updatedAt).toLocaleString() : "未知时间";
+      meta.textContent = `${item.error || "允许调用"} · ${updatedAt} · ${item.path || ""}`;
+      row.append(title, meta);
+      recent.append(row);
+    }
+  }
+
+  $("autoResearchCommands").textContent = [
+    "采集新失败样本：",
+    data?.collectCommand || "python -m webai_gateway.auto_research collect <claude-jsonl>",
+    "",
+    "回放验证：",
+    data?.reportCommand || "python -m webai_gateway.auto_research report",
+  ].join("\n");
+}
+
+function renderAutoResearchCandidates(data) {
+  state.autoResearchCandidates = Array.isArray(data?.candidates) ? data.candidates : [];
+  const list = $("autoResearchCandidates");
+  list.innerHTML = "";
+  if (!state.autoResearchCandidates.length) {
+    list.textContent = "暂无运行时候选失败样本";
+    return;
+  }
+  for (const item of state.autoResearchCandidates.slice(0, 8)) {
+    const row = document.createElement("article");
+    row.className = "auto-research-row stacked";
+    const title = document.createElement("strong");
+    title.textContent = `${item.error || "unknown"} · ${item.source || "runtime"}`;
+    const meta = document.createElement("span");
+    const updatedAt = item.at ? new Date(item.at).toLocaleString() : "未知时间";
+    meta.textContent = [updatedAt, item.stage || item.route || "", item.controllerState || ""].filter(Boolean).join(" · ");
+    const preview = document.createElement("span");
+    preview.textContent = item.preview || "无摘要";
+    row.append(title, meta, preview);
+    list.append(row);
+  }
+}
+
+async function loadAutoResearchStatus() {
+  const res = await fetch("/api/admin/auto-research/status");
+  if (!res.ok) {
+    throw new Error(`自我改进状态读取失败：HTTP ${res.status}`);
+  }
+  renderAutoResearchStatus(await res.json());
+}
+
+async function loadAutoResearchCandidates() {
+  const res = await fetch("/api/admin/auto-research/candidates");
+  if (!res.ok) {
+    throw new Error(`候选失败样本读取失败：HTTP ${res.status}`);
+  }
+  renderAutoResearchCandidates(await res.json());
+}
+
 function renderAuthProviders(data) {
   state.providers = data.providers || [];
   const select = $("authProvider");
@@ -168,7 +345,9 @@ function renderSelectedAuthProvider() {
   }
   const credential = provider.credential || {};
   const authorized = credential.authorized === true;
-  const modelCount = provider.models?.length || 0;
+  const availableModels = Array.isArray(provider.availableModels) ? provider.availableModels : [];
+  const modelCount = Number.isFinite(provider.modelCount) ? provider.modelCount : availableModels.length;
+  const availabilityMessage = provider.availabilityMessage || "";
   const adapterText = provider.adapters?.length ? `适配器：${provider.adapters.join(" / ")}` : "";
   const capabilityText = [
     provider.capabilities?.text ? "文本" : "",
@@ -177,10 +356,11 @@ function renderSelectedAuthProvider() {
   ].filter(Boolean).join(" / ");
   $("authProviderLabel").textContent = provider.name;
   if (provider.route === "direct") {
-    $("authStatus").textContent = authorized ? "已授权" : "未授权";
-    $("authStatus").className = authorized ? "is-ok" : "is-warning";
-    $("authUpdatedAt").textContent = credential.updatedAt ? `更新时间：${new Date(credential.updatedAt).toLocaleString()}` : "尚未授权";
-    $("authBadge").textContent = authorized ? "本地可用" : "待登录";
+    const hasModels = modelCount > 0;
+    $("authStatus").textContent = authorized ? (hasModels ? "已授权，可用模型已验证" : "已授权，暂无可用模型") : "未授权";
+    $("authStatus").className = authorized && hasModels ? "is-ok" : "is-warning";
+    $("authUpdatedAt").textContent = availabilityMessage || (credential.updatedAt ? `更新时间：${new Date(credential.updatedAt).toLocaleString()}` : "尚未授权");
+    $("authBadge").textContent = authorized ? (hasModels ? "本地可用" : "等待适配") : "待登录";
     $("startAuthButton").textContent = "一键启动 DeepSeek 授权浏览器";
     $("captureAuthButton").textContent = "重新捕获登录态";
     $("captureAuthButton").disabled = false;
@@ -195,7 +375,9 @@ function renderSelectedAuthProvider() {
     $("captureAuthButton").disabled = true;
     $("clearAuthButton").disabled = true;
   }
-  $("authModelName").textContent = modelCount > 1 ? `${provider.models[0]} 等 ${modelCount} 个模型` : (provider.models?.[0] || `${provider.id}/default`);
+  $("authModelName").textContent = modelCount > 1
+    ? `${availableModels[0]} 等 ${modelCount} 个模型`
+    : (availableModels[0] || availabilityMessage || "当前没有验证可用的模型");
 }
 
 async function loadAuthProviders() {
@@ -282,7 +464,7 @@ async function handleAuthJob(job) {
 
 async function finishAuthJob(job) {
   if (job.status === "succeeded") {
-    appendAuthLog("授权完成。现在可以用 deepseek-web/deepseek-chat 作为模型名。");
+    appendAuthLog("授权完成。正在刷新已验证可用模型；未通过调用验证的模型不会显示为可用。");
     await loadAuthProviders();
     showToast("网页登录授权已完成");
     return;
@@ -320,14 +502,17 @@ async function saveConfig(event) {
     },
     providerRuntime: {
       ...(state.config?.providerRuntime || {}),
-      requestTimeoutSeconds: Number($("providerRuntimeTimeoutSeconds").value) || 180,
-      promptMaxChars: Number($("providerRuntimePromptMaxChars").value) || 12000,
+      requestTimeoutSeconds: Number($("providerRuntimeTimeoutSeconds").value) || 300,
+      promptMaxChars: Number($("providerRuntimePromptMaxChars").value) || 32000,
+      responseLanguage: $("providerRuntimeResponseLanguage").value || "zh-CN",
       nativeWebSearchPolicy: $("nativeWebSearchPolicySelect").value,
+      deepseekDs2apiBaseUrl: $("deepseekDs2apiBaseUrl").value || "http://127.0.0.1:9331/v1",
     },
     tool_bridge: {
       ...(state.config?.tool_bridge || {}),
       activationPolicy: $("toolActivationPolicySelect").value,
       exposurePolicy: $("toolExposurePolicySelect").value,
+      semanticFinalJudge: $("semanticFinalJudgeSelect").value,
       observationPolicy: {
         ...(state.config?.tool_bridge?.observationPolicy || {}),
         summarizePathLists: $("observationPolicyPathSummary").value !== "false",
@@ -432,7 +617,11 @@ async function boot() {
   wireNavigation();
   $("configForm").addEventListener("submit", (event) => saveConfig(event).catch((error) => showToast(error.message)));
   $("refreshButton").addEventListener("click", () => {
-    Promise.all([refreshStatus(), loadAuthProviders()]).catch((error) => showToast(error.message));
+    Promise.all([refreshStatus(), loadAuthProviders(), loadRequestDiagnostics(), loadAutoResearchStatus(), loadAutoResearchCandidates()]).catch((error) => showToast(error.message));
+  });
+  $("refreshDiagnosticsButton").addEventListener("click", () => loadRequestDiagnostics().catch((error) => showToast(error.message)));
+  $("refreshAutoResearchButton").addEventListener("click", () => {
+    Promise.all([loadAutoResearchStatus(), loadAutoResearchCandidates()]).catch((error) => showToast(error.message));
   });
   $("rotateTokenButton").addEventListener("click", () => rotateToken().catch((error) => showToast(error.message)));
   $("copyTokenButton").addEventListener("click", () => copyToken().catch((error) => showToast(error.message)));
@@ -458,6 +647,9 @@ async function boot() {
     await loadConfig();
     await loadAuthProviders();
     await refreshStatus();
+    await loadRequestDiagnostics();
+    await loadAutoResearchStatus();
+    await loadAutoResearchCandidates();
     setOutput("就绪。");
   } catch (error) {
     setOutput(error.message);

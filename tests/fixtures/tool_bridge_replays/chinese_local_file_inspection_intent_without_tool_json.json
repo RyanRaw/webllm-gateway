@@ -1,0 +1,78 @@
+{
+  "id": "chinese_local_file_inspection_intent_without_tool_json",
+  "description": "Rejects Chinese plain text that says the model needs to inspect project files without tool_json.",
+  "protocol": "anthropic_messages",
+  "model": "qwen-coder/qwen-coder-plus",
+  "tool_bridge_config": {
+    "mode": "strict",
+    "activationPolicy": "auto",
+    "exposurePolicy": "local-agent",
+    "toolProfile": "auto",
+    "maxCallsPerTurn": 4
+  },
+  "input": {
+    "task_text": "审查 mindcraft 项目代码并制定改进计划。",
+    "messages": [
+      {
+        "role": "user",
+        "content": "审查 mindcraft 项目代码并制定改进计划。"
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "toolu_glob",
+            "name": "Glob",
+            "input": {
+              "path": "E:/ProjectX/mindcraft",
+              "pattern": "*.py"
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "toolu_glob",
+            "content": "rewrite_content.py"
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": "继续"
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "Glob",
+          "description": "List files.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Read",
+          "description": "Read files.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      }
+    ],
+    "model_text": "审查mindcraft项目代码并制定改进计划。需直接查看文件内容识别问题。下一步检查项目结构和核心文件。"
+  },
+  "expected": {
+    "error": "deferred_tool_action_without_call",
+    "tool_calls": [],
+    "warning_contains": null
+  }
+}

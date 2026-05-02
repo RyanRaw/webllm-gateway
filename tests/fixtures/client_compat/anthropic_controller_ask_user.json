@@ -1,0 +1,59 @@
+{
+  "id": "anthropic_controller_blocks_unapproved_shell",
+  "description": "Anthropic clients receive declared Bash calls unchanged in ds2api-style all profile.",
+  "protocol": "anthropic_messages",
+  "tool_bridge_config": {
+    "mode": "strict",
+    "activationPolicy": "auto",
+    "exposurePolicy": "all",
+    "toolProfile": "all"
+  },
+  "request": {
+    "model": "web-model",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Implement the local project improvement plan."
+      }
+    ],
+    "tools": [
+      {
+        "name": "AskUserQuestion",
+        "input_schema": {
+          "type": "object"
+        }
+      },
+      {
+        "name": "Bash",
+        "description": "Run shell commands",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    ],
+    "max_tokens": 1024
+  },
+  "upstream": {
+    "content": "```tool_json\n{\"calls\":[{\"id\":\"call_1\",\"name\":\"Bash\",\"input\":{\"command\":\"pip install -r requirements.txt\"}}]}\n```"
+  },
+  "expected": {
+    "status": 200,
+    "upstreamCalls": 1,
+    "upstreamOmits": [
+      "tools",
+      "tool_choice"
+    ],
+    "stopReason": "tool_use",
+    "toolCall": {
+      "name": "Bash",
+      "input": {
+        "command": "pip install -r requirements.txt"
+      }
+    }
+  }
+}

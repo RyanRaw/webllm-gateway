@@ -1,0 +1,84 @@
+{
+  "id": "anthropic_controller_final_with_evidence",
+  "description": "Anthropic controller allows a local review final only after discovery and read evidence exists.",
+  "protocol": "anthropic_messages",
+  "tool_bridge_config": {
+    "mode": "strict",
+    "activationPolicy": "auto",
+    "exposurePolicy": "all",
+    "toolProfile": "all"
+  },
+  "request": {
+    "model": "web-model",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Review this local project."
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "toolu_glob",
+            "name": "Glob",
+            "input": {
+              "pattern": "**/*.py"
+            }
+          },
+          {
+            "type": "tool_use",
+            "id": "toolu_read",
+            "name": "Read",
+            "input": {
+              "file_path": "README.md"
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "toolu_glob",
+            "content": "README.md\napp.py"
+          },
+          {
+            "type": "tool_result",
+            "tool_use_id": "toolu_read",
+            "content": "project readme"
+          }
+        ]
+      }
+    ],
+    "tools": [
+      {
+        "name": "Glob",
+        "input_schema": {
+          "type": "object"
+        }
+      },
+      {
+        "name": "Read",
+        "input_schema": {
+          "type": "object"
+        }
+      }
+    ],
+    "max_tokens": 1024
+  },
+  "upstream": {
+    "content": "Review summary: inspected the discovered files and found no critical issues."
+  },
+  "expected": {
+    "status": 200,
+    "upstreamCalls": 1,
+    "upstreamOmits": [
+      "tools",
+      "tool_choice"
+    ],
+    "stopReason": "end_turn",
+    "textContains": "Review summary"
+  }
+}

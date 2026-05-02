@@ -1,0 +1,161 @@
+{
+  "id": "claude_unsafe_local_shell_command_013928",
+  "description": "Claude Code read-only Git preflight should be accepted even when Bash is hidden from the prompt.",
+  "protocol": "anthropic_messages",
+  "model": "qwen-coder/qwen-coder-plus",
+  "tool_bridge_config": {
+    "mode": "strict",
+    "activationPolicy": "auto",
+    "exposurePolicy": "local-agent",
+    "toolProfile": "auto",
+    "maxCallsPerTurn": 4
+  },
+  "input": {
+    "task_text": "审查下当前项目的代码并给出详细的改进计划",
+    "messages": [
+      {
+        "role": "user",
+        "content": "审查下当前项目的代码并给出详细的改进计划"
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "Read",
+          "description": "Read tool",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "file_path": {
+                "type": "string"
+              },
+              "content": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "file_path"
+            ]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Glob",
+          "description": "Glob tool",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "pattern": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "pattern"
+            ]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Grep",
+          "description": "Grep tool",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "pattern": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "pattern"
+            ]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Edit",
+          "description": "Edit tool",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "file_path": {
+                "type": "string"
+              },
+              "content": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "file_path"
+            ]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Write",
+          "description": "Write tool",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "file_path": {
+                "type": "string"
+              },
+              "content": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "file_path"
+            ]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Bash",
+          "description": "Bash tool",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "command": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "command"
+            ]
+          }
+        }
+      }
+    ],
+    "model_text": "```tool_json\n{\"calls\":[{\"id\":\"toolu_call_web_preflight_1\",\"name\":\"Bash\",\"input\":{\"command\":\"git -C E:/ProjectX/mindcraft remote -v && git -C E:/ProjectX/mindcraft status --short\"}}]}\n```"
+  },
+  "expected": {
+    "error": null,
+    "tool_calls": [
+      {
+        "id": "toolu_call_web_preflight_1",
+        "name": "Bash",
+        "input": {
+          "command": "git -C E:/ProjectX/mindcraft remote -v && git -C E:/ProjectX/mindcraft status --short"
+        }
+      }
+    ],
+    "warning_contains": null
+  }
+}

@@ -1,0 +1,94 @@
+{
+  "id": "repeat_ask_user_question_without_progress",
+  "description": "Rejects a second AskUserQuestion immediately after the previous AskUserQuestion already received an answer.",
+  "protocol": "anthropic_messages",
+  "model": "qwen-web/qwen3.6-max-preview",
+  "tool_bridge_config": {
+    "mode": "strict",
+    "activationPolicy": "auto",
+    "exposurePolicy": "local-agent",
+    "toolProfile": "auto",
+    "maxCallsPerTurn": 4
+  },
+  "input": {
+    "task_text": "/using-superpowers implement the local codebase plan",
+    "messages": [
+      {
+        "role": "user",
+        "content": "/using-superpowers implement the local codebase plan"
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "call_1",
+            "name": "AskUserQuestion",
+            "input": {
+              "questions": [
+                {
+                  "header": "Secret management",
+                  "question": "How does this project handle API keys and database passwords?",
+                  "options": [
+                    {
+                      "label": "Environment variables",
+                      "description": "Use injected environment variables"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "call_1",
+            "content": "User answered: use environment variables without .env files."
+          }
+        ]
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "AskUserQuestion",
+          "description": "Ask the user a short question.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Read",
+          "description": "Read files.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Glob",
+          "description": "Find files by glob pattern.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      }
+    ],
+    "model_text": "```tool_json\n{\"calls\":[{\"id\":\"call_2\",\"name\":\"AskUserQuestion\",\"input\":{\"questions\":[{\"header\":\"Secret management\",\"question\":\"How does this project handle API key and database password secrets?\",\"options\":[{\"label\":\"Environment variables\",\"description\":\"Use injected environment variables\"}]}]}}]}\n```"
+  },
+  "expected": {
+    "error": "repeat_same_ask_user_without_progress",
+    "tool_calls": [],
+    "warning_contains": null
+  }
+}

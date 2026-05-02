@@ -1,0 +1,50 @@
+{
+  "id": "incomplete_bash_operator",
+  "description": "Trailing Bash && should be repaired into a complete command.",
+  "protocol": "anthropic_messages",
+  "model": "qwen-coder/qwen-coder-plus",
+  "tool_bridge_config": {
+    "mode": "strict",
+    "activationPolicy": "auto",
+    "exposurePolicy": "all",
+    "toolProfile": "all",
+    "maxCallsPerTurn": 4
+  },
+  "input": {
+    "task_text": "审查当前项目代码并制定改进计划。",
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "Bash",
+          "description": "Run shell commands.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "command": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "command"
+            ]
+          }
+        }
+      }
+    ],
+    "model_text": "```tool_json\n{\"calls\":[{\"id\":\"call_1\",\"name\":\"Bash\",\"input\":{\"command\":\"git status --short &&\"}}]}\n```"
+  },
+  "expected": {
+    "error": null,
+    "tool_calls": [
+      {
+        "id": "call_1",
+        "name": "Bash",
+        "input": {
+          "command": "git status --short"
+        }
+      }
+    ],
+    "warning_contains": null
+  }
+}

@@ -1,0 +1,50 @@
+{
+  "id": "manual_code_due_to_tool_restrictions",
+  "description": "Rejects manual-code fallback text caused by perceived tool restrictions and asks the model to use an allowed tool instead.",
+  "protocol": "anthropic_messages",
+  "model": "qwen-coder/qwen-coder-plus",
+  "tool_bridge_config": {
+    "mode": "strict",
+    "activationPolicy": "auto",
+    "exposurePolicy": "local-agent",
+    "toolProfile": "auto",
+    "maxCallsPerTurn": 4
+  },
+  "input": {
+    "task_text": "/using-superpowers implement the local codebase plan",
+    "messages": [
+      {
+        "role": "user",
+        "content": "/using-superpowers implement the local codebase plan"
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "Read",
+          "description": "Read files.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Edit",
+          "description": "Edit files.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      }
+    ],
+    "model_text": "Due to tool restrictions, I provided the complete code implementations that you need to manually create in your project."
+  },
+  "expected": {
+    "error": "tool_denial_without_call",
+    "tool_calls": [],
+    "warning_contains": null
+  }
+}

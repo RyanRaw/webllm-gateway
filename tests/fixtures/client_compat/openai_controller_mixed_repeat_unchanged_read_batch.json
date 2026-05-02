@@ -1,0 +1,87 @@
+{
+  "id": "openai_controller_mixed_repeat_unchanged_read_batch",
+  "description": "OpenAI controller drops repeated unchanged Read calls from a mixed batch while preserving valid progress calls.",
+  "protocol": "openai_chat_completions",
+  "tool_bridge_config": {
+    "mode": "strict",
+    "activationPolicy": "auto",
+    "exposurePolicy": "all",
+    "toolProfile": "agent"
+  },
+  "request": {
+    "model": "web-model",
+    "messages": [
+      {
+        "role": "user",
+        "content": "/using-superpowers implement the local codebase plan"
+      },
+      {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "call_read_old",
+            "type": "function",
+            "function": {
+              "name": "Read",
+              "arguments": "{\"file_path\":\"E:/ProjectX/mindcraft/rewrite_content.py\"}"
+            }
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "tool_call_id": "call_read_old",
+        "content": "File unchanged since last read. The content from the earlier Read tool_result in this conversation is still current - refer to that instead of re-reading."
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "Read",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Glob",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Grep",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      }
+    ]
+  },
+  "upstream": {
+    "content": "```tool_json\n{\"calls\":[{\"id\":\"call_repeat\",\"name\":\"Read\",\"input\":{\"file_path\":\"E:/ProjectX/mindcraft/rewrite_content.py\"}},{\"id\":\"call_glob\",\"name\":\"Glob\",\"input\":{\"path\":\"E:/ProjectX/mindcraft\",\"pattern\":\"*.py\"}},{\"id\":\"call_read\",\"name\":\"Read\",\"input\":{\"file_path\":\"E:/ProjectX/mindcraft/sync_to_feishu.py\"}}]}\n```"
+  },
+  "expected": {
+    "status": 200,
+    "upstreamCalls": 1,
+    "upstreamOmits": [
+      "tools",
+      "tool_choice"
+    ],
+    "finishReason": "tool_calls",
+    "toolCall": {
+      "name": "Glob",
+      "input": {
+        "path": "E:/ProjectX/mindcraft",
+        "pattern": "*.py"
+      }
+    }
+  }
+}

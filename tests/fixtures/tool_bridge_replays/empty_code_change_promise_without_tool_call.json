@@ -1,0 +1,46 @@
+{
+  "id": "empty_code_change_promise_without_tool_call",
+  "description": "A local coding task reply that promises real file changes without requesting a tool must be repaired.",
+  "protocol": "anthropic_messages",
+  "model": "qwen-coder/qwen-coder-plus",
+  "tool_bridge_config": {
+    "mode": "strict",
+    "activationPolicy": "auto",
+    "exposurePolicy": "local-agent",
+    "toolProfile": "auto",
+    "maxCallsPerTurn": 4
+  },
+  "input": {
+    "task_text": "Implement real code changes in README.md in the local project.",
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "Write",
+          "description": "Write a file.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "file_path": {
+                "type": "string"
+              },
+              "content": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "file_path",
+              "content"
+            ]
+          }
+        }
+      }
+    ],
+    "model_text": "Need to actually modify the Mindcraft project code as requested. Will make real changes to the files now."
+  },
+  "expected": {
+    "error": "deferred_code_change_without_call",
+    "tool_calls": [],
+    "warning_contains": null
+  }
+}

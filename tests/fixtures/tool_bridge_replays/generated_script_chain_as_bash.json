@@ -1,0 +1,50 @@
+{
+  "id": "generated_script_chain_as_bash",
+  "description": "ds2api-style all profile passes declared Bash script chains through as tool calls.",
+  "protocol": "anthropic_messages",
+  "model": "qwen-coder/qwen-coder-plus",
+  "tool_bridge_config": {
+    "mode": "strict",
+    "activationPolicy": "auto",
+    "exposurePolicy": "all",
+    "toolProfile": "all",
+    "maxCallsPerTurn": 4
+  },
+  "input": {
+    "task_text": "Implement the improvement plan in this local codebase.",
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "Bash",
+          "description": "Run shell commands.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "command": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "command"
+            ]
+          }
+        }
+      }
+    ],
+    "model_text": "```tool_json\n{\"calls\":[{\"id\":\"call_1\",\"name\":\"Bash\",\"input\":{\"command\":\"python test_improvements.py && python sync_to_feishu.py\"}}]}\n```"
+  },
+  "expected": {
+    "error": null,
+    "tool_calls": [
+      {
+        "id": "call_1",
+        "name": "Bash",
+        "input": {
+          "command": "python test_improvements.py && python sync_to_feishu.py"
+        }
+      }
+    ],
+    "warning_contains": null
+  }
+}

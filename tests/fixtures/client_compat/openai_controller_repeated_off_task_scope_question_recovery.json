@@ -1,0 +1,103 @@
+{
+  "id": "openai_controller_repeated_off_task_scope_question_recovery",
+  "description": "OpenAI controller performs a second-stage recovery when the model repeats an off-task scope authorization question after repair.",
+  "protocol": "openai_chat_completions",
+  "tool_bridge_config": {
+    "mode": "strict",
+    "activationPolicy": "auto",
+    "exposurePolicy": "all",
+    "toolProfile": "agent"
+  },
+  "request": {
+    "model": "web-model",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Review local project code and make a detailed improvement plan."
+      },
+      {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "call_read",
+            "type": "function",
+            "function": {
+              "name": "Read",
+              "arguments": "{\"file_path\":\"README.md\"}"
+            }
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "tool_call_id": "call_read",
+        "content": "Project overview."
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "AskUserQuestion",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Read",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Glob",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Edit",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Write",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      }
+    ]
+  },
+  "upstream": {
+    "contents": [
+      "```tool_json\n{\"calls\":[{\"id\":\"call_question\",\"name\":\"AskUserQuestion\",\"input\":{\"questions\":[{\"header\":\"Scope\",\"question\":\"May I migrate project modules into src and rewrite module boundaries?\",\"options\":[{\"label\":\"Allow\",\"description\":\"Migrate modules\"},{\"label\":\"Skip\",\"description\":\"Only provide the plan\"}]}]}}]}\n```",
+      "```tool_json\n{\"calls\":[{\"id\":\"call_question\",\"name\":\"AskUserQuestion\",\"input\":{\"questions\":[{\"header\":\"Scope\",\"question\":\"May I migrate project modules into src and rewrite module boundaries?\",\"options\":[{\"label\":\"Allow\",\"description\":\"Migrate modules\"},{\"label\":\"Skip\",\"description\":\"Only provide the plan\"}]}]}}]}\n```",
+      "Detailed improvement plan: keep the current structure, add focused tests, and stage changes by risk."
+    ]
+  },
+  "expected": {
+    "status": 200,
+    "upstreamCalls": 3,
+    "upstreamOmits": [
+      "tools",
+      "tool_choice"
+    ],
+    "finishReason": "stop",
+    "textContains": "Detailed improvement plan"
+  }
+}

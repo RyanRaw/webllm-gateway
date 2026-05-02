@@ -209,6 +209,109 @@ h2 {
   margin-bottom: 16px;
 }
 
+.diagnostics-panel {
+  margin-bottom: 16px;
+}
+
+.auto-research-panel {
+  margin-bottom: 16px;
+}
+
+.diagnostics-status {
+  color: var(--muted);
+  font-size: 13px;
+  margin-bottom: 12px;
+}
+
+.diagnostics-list {
+  display: grid;
+  gap: 10px;
+}
+
+.diagnostic-item {
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  background: #f9faf8;
+  padding: 12px;
+}
+
+.diagnostic-item.is-error {
+  border-left-color: var(--danger);
+}
+
+.diagnostic-title {
+  font-weight: 760;
+  overflow-wrap: anywhere;
+}
+
+.diagnostic-meta {
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 4px;
+}
+
+.diagnostic-item p {
+  color: var(--text);
+  margin-top: 8px;
+  overflow-wrap: anywhere;
+}
+
+.auto-research-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.auto-research-body {
+  display: grid;
+  grid-template-columns: minmax(0, 0.75fr) minmax(0, 1fr) minmax(0, 1.25fr);
+  gap: 14px;
+  margin-bottom: 14px;
+}
+
+.auto-research-list {
+  display: grid;
+  gap: 8px;
+  min-height: 42px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.auto-research-row {
+  align-items: center;
+  background: #f9faf8;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+  padding: 10px 12px;
+}
+
+.auto-research-row strong {
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.auto-research-row span {
+  color: var(--muted);
+  flex: 0 0 auto;
+  font-size: 12px;
+}
+
+.auto-research-row.stacked {
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.auto-research-row.stacked span {
+  flex: 1 1 auto;
+  overflow-wrap: anywhere;
+}
+
 .native-console {
   align-items: center;
   background: #f7fbfa;
@@ -492,6 +595,8 @@ textarea:focus {
   }
 
   .status-grid,
+  .auto-research-grid,
+  .auto-research-body,
   .auth-grid,
   .layout-grid,
   .native-console,

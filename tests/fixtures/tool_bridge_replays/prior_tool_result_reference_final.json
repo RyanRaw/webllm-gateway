@@ -1,0 +1,85 @@
+{
+  "id": "prior_tool_result_reference_final",
+  "description": "Allows final prose to reference an earlier tool result without being mistaken for a new deferred tool call.",
+  "protocol": "anthropic_messages",
+  "model": "qwen-web/qwen3.6-max-preview",
+  "tool_bridge_config": {
+    "mode": "strict",
+    "activationPolicy": "auto",
+    "exposurePolicy": "local-agent",
+    "toolProfile": "auto",
+    "maxCallsPerTurn": 4
+  },
+  "input": {
+    "task_text": "Review the current local project code and make an improvement plan.",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Review the current local project code and make an improvement plan."
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "call_glob",
+            "name": "Glob",
+            "input": {
+              "path": ".",
+              "pattern": "*.py"
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "call_glob",
+            "content": "rewrite_content.py",
+            "is_error": false
+          }
+        ]
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "Glob",
+          "description": "Find files by glob pattern.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Read",
+          "description": "Read files.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Grep",
+          "description": "Search files.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      }
+    ],
+    "model_text": "Review summary: use the earlier Glob result and focus on the listed Python files."
+  },
+  "expected": {
+    "error": null,
+    "tool_calls": [],
+    "warning_contains": null
+  }
+}

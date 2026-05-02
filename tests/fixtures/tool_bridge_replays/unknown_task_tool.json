@@ -1,0 +1,55 @@
+{
+  "id": "unknown_task_tool",
+  "description": "Unknown Task delegation tool should map to the available Agent equivalent.",
+  "protocol": "anthropic_messages",
+  "model": "qwen-coder/qwen-coder-plus",
+  "tool_bridge_config": {
+    "mode": "strict",
+    "activationPolicy": "auto",
+    "exposurePolicy": "all",
+    "toolProfile": "all",
+    "maxCallsPerTurn": 4
+  },
+  "input": {
+    "task_text": "审查当前项目代码并制定改进计划。",
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "Agent",
+          "description": "Launch a focused analysis agent.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "prompt": {
+                "type": "string"
+              },
+              "description": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "prompt",
+              "description"
+            ]
+          }
+        }
+      }
+    ],
+    "model_text": "```tool_json\n{\"calls\":[{\"id\":\"call_1\",\"name\":\"Task\",\"input\":{\"description\":\"Inspect parser behavior\",\"prompt\":\"Review replay parsing requirements.\"}}]}\n```"
+  },
+  "expected": {
+    "error": null,
+    "tool_calls": [
+      {
+        "id": "call_1",
+        "name": "Agent",
+        "input": {
+          "description": "Inspect parser behavior",
+          "prompt": "Review replay parsing requirements."
+        }
+      }
+    ],
+    "warning_contains": null
+  }
+}

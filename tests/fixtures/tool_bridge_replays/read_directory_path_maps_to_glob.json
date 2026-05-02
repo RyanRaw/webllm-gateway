@@ -1,0 +1,78 @@
+{
+  "id": "read_directory_path_maps_to_glob",
+  "description": "Maps Read on an apparent directory path to a Glob directory listing so Claude Code does not receive EISDIR for project overview requests.",
+  "protocol": "anthropic_messages",
+  "model": "qwen-coder/qwen-coder-plus",
+  "tool_bridge_config": {
+    "mode": "strict",
+    "activationPolicy": "auto",
+    "exposurePolicy": "local-agent",
+    "toolProfile": "auto",
+    "maxCallsPerTurn": 4
+  },
+  "input": {
+    "task_text": "/using-superpowers implement the local codebase plan",
+    "messages": [
+      {
+        "role": "user",
+        "content": "/using-superpowers implement the local codebase plan"
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "Read",
+          "description": "Read files.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "file_path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "file_path"
+            ]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Glob",
+          "description": "Find files by glob pattern.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "pattern": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "pattern"
+            ]
+          }
+        }
+      }
+    ],
+    "model_text": "```tool_json\n{\"calls\":[{\"id\":\"call_1\",\"name\":\"Read\",\"input\":{\"file_path\":\"E:/ProjectX/mindcraft\"}}]}\n```"
+  },
+  "expected": {
+    "error": null,
+    "tool_calls": [
+      {
+        "id": "call_1",
+        "name": "Glob",
+        "input": {
+          "path": "E:/ProjectX/mindcraft",
+          "pattern": "*"
+        }
+      }
+    ],
+    "warning_contains": null
+  }
+}

@@ -1,0 +1,62 @@
+{
+  "id": "openai_controller_repair_then_tool_call",
+  "description": "OpenAI controller returns the first declared Bash call unchanged in ds2api-style all profile.",
+  "protocol": "openai_chat_completions",
+  "tool_bridge_config": {
+    "mode": "strict",
+    "activationPolicy": "auto",
+    "exposurePolicy": "all",
+    "toolProfile": "all"
+  },
+  "request": {
+    "model": "web-model",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Implement the local project improvement plan."
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "Bash",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "read_file",
+          "description": "Read a file",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      }
+    ]
+  },
+  "upstream": {
+    "contents": [
+      "```tool_json\n{\"calls\":[{\"id\":\"call_bad\",\"name\":\"Bash\",\"input\":{\"command\":\"python-dotenv>=1.0.0 && pytest>=7.0.0\"}}]}\n```",
+      "```tool_json\n{\"calls\":[{\"id\":\"call_read\",\"name\":\"read_file\",\"input\":{\"path\":\"README.md\"}}]}\n```"
+    ]
+  },
+  "expected": {
+    "status": 200,
+    "upstreamCalls": 1,
+    "upstreamOmits": [
+      "tools",
+      "tool_choice"
+    ],
+    "finishReason": "tool_calls",
+    "toolCall": {
+      "name": "Bash",
+      "input": {
+        "command": "python-dotenv>=1.0.0 && pytest>=7.0.0"
+      }
+    }
+  }
+}

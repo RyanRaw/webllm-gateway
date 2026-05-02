@@ -89,11 +89,16 @@ const selectedProviderWorkers = computed(() => {
   return matched.length ? matched : workerOptions.value;
 });
 
+const selectedProviderDefaultModel = computed(() => providerAvailableModels(selectedProvider.value)[0] || '');
+
 const filteredModels = computed(() => {
   const query = modelSearch.value.trim().toLowerCase();
   return (onboarding.value.models || []).filter((model) => {
     const modelId = String(model.id || '');
     const owner = providerForModel(modelId);
+    const modelOwnerId = onboarding.value.models?.find((item) => item.id === modelId)?.owned_by;
+    const hasKnownHiddenOwner = !owner && providers.value.some((provider) => provider.id === modelOwnerId);
+    if (hasKnownHiddenOwner) return false;
     const inScope = modelScope.value === 'all' || !selectedProvider.value || owner?.id === selectedProvider.value.id;
     const matchesQuery = !query || modelId.toLowerCase().includes(query) || owner?.name?.toLowerCase().includes(query);
     return inScope && matchesQuery;
@@ -103,7 +108,7 @@ const filteredModels = computed(() => {
 const clientConfig = computed(() => [
   `base_url = ${gatewayBaseUrl.value}`,
   `api_key = ${gatewayToken.value || '<网关令牌>'}`,
-  `model = ${selectedProvider.value?.availableModels?.[0] || onboarding.value.gateway?.defaultModel || '<模型 ID>'}`,
+  `model = ${selectedProvider.value ? (selectedProviderDefaultModel.value || '<当前平台没有验证可用模型>') : (onboarding.value.gateway?.defaultModel || '<模型 ID>')}`,
   '',
   '# KrisAI / OpenClaw / Hermes / Claude Code 都可以使用这组 OpenAI 兼容配置',
   '# 工具调用由 WebAI Gateway 转换为网页模型可理解的 prompt 协议',
@@ -122,6 +127,20 @@ const stepItems = computed(() => [
   { title: '使用模型', status: filteredModels.value.length ? 'finish' : 'wait' },
 ]);
 
+const progressTitle = computed(() => (actionKind.value === 'smoke' ? 'Provider 自检' : '授权进度'));
+const progressStepItems = computed(() => {
+  if (actionKind.value === 'smoke') {
+    return [{ title: '发起' }, { title: '协议闭环' }, { title: '完成' }];
+  }
+  return [
+    { title: '启动' },
+    { title: actionKind.value === 'direct' ? '检测登录' : '登录模式' },
+    { title: '完成' },
+  ];
+});
+const progressCurrent = computed(() => (actionLoading.value ? 1 : actionError.value ? 0 : 2));
+const progressStatus = computed(() => (actionError.value ? 'error' : 'process'));
+
 function isProviderReady(provider) {
   if (!provider) return false;
   if (provider.loginKind === 'direct') return Boolean(provider.credential?.authorized);
@@ -129,9 +148,19 @@ function isProviderReady(provider) {
 }
 
 function providerForModel(modelId) {
-  return providers.value.find((provider) => (provider.models || []).includes(modelId))
-    || providers.value.find((provider) => provider.id === onboarding.value.models?.find((model) => model.id === modelId)?.owned_by)
+  return providers.value.find((provider) => providerAvailableModels(provider).includes(modelId))
+    || providers.value.find((provider) => provider.id === onboarding.value.models?.find((model) => model.id === modelId)?.owned_by && providerAvailableModels(provider).includes(modelId))
     || null;
+}
+
+function providerAvailableModels(provider) {
+  return Array.isArray(provider?.availableModels) ? provider.availableModels : [];
+}
+
+function providerModelCount(provider) {
+  if (!provider) return 0;
+  if (Number.isFinite(provider.modelCount)) return provider.modelCount;
+  return providerAvailableModels(provider).length;
 }
 
 function capabilityLabels(provider) {
@@ -301,12 +330,76 @@ async function startWebAI2APILogin(provider) {
 }
 
 async function copyText(text, successText) {
+  if (!text) {
+    message.warning('没有可复制的内容');
+    return;
+  }
   await navigator.clipboard.writeText(text);
   message.success(successText);
 }
 
 function copyModel(modelId) {
   copyText(modelId, '模型 ID 已复制');
+}
+
+function copySelectedDefaultModel() {
+  if (!selectedProviderDefaultModel.value) {
+    message.warning('当前平台没有验证可用的模型');
+    return;
+  }
+  copyText(selectedProviderDefaultModel.value, '模型 ID 已复制');
+}
+
+function smokeResultLabel(id) {
+  const labels = {
+    models: '模型列表',
+    openai_text: 'OpenAI 文本',
+    openai_tool_use: 'OpenAI 工具调用',
+    anthropic_tool_use: 'Anthropic 工具调用',
+    anthropic_tool_result: 'Anthropic 工具结果',
+    auth: '授权状态',
+    unsupported: '支持范围',
+  };
+  return labels[id] || id;
+}
+
+function smokeResultDetail(item) {
+  if (item.message) return item.message;
+  const detail = item.detail || {};
+  if (detail.model) return detail.model;
+  if (detail.name) return `${detail.name} ${JSON.stringify(detail.input || {})}`;
+  if (detail.text) return detail.text;
+  return '';
+}
+
+async function runProviderSmoke() {
+  const provider = selectedProvider.value;
+  if (!provider) return;
+  resetActionState('smoke');
+  actionLoading.value = true;
+  try {
+    appendLog(`正在自检 ${provider.name}：模型、OpenAI 工具调用、Anthropic 工具闭环`);
+    const res = await fetch(`/api/admin/provider-smoke/${provider.id}`, { method: 'POST' });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    for (const item of data.results || []) {
+      const state = item.ok ? '通过' : '失败';
+      const detail = smokeResultDetail(item);
+      appendLog(`${state} · ${smokeResultLabel(item.id)}${detail ? ` · ${detail}` : ''}`);
+    }
+    if (!data.ok) {
+      actionError.value = `${provider.name} 自检未全部通过：${data.passed || 0}/${data.total || 0}`;
+      message.error(actionError.value);
+      return;
+    }
+    message.success(`${provider.name} 自检通过`);
+  } catch (error) {
+    actionError.value = error.message || String(error);
+    appendLog(`自检失败：${actionError.value}`);
+    message.error(actionError.value);
+  } finally {
+    actionLoading.value = false;
+  }
 }
 
 function openAdvanced(path) {
@@ -405,7 +498,7 @@ onMounted(loadOnboarding);
             >
               <span class="provider-main">
                 <strong>{{ provider.name }}</strong>
-                <small>{{ provider.modelCount || provider.models?.length || 0 }} 个模型</small>
+                <small>{{ providerModelCount(provider) }} 个已验证模型</small>
               </span>
               <span class="provider-tags">
                 <a-tag v-if="provider.loginKind === 'direct' && provider.credential?.authorized" color="success">已授权</a-tag>
@@ -443,6 +536,13 @@ onMounted(loadOnboarding);
               </a-tag>
             </div>
 
+            <a-alert
+              v-if="selectedProvider.availabilityMessage"
+              type="warning"
+              show-icon
+              :message="selectedProvider.availabilityMessage"
+            />
+
             <template v-if="selectedProvider.loginKind === 'direct'">
               <div class="field-block">
                 <label>授权浏览器调试地址</label>
@@ -477,9 +577,19 @@ onMounted(loadOnboarding);
                 <template #icon><LoginOutlined /></template>
                 {{ selectedProvider.loginKind === 'direct' ? '打开授权浏览器' : '进入登录模式' }}
               </a-button>
-              <a-button size="large" @click="copyText(selectedProvider.availableModels?.[0] || selectedProvider.models?.[0] || '', '模型 ID 已复制')">
+              <a-button size="large" :disabled="!selectedProviderDefaultModel" @click="copySelectedDefaultModel">
                 <template #icon><CopyOutlined /></template>
                 复制默认模型
+              </a-button>
+              <a-button
+                v-if="selectedProvider.loginKind === 'direct'"
+                size="large"
+                :loading="actionLoading && actionKind === 'smoke'"
+                :disabled="!isProviderReady(selectedProvider)"
+                @click="runProviderSmoke"
+              >
+                <template #icon><RocketOutlined /></template>
+                运行自检
               </a-button>
             </div>
 
@@ -598,7 +708,7 @@ onMounted(loadOnboarding);
       </section>
     </a-spin>
 
-    <a-modal v-model:open="progressVisible" title="授权进度" :footer="null" width="620px">
+    <a-modal v-model:open="progressVisible" :title="progressTitle" :footer="null" width="620px">
       <a-alert
         v-if="actionError"
         type="error"
@@ -608,13 +718,9 @@ onMounted(loadOnboarding);
       />
       <a-steps
         size="small"
-        :current="actionLoading ? 1 : actionError ? 0 : 2"
-        :status="actionError ? 'error' : 'process'"
-        :items="[
-          { title: '启动' },
-          { title: actionKind === 'direct' ? '检测登录' : '登录模式' },
-          { title: '完成' },
-        ]"
+        :current="progressCurrent"
+        :status="progressStatus"
+        :items="progressStepItems"
       />
       <div class="log-box">
         <div v-for="line in actionLogs" :key="line">{{ line }}</div>

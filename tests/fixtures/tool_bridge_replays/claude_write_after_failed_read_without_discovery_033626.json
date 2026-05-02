@@ -1,0 +1,273 @@
+{
+  "id": "claude_write_after_failed_read_without_discovery_033626",
+  "description": "Auto-collected Claude Code ToolBridge failure candidate.",
+  "protocol": "anthropic_messages",
+  "model": "qwen-coder/qwen-coder-plus",
+  "tool_bridge_config": {
+    "mode": "strict",
+    "activationPolicy": "auto",
+    "exposurePolicy": "local-agent",
+    "toolProfile": "auto",
+    "maxCallsPerTurn": 4
+  },
+  "input": {
+    "task_text": "按计划落地改进，最强大脑一次性彻底改对",
+    "messages": [
+      {
+        "role": "user",
+        "content": "按计划落地改进，最强大脑一次性彻底改对"
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "toolu_call_1",
+            "name": "Write",
+            "input": {
+              "file_path": "E:/ProjectX/mindcraft/security.py",
+              "content": "\"\"\"\nSecurity utilities for Mindcraft application.\n\"\"\"\nimport re\nimport html\nfrom typing import Dict, Any, Optional\nfrom urllib.parse import urlparse\nimport logging\n\ndef validate_url(url: str) -> bool:\n    \"\"\"\n    Validate if URL is properly formatted and safe.\n\n    Args:\n        url: URL to validate\n\n    Returns:\n        True if valid and safe, False otherwise\n    \"\"\"\n    try:\n        parsed = urlparse(url)\n\n        # Check if scheme is http or https\n        if parsed.scheme not in ['http', 'https']:\n            return False\n\n        # Check for suspicious patterns in the URL\n        suspicious_patterns = [\n            r'\\.\\./',  # Directory traversal\n            r'%2e%2e%2f',  # Encoded directory traversal\n            r'\\.\\\\\\\\',  # Windows directory traversal\n            r'%2e%2e%5c',  # Encoded Windows directory traversal\n        ]\n\n        lower_url = url.lower()\n        for pattern in suspicious_patterns:\n            if re.search(pattern, lower_url):\n                return False\n\n        # Basic domain validation (not IP address, reasonable length)\n        if not parsed.netloc or len(parsed.netloc) > 253:\n            return False\n\n        # Check for internal IP addresses\n        netloc_parts = parsed.netloc.split(':')[0].split('.')\n        if len(netloc_parts) == 4 and netloc_parts[0] in ['10', '172', '192']:\n            # Basic check for private IP ranges\n            if netloc_parts[0] == '10':\n                return False\n            elif netloc_parts[0] == '172' and 16 <= int(netloc_parts[1]) <= 31:\n                return False\n            elif netloc_parts[0] == '192' and netloc_parts[1] == '168':\n                return False\n\n        return True\n    except Exception:\n        return False\n\ndef sanitize_content(content: str) -> str:\n    \"\"\"\n    Sanitize content to prevent XSS and other injection attacks.\n\n    Args:\n        content: Content to sanitize\n\n    Returns:\n        Sanitized content\n    \"\"\"\n    if not content:\n        return content\n\n    # Remove pot\n...[truncated 3708 chars]"
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "tool_use_id": "toolu_call_1",
+            "type": "tool_result",
+            "content": "File created successfully at: E:/ProjectX/mindcraft/security.py"
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "toolu_call_1",
+            "name": "Write",
+            "input": {
+              "file_path": "E:/ProjectX/mindcraft/security.py",
+              "content": "# -*- coding: utf-8 -*-\n\"\"\"\nSecurity utilities for Mindcraft application.\n\"\"\"\nimport re\nimport html\nfrom typing import Dict, Any, Optional\nfrom urllib.parse import urlparse\nimport logging\n\ndef validate_url(url: str) -> bool:\n    \"\"\"\n    Validate if URL is properly formatted and safe.\n\n    Args:\n        url: URL to validate\n\n    Returns:\n        True if valid and safe, False otherwise\n    \"\"\"\n    try:\n        parsed = urlparse(url)\n\n        # Check if scheme is http or https\n        if parsed.scheme not in ['http', 'https']:\n            return False\n\n        # Check for suspicious patterns in the URL\n        suspicious_patterns = [\n            r'\\.\\./',  # Directory traversal\n            r'%2e%2e%2f',  # Encoded directory traversal\n            r'\\.\\\\\\\\',  # Windows directory traversal\n            r'%2e%2e%5c',  # Encoded Windows directory traversal\n        ]\n\n        lower_url = url.lower()\n        for pattern in suspicious_patterns:\n            if re.search(pattern, lower_url):\n                return False\n\n        # Basic domain validation (not IP address, reasonable length)\n        if not parsed.netloc or len(parsed.netloc) > 253:\n            return False\n\n        # Check for internal IP addresses\n        netloc_parts = parsed.netloc.split(':')[0].split('.')\n        if len(netloc_parts) == 4 and netloc_parts[0] in ['10', '172', '192']:\n            # Basic check for private IP ranges\n            if netloc_parts[0] == '10':\n                return False\n            elif netloc_parts[0] == '172' and 16 <= int(netloc_parts[1]) <= 31:\n                return False\n            elif netloc_parts[0] == '192' and netloc_parts[1] == '168':\n                return False\n\n        return True\n    except Exception:\n        return False\n\ndef sanitize_content(content: str) -> str:\n    \"\"\"\n    Sanitize content to prevent XSS and other injection attacks.\n\n    Args:\n        content: Content to sanitize\n\n    Returns:\n        Sanitized content\n    \"\"\"\n    if not content:\n        return c\n...[truncated 3730 chars]"
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "tool_use_id": "toolu_call_1",
+            "type": "tool_result",
+            "content": "The file E:/ProjectX/mindcraft/security.py has been updated successfully."
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "Using [using-superpowers] to actually implement code changes in the Mindcraft project.\n\nProject code changed. Security module added at E:/ProjectX/mindcraft/security.py."
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "toolu_call_1",
+            "name": "Read",
+            "input": {
+              "file_path": "E:/ProjectX/mindcraft/tests/test_config.py"
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "content": "File does not exist. Note: your current working directory is E:\\ProjectX\\mindcraft.",
+            "is_error": true,
+            "tool_use_id": "toolu_call_1"
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "toolu_call_1",
+            "name": "Read",
+            "input": {
+              "file_path": "E:/ProjectX/mindcraft/tests/test_config.py"
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "content": "File does not exist. Note: your current working directory is E:\\ProjectX\\mindcraft.",
+            "is_error": true,
+            "tool_use_id": "toolu_call_1"
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "上游模型请求了当前未允许或无效的工具调用，Gateway 已拒绝该工具 JSON。\n错误码：invalid_shell_command_artifact\n原因：git clone contains a placeholder repository URL. Use a real URL only when the user explicitly asked to clone a repository.\n模型请求的工具：Mindcraft, print, _deep_merge, yaml.dump, example_pipeline, example_cli_commands, syncer.send_message\n当前允许工具：AskUserQuestion, Bash, Edit, Glob, Grep, LSP, Read, Skill, WebFetch, WebSearch, Write\n请重试；如果再次出现，请把这段诊断发给 Gateway 适配层排查。Gateway 不会执行未注册工具。"
+          }
+        ]
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "toolu_call_1",
+            "name": "Read",
+            "input": {
+              "file_path": "E:/ProjectX/mindcraft/mindcraft_system.py"
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "content": "File does not exist. Note: your current working directory is E:\\ProjectX\\mindcraft.",
+            "is_error": true,
+            "tool_use_id": "toolu_call_1"
+          }
+        ]
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "Read",
+          "description": "Read tool",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "file_path": {
+                "type": "string"
+              },
+              "content": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "file_path"
+            ]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Glob",
+          "description": "Glob tool",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "pattern": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "pattern"
+            ]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Grep",
+          "description": "Grep tool",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "pattern": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "pattern"
+            ]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Edit",
+          "description": "Edit tool",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "file_path": {
+                "type": "string"
+              },
+              "content": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "file_path"
+            ]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Write",
+          "description": "Write tool",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "file_path": {
+                "type": "string"
+              },
+              "content": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "file_path"
+            ]
+          }
+        }
+      }
+    ],
+    "model_text": "```tool_json\n{\"calls\":[{\"id\":\"toolu_call_1\",\"name\":\"Write\",\"input\":{\"file_path\":\"mindcraft_system.py\",\"content\":\"\\\"\\\"\\\"\\nMindcraft System - Main Integration Module\\nIntegrates all components of the Mindcraft content curation system\\n\\\"\\\"\\\"\\nimport os\\nimport sys\\nimport logging\\nfrom datetime import datetime\\nfrom typing import Dict, List, Optional, Any\\nimport json\\n\\n# Add project root to path\\nsys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))\\n\\nfrom fetch_wechat import WeChatFetcher\\nfrom rewrite_content import ContentRewriter\\nfrom sync_to_feishu import FeishuSyncer\\nfrom config.settings import get_config\\nfrom security import validate_url, sanitize_content, log_security_event\\nimport click\\n\\n\\nclass MindcraftSystem:\\n    \\\"\\\"\\\"\\n    Main system class that orchestrates the entire content curation workflow.\\n    Integrates fetching, rewriting, and synchronization capabilities.\\n    \\\"\\\"\\\"\\n\\n    def __init__(self):\\n        \\\"\\\"\\\"Initialize the Mindcraft system with all required components.\\\"\\\"\\\"\\n        self.config = get_config()\\n        self.fetcher = WeChatFetcher()\\n        self.rewriter = ContentRewriter()\\n        self.syncer = FeishuSyncer()\\n\\n        # Setup logging\\n        logging.basicConfig(\\n            level=self.config['logging']['level'],\\n            format=self.config['logging']['format']\\n        )\\n        self.logger = logging.getLogger(__name__)\\n\\n        self.logger.info(f\\\"Mindcraft System initialized - Version {self.config['app']['version']}\\\")\\n\\n    def fetch_and_process_single(self, url: str, style_guide: Optional[Dict] = None) -> Optional[Dict]:\\n        \\\"\\\"\\\"\\n        Complete pipeline for processing a single URL: fetch -> rewrite -> prepare for sync\\n\\n        Args:\\n            url: URL to process\\n            style_guide: Style guide for content rewriting\\n\\n        Returns:\\n            Processed content dictionary or None on failure\\n        \\\"\\\"\\\"\\n        try:\\n            # Step 1: Validate URL\\n            if not validate_url(url):\\n                self.logger.error(f\\\"Invalid or unsafe URL: {url}\\\")\\n                log_security_event(\\\"INVALID_URL\\\", {\\\"url\\\": url})\\n                return None\\n\\n        \\n...[truncated 9539 chars]\"}}]}\n```"
+  },
+  "expected": {
+    "error": "write_after_failed_read_without_discovery",
+    "tool_calls": [],
+    "warning_contains": null
+  }
+}

@@ -1,0 +1,80 @@
+{
+  "id": "openai_controller_no_task_final_retry",
+  "description": "OpenAI controller retries an empty no-task final response after tool evidence instead of treating it as task completion.",
+  "protocol": "openai_chat_completions",
+  "tool_bridge_config": {
+    "mode": "strict",
+    "activationPolicy": "auto",
+    "exposurePolicy": "all",
+    "toolProfile": "agent"
+  },
+  "request": {
+    "model": "web-model",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Review this local project and give a detailed improvement plan."
+      },
+      {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "call_glob",
+            "type": "function",
+            "function": {
+              "name": "Glob",
+              "arguments": "{\"pattern\":\"**/*.py\"}"
+            }
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "tool_call_id": "call_glob",
+        "content": "rewrite_content.py\ncreate_feishu_view.py\nget_feishu_fields.py"
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "Glob",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Read",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      }
+    ]
+  },
+  "upstream": {
+    "contents": [
+      "Caveman mode active. No task given. Wait for input.",
+      "```tool_json\n{\"calls\":[{\"id\":\"call_read_again\",\"name\":\"Read\",\"input\":{\"file_path\":\"README.md\"}}]}\n```"
+    ]
+  },
+  "expected": {
+    "status": 200,
+    "upstreamCalls": 2,
+    "upstreamOmits": [
+      "tools",
+      "tool_choice"
+    ],
+    "finishReason": "tool_calls",
+    "toolCall": {
+      "name": "Read",
+      "input": {
+        "file_path": "README.md"
+      }
+    }
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "id": "openai_plain_text",
+  "description": "OpenAI Chat Completions client receives normal assistant text.",
+  "protocol": "openai_chat_completions",
+  "request": {
+    "model": "web-model",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Say hello briefly."
+      }
+    ]
+  },
+  "upstream": {
+    "content": "plain openai ok"
+  },
+  "expected": {
+    "status": 200,
+    "upstreamCalls": 1,
+    "finishReason": "stop",
+    "textContains": "plain openai ok"
+  }
+}

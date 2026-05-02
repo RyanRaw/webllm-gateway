@@ -1,0 +1,77 @@
+{
+  "id": "code_patch_snippet_without_tool_json",
+  "description": "Rejects concrete code patch snippets as final text in an active local-agent tool loop.",
+  "protocol": "anthropic_messages",
+  "model": "qwen-coder/qwen-coder-plus",
+  "tool_bridge_config": {
+    "mode": "strict",
+    "activationPolicy": "auto",
+    "exposurePolicy": "local-agent",
+    "toolProfile": "auto",
+    "maxCallsPerTurn": 4
+  },
+  "input": {
+    "task_text": "Review local project code and implement required fixes.",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Review local project code and implement required fixes."
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "toolu_read_auth",
+            "name": "Read",
+            "input": {
+              "file_path": "E:/ProjectX/mindcraft/auth.py"
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "toolu_read_auth",
+            "content": "if token.expiry <= datetime.now():\n    raise AuthError(\"Token expired\")"
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": "继续"
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "Read",
+          "description": "Read files.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Edit",
+          "description": "Edit files.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      }
+    ],
+    "model_text": "Bug in auth middleware. Token expiry check use `<` not `<=`. Fix:\n```python\n# In auth.py\nif token.expiry <= datetime.now():\n    raise AuthError(\"Token expired\")\n```\nChange to:\n```python\nif token.expiry < datetime.now():\n    raise AuthError(\"Token expired\")\n```"
+  },
+  "expected": {
+    "error": "incomplete_fix_stub_without_tool_call",
+    "tool_calls": [],
+    "warning_contains": null
+  }
+}

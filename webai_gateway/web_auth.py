@@ -12,8 +12,13 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlparse
 
+from webai_gateway.deepseek_web import DEEPSEEK_WEB_CATALOG_MODELS
+
 
 DEFAULT_CDP_URL = "http://127.0.0.1:9222"
+DEEPSEEK_WEB_AVAILABLE_REASON = (
+    "DeepSeek Web 现通过本地 ds2api sidecar 接入。完成网页登录授权后，可直接使用已验证的 `deepseek-v4-pro`。"
+)
 QWEN_LOGIN_COOKIE_HINTS = ("session", "token", "auth", "login", "sso")
 QWEN_DIRECT_PROVIDER_IDS = {"qwen", "qwen-coder"}
 QWEN_CREDENTIAL_ORIGINS: dict[str, tuple[str, ...]] = {
@@ -37,6 +42,9 @@ class WebAuthProvider:
     tool_bridge: str = "strict"
     supports_native_tools: bool = False
     preferred_protocol: str = "openai"
+    available_models: tuple[str, ...] | None = None
+    advertise_models: bool = True
+    availability_message: str = ""
 
 
 WEBAI2API_MODELS: dict[str, tuple[str, ...]] = {
@@ -338,12 +346,12 @@ PROVIDERS: dict[str, WebAuthProvider] = {
         name="Qwen Coder / 通义千问编程版",
         login_url="https://coder.qwen.ai/",
         status="available",
-        description="Qwen Coder 专用编程助手，支持代码生成、调试和 artifacts 代码工件。使用 qwen-coder/ 前缀模型。",
+        description="Qwen Coder 专用编程助手，支持代码生成和调试；Gateway API 默认关闭上游 artifacts 工件流以保持协议稳定。使用 qwen-coder/ 前缀模型。",
         models=(
             "qwen-coder/qwen3-coder-plus",
             "qwen-coder/qwen-coder-plus",
         ),
-        capabilities={"text": True, "image": False, "video": False, "artifacts": True},
+        capabilities={"text": True, "image": False, "video": False, "artifacts": False},
         adapters=("qwen_coder", "qwen-coder"),
         route="direct",
         credential_required=True,
@@ -363,12 +371,15 @@ PROVIDERS: dict[str, WebAuthProvider] = {
         name="DeepSeek Web",
         login_url="https://chat.deepseek.com/",
         status="available",
-        description="网关已内置本地网页登录授权；也兼容 WebAI2API 的 deepseek_text 适配器。",
-        models=("deepseek-web/deepseek-chat", "deepseek-web/deepseek-reasoner", *_models_for("deepseek_text")),
+        description="网关已内置本地网页登录授权；调用链路通过本地 ds2api sidecar 转到 DeepSeek Web，可用体验与 Qwen 直连保持一致。",
+        models=DEEPSEEK_WEB_CATALOG_MODELS,
         capabilities={"text": True, "image": False, "video": False},
         adapters=("deepseek_text",),
         route="direct",
         credential_required=True,
+        available_models=DEEPSEEK_WEB_CATALOG_MODELS,
+        advertise_models=True,
+        availability_message=DEEPSEEK_WEB_AVAILABLE_REASON,
     ),
     "sora": WebAuthProvider(
         id="sora",
@@ -421,6 +432,8 @@ def catalog_model_payloads() -> list[dict[str, Any]]:
     seen: set[str] = set()
     payloads: list[dict[str, Any]] = []
     for provider in PROVIDERS.values():
+        if not provider.advertise_models:
+            continue
         for model_id in provider.models:
             if model_id in seen:
                 continue
@@ -468,6 +481,8 @@ class CredentialStore:
         if not is_credential_authorized(provider_id, data):
             if provider_id == "qwen":
                 raise ValueError("没有捕获到可用的 Qwen 登录态，请先完成 chat.qwen.ai 登录")
+            if provider_id == "deepseek-web":
+                raise ValueError("没有捕获到可用的 DeepSeek bearer token，请重新完成 chat.deepseek.com 登录授权")
             raise ValueError("没有捕获到可用的 cookie 或 bearer，网页登录可能尚未完成")
         path = self._path(provider_id)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -521,12 +536,15 @@ def is_credential_authorized(provider_id: str, credential: dict[str, Any] | None
         # Qwen Coder 使用与 Qwen 相同的认证方式
         metadata = credential.get("metadata") if isinstance(credential.get("metadata"), dict) else {}
         return bool(credential.get("bearer") or metadata.get("sessionToken"))
+    if provider_id == "deepseek-web":
+        return bool(credential.get("bearer"))
     return bool(credential.get("cookie") or credential.get("bearer"))
 
 
 def provider_payload(store: CredentialStore) -> dict[str, Any]:
     providers = []
     for provider in PROVIDERS.values():
+        available_models = provider.models if provider.available_models is None else provider.available_models
         providers.append(
             {
                 "id": provider.id,
@@ -535,6 +553,10 @@ def provider_payload(store: CredentialStore) -> dict[str, Any]:
                 "status": provider.status,
                 "description": provider.description,
                 "models": list(provider.models),
+                "availableModels": list(available_models),
+                "modelCount": len(available_models),
+                "advertiseModels": provider.advertise_models,
+                "availabilityMessage": provider.availability_message,
                 "credential": store.summary(provider.id),
                 "capabilities": provider.capabilities,
                 "adapters": list(provider.adapters),

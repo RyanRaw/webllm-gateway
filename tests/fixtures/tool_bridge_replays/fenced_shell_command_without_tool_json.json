@@ -1,0 +1,79 @@
+{
+  "id": "fenced_shell_command_without_tool_json",
+  "description": "Converts a fenced bash command block into a current downstream Bash tool call instead of returning it as final assistant text.",
+  "protocol": "anthropic_messages",
+  "model": "qwen-coder/qwen-coder-plus",
+  "tool_bridge_config": {
+    "mode": "strict",
+    "activationPolicy": "auto",
+    "exposurePolicy": "all",
+    "toolProfile": "all",
+    "maxCallsPerTurn": 4
+  },
+  "input": {
+    "task_text": "Review local project code.",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Review local project code."
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "toolu_preflight",
+            "name": "Bash",
+            "input": {
+              "command": "git -C E:/ProjectX/mindcraft status --short"
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "toolu_preflight",
+            "content": ""
+          }
+        ]
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "Bash",
+          "description": "Run shell commands.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "command": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "command"
+            ]
+          }
+        }
+      }
+    ],
+    "model_text": "```bash git -C E:/ProjectX/mindcraft diff --name-only ```"
+  },
+  "expected": {
+    "error": null,
+    "tool_calls": [
+      {
+        "id": "call_web_shell_1",
+        "name": "Bash",
+        "input": {
+          "command": "git -C E:/ProjectX/mindcraft diff --name-only"
+        }
+      }
+    ],
+    "warning_contains": null
+  }
+}

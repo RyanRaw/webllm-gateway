@@ -1,0 +1,54 @@
+{
+  "id": "openai_tool_result_observation",
+  "description": "OpenAI tool role messages continue as normal assistant text after bridge observation.",
+  "protocol": "openai_chat_completions",
+  "request": {
+    "model": "web-model",
+    "messages": [
+      {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "call_read",
+            "type": "function",
+            "function": {
+              "name": "read_file",
+              "arguments": "{\"path\":\"README.md\"}"
+            }
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "tool_call_id": "call_read",
+        "content": "file text"
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "read_file",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      }
+    ]
+  },
+  "upstream": {
+    "content": "observation handled"
+  },
+  "expected": {
+    "status": 200,
+    "upstreamCalls": 1,
+    "upstreamOmits": [
+      "tools",
+      "tool_choice"
+    ],
+    "upstreamMessageContains": "file text",
+    "finishReason": "stop",
+    "textContains": "observation handled"
+  }
+}

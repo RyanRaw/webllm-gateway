@@ -1,0 +1,57 @@
+{
+  "id": "anthropic_readonly_shell_allowed",
+  "description": "Anthropic review clients may receive read-only shell tool_use blocks.",
+  "protocol": "anthropic_messages",
+  "tool_bridge_config": {
+    "mode": "strict",
+    "activationPolicy": "auto",
+    "exposurePolicy": "all",
+    "toolProfile": "all",
+    "maxCallsPerTurn": 4
+  },
+  "request": {
+    "model": "web-model",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Review this codebase and suggest improvements."
+      }
+    ],
+    "tools": [
+      {
+        "name": "Bash",
+        "description": "Run shell commands",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "command"
+          ]
+        }
+      }
+    ],
+    "max_tokens": 1024
+  },
+  "upstream": {
+    "content": "```tool_json\n{\"calls\":[{\"id\":\"call_1\",\"name\":\"Bash\",\"input\":{\"command\":\"git status --short\"}}]}\n```"
+  },
+  "expected": {
+    "status": 200,
+    "upstreamCalls": 1,
+    "upstreamOmits": [
+      "tools",
+      "tool_choice"
+    ],
+    "stopReason": "tool_use",
+    "toolCall": {
+      "name": "Bash",
+      "input": {
+        "command": "git status --short"
+      }
+    }
+  }
+}

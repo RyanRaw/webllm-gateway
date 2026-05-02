@@ -1,0 +1,84 @@
+{
+  "id": "openai_controller_off_task_scope_question_repair",
+  "description": "OpenAI controller repairs an off-task broad restructuring authorization question back into the requested review plan.",
+  "protocol": "openai_chat_completions",
+  "tool_bridge_config": {
+    "mode": "strict",
+    "activationPolicy": "auto",
+    "exposurePolicy": "all",
+    "toolProfile": "agent"
+  },
+  "request": {
+    "model": "web-model",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Review local project code and make a detailed improvement plan."
+      },
+      {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "call_read_old",
+            "type": "function",
+            "function": {
+              "name": "Read",
+              "arguments": "{\"file_path\":\"E:/ProjectX/mindcraft/CLAUDE.md\"}"
+            }
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "tool_call_id": "call_read_old",
+        "content": "Project rules and module notes."
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "AskUserQuestion",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Read",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Glob",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      }
+    ]
+  },
+  "upstream": {
+    "contents": [
+      "```tool_json\n{\"calls\":[{\"id\":\"call_question\",\"name\":\"AskUserQuestion\",\"input\":{\"questions\":[{\"header\":\"重构\",\"question\":\"允许重构目录结构吗？将脚本迁移到 src 并重写模块边界。\",\"options\":[{\"label\":\"允许\",\"description\":\"执行目录迁移\"},{\"label\":\"暂缓\",\"description\":\"只输出改进计划\"}]}]}}]}\n```",
+      "详细改进计划：先保持现有目录不迁移，按模块梳理依赖、补充测试，再分阶段处理风险。"
+    ]
+  },
+  "expected": {
+    "status": 200,
+    "upstreamCalls": 2,
+    "upstreamOmits": [
+      "tools",
+      "tool_choice"
+    ],
+    "finishReason": "stop",
+    "textContains": "详细改进计划"
+  }
+}

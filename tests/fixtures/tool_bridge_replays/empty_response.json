@@ -1,0 +1,42 @@
+{
+  "id": "empty_response",
+  "description": "Empty provider output should not produce tool calls in the parse layer.",
+  "protocol": "anthropic_messages",
+  "model": "qwen-coder/qwen-coder-plus",
+  "tool_bridge_config": {
+    "mode": "strict",
+    "activationPolicy": "auto",
+    "exposurePolicy": "all",
+    "toolProfile": "all",
+    "maxCallsPerTurn": 4
+  },
+  "input": {
+    "task_text": "审查当前项目代码并制定改进计划。",
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "Read",
+          "description": "Read a project file.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "file_path": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "file_path"
+            ]
+          }
+        }
+      }
+    ],
+    "model_text": ""
+  },
+  "expected": {
+    "error": null,
+    "tool_calls": [],
+    "warning_contains": null
+  }
+}

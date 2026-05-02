@@ -1,0 +1,103 @@
+{
+  "id": "write_after_successful_write_result_remains_allowed",
+  "description": "Keeps Write available after a successful Write tool result so the model can continue real edits instead of claiming manual code due to missing tools.",
+  "protocol": "anthropic_messages",
+  "model": "qwen-coder/qwen-coder-plus",
+  "tool_bridge_config": {
+    "mode": "strict",
+    "activationPolicy": "auto",
+    "exposurePolicy": "local-agent",
+    "toolProfile": "auto",
+    "maxCallsPerTurn": 4
+  },
+  "input": {
+    "task_text": "/using-superpowers implement the local codebase plan",
+    "messages": [
+      {
+        "role": "user",
+        "content": "/using-superpowers implement the local codebase plan"
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "call_1",
+            "name": "Write",
+            "input": {
+              "file_path": "E:/ProjectX/mindcraft/config/manager.py",
+              "content": "class ConfigManager:\n    pass\n"
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "call_1",
+            "content": "File created successfully at: E:/ProjectX/mindcraft/config/manager.py"
+          }
+        ]
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "Read",
+          "description": "Read files.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Glob",
+          "description": "Find files.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Edit",
+          "description": "Edit files.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Write",
+          "description": "Write files.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      }
+    ],
+    "model_text": "```tool_json\n{\"calls\":[{\"id\":\"call_2\",\"name\":\"Write\",\"input\":{\"file_path\":\"E:/ProjectX/mindcraft/config/manager.py\",\"content\":\"class ConfigManager:\\n    def load(self):\\n        return {}\\n\"}}]}\n```"
+  },
+  "expected": {
+    "error": null,
+    "tool_calls": [
+      {
+        "id": "call_2",
+        "name": "Write",
+        "input": {
+          "file_path": "E:/ProjectX/mindcraft/config/manager.py",
+          "content": "class ConfigManager:\n    def load(self):\n        return {}\n"
+        }
+      }
+    ],
+    "warning_contains": null
+  }
+}

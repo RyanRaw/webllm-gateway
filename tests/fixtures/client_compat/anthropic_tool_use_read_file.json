@@ -1,0 +1,42 @@
+{
+  "id": "anthropic_tool_use_read_file",
+  "description": "Anthropic tool request converts to a standard tool_use block.",
+  "protocol": "anthropic_messages",
+  "request": {
+    "model": "web-model",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Read README.md"
+      }
+    ],
+    "tools": [
+      {
+        "name": "read_file",
+        "description": "Read a file",
+        "input_schema": {
+          "type": "object"
+        }
+      }
+    ],
+    "max_tokens": 1024
+  },
+  "upstream": {
+    "content": "```tool_json\n{\"calls\":[{\"id\":\"toolu_read\",\"name\":\"read_file\",\"input\":{\"path\":\"README.md\"}}]}\n```"
+  },
+  "expected": {
+    "status": 200,
+    "upstreamCalls": 1,
+    "upstreamOmits": [
+      "tools",
+      "tool_choice"
+    ],
+    "stopReason": "tool_use",
+    "toolCall": {
+      "name": "read_file",
+      "input": {
+        "path": "README.md"
+      }
+    }
+  }
+}

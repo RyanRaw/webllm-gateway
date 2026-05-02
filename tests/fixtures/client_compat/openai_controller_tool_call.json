@@ -1,0 +1,44 @@
+{
+  "id": "openai_controller_tool_call",
+  "description": "OpenAI controller returns a normal parsed tool call.",
+  "protocol": "openai_chat_completions",
+  "request": {
+    "model": "web-model",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Read README.md"
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "read_file",
+          "description": "Read a file",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      }
+    ]
+  },
+  "upstream": {
+    "content": "```tool_json\n{\"calls\":[{\"id\":\"call_read\",\"name\":\"read_file\",\"input\":{\"path\":\"README.md\"}}]}\n```"
+  },
+  "expected": {
+    "status": 200,
+    "upstreamCalls": 1,
+    "upstreamOmits": [
+      "tools",
+      "tool_choice"
+    ],
+    "finishReason": "tool_calls",
+    "toolCall": {
+      "name": "read_file",
+      "input": {
+        "path": "README.md"
+      }
+    }
+  }
+}

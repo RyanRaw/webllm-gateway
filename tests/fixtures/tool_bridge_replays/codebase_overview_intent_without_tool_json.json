@@ -1,0 +1,77 @@
+{
+  "id": "codebase_overview_intent_without_tool_json",
+  "description": "Rejects plain text that says the model needs a current codebase overview before continuing.",
+  "protocol": "anthropic_messages",
+  "model": "qwen-coder/qwen-coder-plus",
+  "tool_bridge_config": {
+    "mode": "strict",
+    "activationPolicy": "auto",
+    "exposurePolicy": "local-agent",
+    "toolProfile": "auto",
+    "maxCallsPerTurn": 4
+  },
+  "input": {
+    "task_text": "Review mindcraft project code and create improvement plan.",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Review mindcraft project code and create improvement plan."
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool_use",
+            "id": "toolu_read",
+            "name": "Read",
+            "input": {
+              "file_path": "E:/ProjectX/mindcraft/README.md"
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "toolu_read",
+            "content": "README exists"
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": "继续"
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "Glob",
+          "description": "List files.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Read",
+          "description": "Read files.",
+          "parameters": {
+            "type": "object"
+          }
+        }
+      }
+    ],
+    "model_text": "Review mindcraft project code and create improvement plan. Need current codebase overview first. Use different file path for project structure analysis."
+  },
+  "expected": {
+    "error": "deferred_tool_action_without_call",
+    "tool_calls": [],
+    "warning_contains": null
+  }
+}
