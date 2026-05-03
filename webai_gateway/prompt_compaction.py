@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import json
 import re
 from collections.abc import Iterable
@@ -268,12 +269,29 @@ def _current_request_task_text(text: str) -> str:
 
 
 def _looks_like_current_request_control_text(text: str) -> bool:
+    if _STRUCTURAL_CONTROL_MESSAGE_RE.match(str(text or "")):
+        return True
     compact = re.sub(r"\s+", " ", str(text or "").strip()).lower()
     if not compact:
+        return True
+    if (
+        "<system-reminder" in compact
+        or "</system-reminder" in compact
+        or "<system_reminder" in compact
+        or "</system_reminder" in compact
+        or "<time-reminder" in compact
+        or "<time_reminder" in compact
+        or compact.startswith("this is a system reminder")
+    ):
         return True
     if looks_like_gateway_tool_observation(text):
         return True
     control_markers = (
+        "system-reminder",
+        "system_reminder",
+        "time-reminder",
+        "time_reminder",
+        "do not mention this message",
         "do not request the same skill again",
         "use the loaded skill instructions already in the conversation",
         "continue the original user task",
@@ -452,6 +470,174 @@ _GATEWAY_TOOL_OBSERVATION_RE = re.compile(
     re.IGNORECASE,
 )
 _TASK_LIST_PARAM_NAMES = {"todos", "tasks", "items", "tasklist", "todolist"}
+_STRUCTURAL_CONTROL_MESSAGE_RE = re.compile(
+    r"^\s*(?:<\s*/?\s*)?(?:system[-_ ]?reminder|time[-_ ]?reminder)\b",
+    re.IGNORECASE,
+)
+
+
+def message_entries_for_ds2api_prompt(message: dict[str, Any], content_text: str) -> list[tuple[str, str]]:
+    """Return prompt-visible role entries using ds2api's Claude tool history shape."""
+    if not isinstance(message, dict):
+        return []
+    role = str(message.get("role") or "user").strip().lower() or "user"
+    text = str(content_text or "").strip()
+    entries: list[tuple[str, str]] = []
+
+    if role == "assistant":
+        if text:
+            entries.append(("assistant", text))
+        rendered_calls = format_tool_calls_for_ds2api_prompt(_prompt_visible_tool_calls_from_message(message))
+        if rendered_calls:
+            entries.append(("assistant", rendered_calls))
+        return entries
+
+    if role == "user":
+        tool_results = _prompt_visible_tool_results_from_content(message.get("content"))
+        if text:
+            entries.append(("user", text))
+        entries.extend(("tool", result) for result in tool_results if result.strip())
+        return entries
+
+    if role == "tool":
+        return [("tool", text)] if text else []
+    return [(role, text)] if text else []
+
+
+def format_tool_calls_for_ds2api_prompt(tool_calls: Iterable[Any]) -> str:
+    call_lines: list[str] = []
+    for item in tool_calls:
+        name, args = _tool_call_name_and_args(item)
+        if not name:
+            continue
+        call_lines.append(f'  <|DSML|invoke name="{html.escape(name, quote=True)}">')
+        for key, value in args.items():
+            call_lines.extend(_render_dsml_parameter(str(key), value, indent="    "))
+        call_lines.append("  </|DSML|invoke>")
+    if not call_lines:
+        return ""
+    return "\n".join(["<|DSML|tool_calls>", *call_lines, "</|DSML|tool_calls>"])
+
+
+def looks_like_current_request_control_text(text: str) -> bool:
+    return _looks_like_current_request_control_text(text)
+
+
+def _prompt_visible_tool_calls_from_message(message: dict[str, Any]) -> list[Any]:
+    calls: list[Any] = []
+    raw_calls = message.get("tool_calls")
+    if isinstance(raw_calls, list):
+        calls.extend(raw_calls)
+    content = message.get("content")
+    blocks = content if isinstance(content, list) else [content] if isinstance(content, dict) else []
+    for block in blocks:
+        if not isinstance(block, dict) or str(block.get("type") or "") != "tool_use":
+            continue
+        name = str(block.get("name") or "").strip()
+        if not name:
+            continue
+        args = block.get("input")
+        if not isinstance(args, dict):
+            args = {}
+        calls.append(
+            {
+                "id": str(block.get("id") or block.get("tool_use_id") or ""),
+                "type": "function",
+                "function": {"name": name, "arguments": json.dumps(args, ensure_ascii=False)},
+            }
+        )
+    return calls
+
+
+def _tool_call_name_and_args(item: Any) -> tuple[str, dict[str, Any]]:
+    if not isinstance(item, dict):
+        return "", {}
+    fn = item.get("function") if isinstance(item.get("function"), dict) else {}
+    name = str(fn.get("name") or item.get("name") or "").strip()
+    args: Any = fn.get("arguments") if fn else None
+    if args is None:
+        args = item.get("arguments") or item.get("args") or item.get("input") or {}
+    if isinstance(args, str):
+        try:
+            parsed = json.loads(args)
+        except Exception:
+            parsed = {}
+        args = parsed if isinstance(parsed, dict) else {}
+    if not isinstance(args, dict):
+        args = {}
+    return name, args
+
+
+def _render_dsml_parameter(name: str, value: Any, *, indent: str) -> list[str]:
+    escaped = html.escape(name, quote=True)
+    if isinstance(value, dict):
+        lines = [f'{indent}<|DSML|parameter name="{escaped}">']
+        for key, child in value.items():
+            lines.extend(_render_dsml_child(str(key), child, indent=indent + "  "))
+        lines.append(f"{indent}</|DSML|parameter>")
+        return lines
+    if isinstance(value, list):
+        lines = [f'{indent}<|DSML|parameter name="{escaped}">']
+        for item in value:
+            lines.extend(_render_dsml_child("item", item, indent=indent + "  "))
+        lines.append(f"{indent}</|DSML|parameter>")
+        return lines
+    if isinstance(value, str):
+        return [f'{indent}<|DSML|parameter name="{escaped}">{_dsml_cdata(value)}</|DSML|parameter>']
+    return [f'{indent}<|DSML|parameter name="{escaped}">{json.dumps(value, ensure_ascii=False)}</|DSML|parameter>']
+
+
+def _render_dsml_child(name: str, value: Any, *, indent: str) -> list[str]:
+    escaped = html.escape(name, quote=True)
+    if isinstance(value, dict):
+        lines = [f"{indent}<{escaped}>"]
+        for key, child in value.items():
+            lines.extend(_render_dsml_child(str(key), child, indent=indent + "  "))
+        lines.append(f"{indent}</{escaped}>")
+        return lines
+    if isinstance(value, list):
+        lines: list[str] = []
+        for item in value:
+            lines.extend(_render_dsml_child(name, item, indent=indent))
+        return lines
+    if isinstance(value, str):
+        return [f"{indent}<{escaped}>{_dsml_cdata(value)}</{escaped}>"]
+    return [f"{indent}<{escaped}>{json.dumps(value, ensure_ascii=False)}</{escaped}>"]
+
+
+def _dsml_cdata(text: str) -> str:
+    return "<![CDATA[" + (text or "").replace("]]>", "]]]]><![CDATA[>") + "]]>"
+
+
+def _prompt_visible_tool_results_from_content(content: Any) -> list[str]:
+    blocks = content if isinstance(content, list) else [content] if isinstance(content, dict) else []
+    results: list[str] = []
+    for block in blocks:
+        if not isinstance(block, dict) or str(block.get("type") or "") != "tool_result":
+            continue
+        text = _tool_result_content_to_text(block.get("content"))
+        if text.strip():
+            results.append(text.strip())
+    return results
+
+
+def _tool_result_content_to_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts = [_tool_result_content_part_to_text(item) for item in value]
+        return "\n".join(part for part in parts if part)
+    if isinstance(value, dict):
+        return _tool_result_content_part_to_text(value)
+    return "" if value is None else str(value)
+
+
+def _tool_result_content_part_to_text(value: Any) -> str:
+    if not isinstance(value, dict):
+        return "" if value is None else str(value)
+    if str(value.get("type") or "") == "text":
+        return str(value.get("text") or "")
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
 def web_prompt_history_role(role: str, text: str) -> str:

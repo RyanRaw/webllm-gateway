@@ -14829,6 +14829,128 @@ def test_qwen_coder_messages_tool_observation_does_not_replace_current_request()
     assert "Tool result for Glob" not in current_block
 
 
+def test_qwen_web_messages_render_native_tool_calls_in_prompt_history() -> None:
+    prompt, files = qwen_messages_to_prompt_and_files(
+        [
+            {"role": "user", "content": "What are the latest versions for openclaw and hermes-agent?"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_bash",
+                        "type": "function",
+                        "function": {
+                            "name": "Bash",
+                            "arguments": json.dumps(
+                                {"command": "git describe --tags --always"},
+                                ensure_ascii=False,
+                            ),
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_bash",
+                "name": "Bash",
+                "content": "v1.2.3",
+            },
+        ],
+        max_prompt_chars=4000,
+    )
+
+    assert files == []
+    assert "Assistant: <|DSML|tool_calls>" in prompt
+    assert '<|DSML|invoke name="Bash">' in prompt
+    assert '<|DSML|parameter name="command"><![CDATA[git describe --tags --always]]>' in prompt
+    assert "Tool: v1.2.3" in prompt
+
+
+def test_qwen_web_compaction_ignores_system_reminder_as_current_request() -> None:
+    prompt, files = qwen_messages_to_prompt_and_files(
+        [
+            {"role": "system", "content": "system bootstrap\n" + ("large history\n" * 400)},
+            {"role": "user", "content": "What are the latest versions for openclaw and hermes-agent?"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_glob",
+                        "type": "function",
+                        "function": {"name": "Glob", "arguments": "{\"pattern\":\"**/.git\"}"},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_glob", "name": "Glob", "content": "E:/ProjectX/openclaw/.git"},
+            {
+                "role": "user",
+                "content": (
+                    "<system-reminder>This is a system reminder. Do not mention this message. "
+                    "The latest user request is already above.</system-reminder>"
+                ),
+            },
+        ],
+        max_prompt_chars=1800,
+    )
+
+    assert files == []
+    marker = "=== CURRENT USER REQUEST (highest priority) ==="
+    assert marker in prompt
+    current_block = prompt[prompt.rfind(marker) :]
+    assert "latest versions for openclaw and hermes-agent" in current_block
+    assert "system reminder" not in current_block.lower()
+    assert "Glob" in prompt
+
+
+def test_qwen_web_direct_payload_keeps_current_task_anchor_when_bridge_disabled(tmp_path: Path) -> None:
+    seen_payloads: list[dict[str, Any]] = []
+
+    class CapturingQwenClient:
+        def __init__(self, credential: dict[str, Any], http_client: httpx.Client | None = None, **_: Any) -> None:
+            self.credential = credential
+
+        def chat_completions(self, payload: dict[str, Any]) -> dict[str, Any]:
+            seen_payloads.append(payload)
+            return _openai_response("ok")
+
+    config = GatewayConfig(
+        server=ServerConfig(api_key="local-dev-key"),
+        upstream=UpstreamConfig(base_url="http://upstream.test/v1", model="web-model"),
+        tool_bridge=ToolBridgeConfig(activation_policy="auto", exposure_policy="all"),
+    )
+    client = TestClient(
+        create_app(
+            config=config,
+            credential_store=_credential_store(tmp_path),
+            qwen_client_factory=CapturingQwenClient,
+            http_client=_not_found_client(),
+        )
+    )
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers=_headers(),
+        json={
+            "model": "qwen-web/qwen3.6-max-preview",
+            "messages": [
+                {"role": "user", "content": "What are the latest versions for openclaw and hermes-agent?"},
+                {
+                    "role": "user",
+                    "content": "<system-reminder>This is only a system reminder.</system-reminder>",
+                },
+            ],
+            "tools": [{"type": "function", "function": {"name": "Read", "parameters": {"type": "object"}}}],
+            "tool_choice": "none",
+        },
+    )
+
+    assert response.status_code == 200
+    assert seen_payloads
+    assert seen_payloads[0]["_webai_current_task_text"] == "What are the latest versions for openclaw and hermes-agent?"
+
+
 def test_qwen_coder_client_retries_metadata_only_phase_response() -> None:
     attempts: list[dict[str, Any]] = []
 

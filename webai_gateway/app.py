@@ -1772,11 +1772,11 @@ def _build_direct_payload(
         config,
         provider_native_web_search=provider_native_web_search,
     )
+    if bridge_context.task_text:
+        payload["_webai_current_task_text"] = bridge_context.task_text
     if not bridge:
         payload.pop("tools", None)
         payload.pop("tool_choice", None)
-    elif bridge_context.task_text:
-        payload["_webai_current_task_text"] = bridge_context.task_text
     return payload, bridge, allowed_tools, bridge_context
 
 

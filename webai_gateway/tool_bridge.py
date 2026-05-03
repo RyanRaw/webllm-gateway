@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from webai_gateway.config import ToolBridgeConfig
+from webai_gateway.prompt_compaction import looks_like_current_request_control_text
 
 
 _FENCED_TOOL_RE = re.compile(r"```tool_json\s*(.*?)```", re.IGNORECASE | re.DOTALL)
@@ -933,7 +934,7 @@ def prefer_local_tools_for_local_agent_task(
                 hidden_tools=_dedupe_tool_specs(hidden_tools),
                 tool_choice_policy=context.tool_choice_policy,
             )
-        task_text = latest if context.enabled and has_tool_loop and latest.strip() else context.task_text
+        task_text = latest if latest.strip() else context.task_text
         return ToolBridgeContext(
             enabled=context.enabled,
             mode=context.mode,
@@ -3997,6 +3998,8 @@ def _message_is_gateway_control_instruction(message: dict[str, Any]) -> bool:
     if _message_is_tool_result(message):
         return False
     text = _content_to_text(message.get("content")).lstrip()
+    if looks_like_current_request_control_text(text):
+        return True
     return text.startswith(
         (
             "Previous tool JSON",
@@ -4066,6 +4069,8 @@ def _human_user_texts_newest_first(messages: Any) -> list[str]:
 
 def _human_task_text_from_message(message: dict[str, Any]) -> str:
     text = _content_to_text(message.get("content"))
+    if looks_like_current_request_control_text(text):
+        return ""
     command_args = _extract_command_args(text)
     if command_args:
         return command_args

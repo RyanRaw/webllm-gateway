@@ -115,12 +115,11 @@ def build_upstream_payload(
             model=model,
             tool_choice=body.get("tool_choice"),
         )
-    if bridge:
-        bridge_context = prefer_local_tools_for_local_agent_task(
-            bridge_context,
-            body.get("messages"),
-            tool_choice=body.get("tool_choice"),
-        )
+    bridge_context = prefer_local_tools_for_local_agent_task(
+        bridge_context,
+        body.get("messages"),
+        tool_choice=body.get("tool_choice"),
+    )
     allowed_tools: set[str] = set()
     allowed_tools = bridge_context.allowed_names
     payload["model"] = model

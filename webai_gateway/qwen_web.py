@@ -13,6 +13,7 @@ from .prompt_compaction import (
     STATELESS_WEB_API_GUARD,
     compact_role_messages_as_ds2api_history,
     compact_web_prompt,
+    message_entries_for_ds2api_prompt,
     prompt_preserved_task_state_diagnostics,
     web_prompt_history_role,
 )
@@ -208,21 +209,21 @@ def qwen_messages_to_prompt_and_files(
     for message in messages:
         if not isinstance(message, dict):
             continue
-        role = str(message.get("role") or "user")
         text, message_files = _qwen_content_to_text_and_files(message.get("content"), start_index=len(files) + 1)
         files.extend(message_files)
-        if not text:
-            continue
-        prompt_role = web_prompt_history_role(role, text)
-        role_entries.append((prompt_role, text))
-        if prompt_role == "system":
-            parts.append(f"System: {text}")
-        elif prompt_role == "assistant":
-            parts.append(f"Assistant: {text}")
-        elif prompt_role == "tool":
-            parts.append(f"Tool: {text}")
-        else:
-            parts.append(f"User: {text}")
+        for entry_role, entry_text in message_entries_for_ds2api_prompt(message, text):
+            if not entry_text:
+                continue
+            prompt_role = web_prompt_history_role(entry_role, entry_text)
+            role_entries.append((prompt_role, entry_text))
+            if prompt_role == "system":
+                parts.append(f"System: {entry_text}")
+            elif prompt_role == "assistant":
+                parts.append(f"Assistant: {entry_text}")
+            elif prompt_role == "tool":
+                parts.append(f"Tool: {entry_text}")
+            else:
+                parts.append(f"User: {entry_text}")
     prompt = "\n\n".join(parts)
     if max_prompt_chars and len(prompt) > int(max_prompt_chars):
         prompt = compact_role_messages_as_ds2api_history(
