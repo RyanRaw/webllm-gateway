@@ -2762,6 +2762,41 @@ def test_tool_bridge_uses_inline_skill_arguments_without_trailing_skill_body() -
     assert "large skill instruction block" not in refined.task_text
 
 
+def test_tool_bridge_combines_referential_followup_with_prior_url_task() -> None:
+    context = build_context(
+        [
+            {
+                "type": "function",
+                "function": {
+                    "name": "WebFetch",
+                    "description": "Fetch a URL.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"url": {"type": "string"}},
+                        "required": ["url"],
+                    },
+                },
+            }
+        ],
+        ToolBridgeConfig(exposure_policy="all"),
+    )
+    url = "https://mp.weixin.qq.com/s/fsi4KTbXy7T93sK54w3aFw"
+    followup = "我刚才不是提供过链接了吗？你自己修复下"
+
+    refined = prefer_local_tools_for_local_agent_task(
+        context,
+        [
+            {"role": "user", "content": f"帮我启动并抓取 {url} 这篇文章的内容，有问题就修复直到成功为止"},
+            {"role": "assistant", "content": "Assistant requested tool calls:\nWebFetch(url=https://mp.weixin.qq.com/s/fsi4KTbXy7T93sK54w3aFw)"},
+            {"role": "tool", "content": "Navigation timeout"},
+            {"role": "user", "content": followup},
+        ],
+    )
+
+    assert url in refined.task_text
+    assert followup in refined.task_text
+
+
 def test_tool_bridge_skips_yaml_frontmatter_skill_body_for_task_anchor() -> None:
     context = build_context(
         [
@@ -10319,6 +10354,35 @@ def test_qwen_messages_tool_observation_does_not_replace_current_request() -> No
     assert "audit current project code and list improvements" in current_block
     assert "Tool result for Glob" not in current_block
     assert "Use this tool result to continue the task" not in current_block
+
+
+def test_qwen_messages_compaction_keeps_prior_url_for_referential_followup() -> None:
+    huge_system_prefix = "system bootstrap\n" + ("skill listing entry\n" * 500)
+    tool_protocol = (
+        "You are using WebAI Gateway's strict tool bridge.\n"
+        "Available tools: WebFetch, Read, mcp__chrome-devtools__take_snapshot.\n"
+        "Required tool-call format:\n<|DSML|tool_calls>\n</|DSML|tool_calls>"
+    )
+    url = "https://mp.weixin.qq.com/s/fsi4KTbXy7T93sK54w3aFw"
+    followup = "我刚才不是提供过链接了吗？你自己修复下"
+
+    prompt, files = qwen_messages_to_prompt_and_files(
+        [
+            {"role": "system", "content": huge_system_prefix + "\n\n" + tool_protocol},
+            {"role": "user", "content": f"帮我启动并抓取 {url} 这篇文章的内容，有问题就修复直到成功为止"},
+            {"role": "assistant", "content": f"Assistant requested tool calls:\nWebFetch(url={url})"},
+            {"role": "tool", "content": "Navigation timeout of 10000 ms exceeded"},
+            {"role": "user", "content": followup},
+        ],
+        max_prompt_chars=1800,
+    )
+
+    assert files == []
+    marker = "=== CURRENT USER REQUEST (highest priority) ==="
+    assert marker in prompt
+    current_block = prompt[prompt.rfind(marker) :]
+    assert url in current_block
+    assert followup in current_block
 
 
 def test_qwen_messages_renders_tool_observation_as_tool_role() -> None:

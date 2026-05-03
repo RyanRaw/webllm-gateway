@@ -4200,6 +4200,8 @@ def _looks_like_continuation_task(text: str) -> bool:
     value = re.sub(r"\s+", " ", (text or "").strip().lower())
     if not value:
         return False
+    if _looks_like_referential_followup_task(value):
+        return True
     chinese_markers = {
         "继续",
         "接着",
@@ -4271,6 +4273,64 @@ def _looks_like_continuation_task(text: str) -> bool:
         return True
     prefixes = ("继续 ", "接着 ", "continue ", "proceed ", "go on ", "keep going ", "more ", "next ")
     return any(value.startswith(prefix) for prefix in prefixes)
+
+
+def _looks_like_referential_followup_task(value: str) -> bool:
+    if len(value) > 260:
+        return False
+    reference_markers = (
+        "\u521a\u624d",
+        "\u521a\u521a",
+        "\u4e4b\u524d",
+        "\u524d\u9762",
+        "\u4e0a\u9762",
+        "\u90a3\u4e2a",
+        "\u8fd9\u4e2a",
+        "\u8fd9\u4ef6\u4e8b",
+        "\u8fd9\u4e2a\u4efb\u52a1",
+        "\u4e0a\u4e00\u6b21",
+        "\u63d0\u4f9b\u8fc7",
+        "\u94fe\u63a5",
+        "url",
+    )
+    english_reference_markers = (
+        "previous",
+        "earlier",
+        "above",
+        "same",
+        "that",
+        "it",
+        "provided",
+    )
+    action_markers = (
+        "\u7ee7\u7eed",
+        "\u63a5\u7740",
+        "\u4fee\u590d",
+        "\u5904\u7406",
+        "\u6267\u884c",
+        "\u91cd\u8bd5",
+        "\u518d\u8bd5",
+        "\u81ea\u5df1",
+        "\u6293\u53d6",
+        "\u67e5",
+        "\u770b",
+        "continue",
+        "fix",
+        "retry",
+        "use",
+        "do it",
+        "handle",
+    )
+    has_reference = any(marker in value for marker in reference_markers) or any(
+        re.search(rf"\b{re.escape(marker)}\b", value) for marker in english_reference_markers
+    )
+    if not has_reference:
+        return False
+    if any(marker in value for marker in action_markers):
+        return True
+    return ("\u94fe\u63a5" in value or "url" in value) and (
+        "\u63d0\u4f9b\u8fc7" in value or "provided" in value or "same" in value
+    )
 
 
 def _looks_like_meta_capability_question(text: str) -> bool:

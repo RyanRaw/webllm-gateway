@@ -238,6 +238,7 @@ def _layered_history_summary_line(*, original_count: int, latest_count: int, has
 
 
 def _latest_user_request(entries: list[tuple[str, str]]) -> str:
+    candidates: list[str] = []
     for role, text in reversed(entries):
         if _history_role_label(role) != "USER":
             continue
@@ -246,8 +247,75 @@ def _latest_user_request(entries: list[tuple[str, str]]) -> str:
             continue
         task_text = _current_request_task_text(content)
         if task_text and not _looks_like_current_request_control_text(task_text):
-            return task_text
-    return ""
+            candidates.append(task_text)
+    if not candidates:
+        return ""
+    latest = candidates[0]
+    if not _looks_like_referential_followup_request(latest):
+        return latest
+    for prior in candidates[1:]:
+        if prior.strip() and not _looks_like_referential_followup_request(prior):
+            return f"{prior.strip()}\n{latest.strip()}".strip()
+    return latest
+
+
+def _looks_like_referential_followup_request(text: str) -> bool:
+    value = re.sub(r"\s+", " ", (text or "").strip().lower())
+    if not value or len(value) > 260:
+        return False
+    reference_markers = (
+        "\u521a\u624d",
+        "\u521a\u521a",
+        "\u4e4b\u524d",
+        "\u524d\u9762",
+        "\u4e0a\u9762",
+        "\u90a3\u4e2a",
+        "\u8fd9\u4e2a",
+        "\u8fd9\u4ef6\u4e8b",
+        "\u8fd9\u4e2a\u4efb\u52a1",
+        "\u4e0a\u4e00\u6b21",
+        "\u63d0\u4f9b\u8fc7",
+        "\u94fe\u63a5",
+        "url",
+    )
+    english_reference_markers = (
+        "previous",
+        "earlier",
+        "above",
+        "same",
+        "that",
+        "it",
+        "provided",
+    )
+    action_markers = (
+        "\u7ee7\u7eed",
+        "\u63a5\u7740",
+        "\u4fee\u590d",
+        "\u5904\u7406",
+        "\u6267\u884c",
+        "\u91cd\u8bd5",
+        "\u518d\u8bd5",
+        "\u81ea\u5df1",
+        "\u6293\u53d6",
+        "\u67e5",
+        "\u770b",
+        "continue",
+        "fix",
+        "retry",
+        "use",
+        "do it",
+        "handle",
+    )
+    has_reference = any(marker in value for marker in reference_markers) or any(
+        re.search(rf"\b{re.escape(marker)}\b", value) for marker in english_reference_markers
+    )
+    if not has_reference:
+        return False
+    if any(marker in value for marker in action_markers):
+        return True
+    return ("\u94fe\u63a5" in value or "url" in value) and (
+        "\u63d0\u4f9b\u8fc7" in value or "provided" in value or "same" in value
+    )
 
 
 def _normalized_current_user_override(text: str | None) -> str:
