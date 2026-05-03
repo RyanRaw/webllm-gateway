@@ -1421,6 +1421,7 @@ def build_tool_prompt(tools: list[ToolSpec] | list[dict[str, Any]], options: Too
         "- Never use provider-native browsing tags such as <search>. Use only the DSML tool_calls wrapper below.\n"
         "- Never output summaries like 'Assistant requested tool calls'. Those are history text, not the required protocol.\n"
         "- Never say an available tool does not exist or that you lack permission for files, commands, Bash/Git, or project updates. Do not call AskUserQuestion to request permission; Request the listed tool directly and let the downstream client enforce permissions.\n"
+        "- Do not call AskUserQuestion for optional next-step or scope selection; continue if the task is clear.\n"
         "- After a Tool result message, use the observation to answer or request another allowed tool. Do not wait, do not claim that you executed a tool yourself, and do not repeat a failed identical call.\n"
         "- If a Tool result says is_error: true, do not treat it as successful data. Choose a different allowed tool/input if recovery is possible; otherwise explain the failure briefly.\n"
         f"{code_change_rule}"
@@ -5590,19 +5591,18 @@ def _normalize_ask_user_question_input(call: ToolCallDraft, canonical_name: str)
         return call
     header = _ask_user_header(first_question, input_value)
     options = _ask_user_options(first_question, input_value)
+    multi_select = _ask_user_multi_select(first_question, input_value)
+    normalized_question: dict[str, Any] = {"question": question}
+    if header:
+        normalized_question["header"] = header
+    if options:
+        normalized_question["options"] = options
+    if multi_select is not None:
+        normalized_question["multiSelect"] = multi_select
     return ToolCallDraft(
         id=call.id,
         name=call.name,
-        input={
-            "questions": [
-                {
-                    "header": header,
-                    "question": question,
-                    "options": options,
-                    "multiSelect": False,
-                }
-            ]
-        },
+        input={"questions": [normalized_question]},
     )
 
 
@@ -5636,7 +5636,7 @@ def _ask_user_header(first_question: Any, input_value: dict[str, Any]) -> str:
     value = input_value.get("header")
     if isinstance(value, str) and value.strip():
         return value.strip()
-    return "确认操作"
+    return ""
 
 
 def _ask_user_options(first_question: Any, input_value: dict[str, Any]) -> list[dict[str, str]]:
@@ -5645,14 +5645,15 @@ def _ask_user_options(first_question: Any, input_value: dict[str, Any]) -> list[
         raw_options = first_question.get("options")
     if raw_options is None:
         raw_options = input_value.get("options")
-    normalized = _normalized_ask_user_options(raw_options)
-    if normalized:
-        return normalized
-    return [
-        {"label": "允许", "description": "允许本次操作。"},
-        {"label": "改用只读检查", "description": "继续使用只读工具收集信息。"},
-        {"label": "取消", "description": "拒绝本次操作。"},
-    ]
+    return _normalized_ask_user_options(raw_options)
+
+
+def _ask_user_multi_select(first_question: Any, input_value: dict[str, Any]) -> bool | None:
+    if isinstance(first_question, dict) and isinstance(first_question.get("multiSelect"), bool):
+        return first_question["multiSelect"]
+    if isinstance(input_value.get("multiSelect"), bool):
+        return input_value["multiSelect"]
+    return None
 
 
 def _normalized_ask_user_options(raw_options: Any) -> list[dict[str, str]]:

@@ -592,8 +592,8 @@ def test_tool_bridge_normalizes_malformed_ask_user_question_schema() -> None:
     assert result.error is None
     assert result.tool_calls[0].name == "AskUserQuestion"
     assert result.tool_calls[0].input["questions"][0]["question"] == "Allow git commands?"
-    assert result.tool_calls[0].input["questions"][0]["header"] == "确认操作"
-    assert result.tool_calls[0].input["questions"][0]["options"][0]["label"] == "允许"
+    assert "header" not in result.tool_calls[0].input["questions"][0]
+    assert "options" not in result.tool_calls[0].input["questions"][0]
 
 
 def test_tool_bridge_normalizes_ask_user_question_description_only_schema() -> None:
@@ -621,8 +621,39 @@ def test_tool_bridge_normalizes_ask_user_question_description_only_schema() -> N
 
     assert result.error is None
     assert result.tool_calls[0].input["questions"][0]["question"] == "Need permission to run git commands. Allow?"
-    assert result.tool_calls[0].input["questions"][0]["header"] == "确认操作"
-    assert result.tool_calls[0].input["questions"][0]["options"][0]["label"] == "允许"
+    assert "header" not in result.tool_calls[0].input["questions"][0]
+    assert "options" not in result.tool_calls[0].input["questions"][0]
+
+
+def test_tool_bridge_does_not_synthesize_ask_user_question_options() -> None:
+    context = build_context(
+        [
+            {
+                "type": "function",
+                "function": {
+                    "name": "AskUserQuestion",
+                    "parameters": {
+                        "type": "object",
+                        "required": ["questions"],
+                        "properties": {"questions": {"type": "array"}},
+                    },
+                },
+            }
+        ],
+        ToolBridgeConfig(exposure_policy="all"),
+    )
+
+    result = parse_tool_response(
+        '```tool_json\n'
+        '{"calls":[{"id":"call_1","name":"AskUserQuestion","input":{"questions":[{"question":"您希望我对列出的 Skills 文件执行什么操作？"}]}}]}\n'
+        "```",
+        context,
+    )
+
+    assert result.error is None
+    first_question = result.tool_calls[0].input["questions"][0]
+    assert first_question["question"] == "您希望我对列出的 Skills 文件执行什么操作？"
+    assert "options" not in first_question
 
 
 def _credential_store(tmp_path: Path) -> CredentialStore:
@@ -1121,6 +1152,7 @@ def test_strict_tool_prompt_forbids_ask_user_for_tool_permission() -> None:
     assert response.status_code == 200
     prompt = "\n".join(str(message.get("content", "")) for message in seen["body"]["messages"] if message.get("role") == "system")
     assert "Do not call AskUserQuestion to request permission" in prompt
+    assert "Do not call AskUserQuestion for optional next-step or scope selection" in prompt
     assert "Request the listed tool directly" in prompt
 
 
