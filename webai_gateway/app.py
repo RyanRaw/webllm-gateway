@@ -2225,6 +2225,13 @@ def _controller_retry_error_message(error_kind: str) -> str:
             "The model summarized DS2API_HISTORY.txt or the current state instead of answering the latest local-agent task. "
             "Use DS2API_HISTORY only as context, then answer the current user request directly from gathered evidence."
         )
+    if error_kind == "unknown_project_structure_final_without_task_answer":
+        return (
+            "The model stopped after broad or truncated discovery and asked the user for project structure, paths, "
+            "file lists, language, or source code instead of continuing the local-agent task. Use the current workspace "
+            "context and request a narrower allowed tool such as Glob, Grep, Read, LS, or Bash when available. "
+            "Do not ask the user to provide repository details that the downstream tools can inspect."
+        )
     return (
         "The controller rejected this response as incomplete for local-agent work. "
         "Request an allowed tool if more evidence is needed, otherwise provide a substantive final answer."

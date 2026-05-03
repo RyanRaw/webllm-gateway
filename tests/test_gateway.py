@@ -546,6 +546,25 @@ def test_tool_controller_retries_ds2api_history_summary_final_in_all_profile() -
     assert decision.reason == "history_summary_final_without_task_answer"
 
 
+def test_tool_controller_retries_unknown_project_structure_final_in_all_profile() -> None:
+    text = (
+        "项目结构未知。Glob 结果截断。需要具体文件列表或目录结构才能审查代码。"
+        "请提供：1. 项目根目录路径 2. 主要编程语言/框架 3. 或直接粘贴关键代码文件内容。"
+    )
+    result = BridgeResult(content=text, tool_calls=[], raw_content=text)
+    context = _controller_context_with_tools(
+        ["Glob", "Grep", "Read", "Bash", "Skill"],
+        task_text="审查当前项目的代码，看看有什么需要改进的",
+        recent_tool_call_names=("Skill", "Glob"),
+    )
+    context = replace(context, options=ToolBridgeConfig(exposure_policy="all", tool_profile="all"))
+
+    decision = classify_bridge_result(result, context, RetryState())
+
+    assert decision.state == "RETRY"
+    assert decision.reason == "unknown_project_structure_final_without_task_answer"
+
+
 def test_tool_controller_retries_off_task_environment_config_final_after_tool_loop() -> None:
     text = (
         'CAVEMAN MODE ACTIVE. Statusline badge not configured. Add to `~/.claude/settings.json`: '

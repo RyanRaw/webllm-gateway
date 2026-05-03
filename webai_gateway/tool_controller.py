@@ -86,6 +86,16 @@ _HISTORY_SUMMARY_REQUEST_RE = re.compile(
     r"\b(?:status|state|progress|recap|summar(?:y|ize))\b|(?:状态|进展|总结|回顾|复盘)",
     re.IGNORECASE,
 )
+_UNKNOWN_PROJECT_STRUCTURE_FINAL_RE = re.compile(
+    r"(?:project\s+structure\s+(?:is\s+)?unknown|unknown\s+project\s+structure|项目结构未知)|"
+    r"(?:glob\s*(?:result|结果).{0,40}(?:truncated|截断))|"
+    r"(?:cannot|can't|unable\s+to|无法).{0,80}(?:review|inspect|audit|analy[sz]e|审查|检查|评审|分析)"
+    r".{0,80}(?:without|缺少|没有|需要).{0,80}(?:file|path|directory|repo|project|文件|路径|目录|项目|仓库)|"
+    r"(?:(?:please\s+)?(?:provide|specify)|请(?:提供|给出|说明)|需要(?:具体)?(?:提供|说明)?).{0,160}"
+    r"(?:project\s+root|root\s+path|directory\s+structure|file\s+list|source\s+files?|language|framework|"
+    r"项目根目录|根目录路径|目录结构|文件列表|关键代码|编程语言|框架)",
+    re.IGNORECASE | re.DOTALL,
+)
 _OFF_TASK_ENV_CONFIG_FINAL_RE = re.compile(
     r"\bcaveman\s+mode\s+active\b.{0,200}\b(?:statusline|status\s+line|settings\.json|badge|plugins?|hooks?)\b|"
     r"\b(?:statusline|status\s+line|badge)\b.{0,160}\b(?:settings\.json|configured|configure|command)\b|"
@@ -157,6 +167,21 @@ def classify_bridge_result(
             "RETRY",
             retry_kind="history_summary_final_without_task_answer",
             reason="history_summary_final_without_task_answer",
+            bridge_result=result,
+            retry_state=RetryState(
+                repair_attempts=state.repair_attempts + 1,
+                recovery_attempts=state.recovery_attempts,
+                ask_user_attempts=state.ask_user_attempts,
+            ),
+        )
+
+    if _is_unknown_project_structure_final_without_task_answer(context, result.content):
+        if state.repair_attempts >= max_repair_attempts:
+            return ControllerDecision("FINAL", reason="retry_budget_exhausted", bridge_result=result, retry_state=state)
+        return ControllerDecision(
+            "RETRY",
+            retry_kind="unknown_project_structure_final_without_task_answer",
+            reason="unknown_project_structure_final_without_task_answer",
             bridge_result=result,
             retry_state=RetryState(
                 repair_attempts=state.repair_attempts + 1,
@@ -419,6 +444,24 @@ def _is_history_summary_final_without_task_answer(context: ToolBridgeContext, te
     if not raw:
         return False
     return bool(_HISTORY_SUMMARY_FINAL_RE.search(raw[:1200]))
+
+
+def _is_unknown_project_structure_final_without_task_answer(context: ToolBridgeContext, text: str) -> bool:
+    if not context.has_tool_loop or not context.allowed_names:
+        return False
+    task = context.task_text or ""
+    if not (_REVIEW_TASK_RE.search(task) or _MUTATION_TASK_RE.search(task)):
+        return False
+    raw = " ".join((text or "").split())
+    if not raw or len(raw) > 1600:
+        return False
+    if not _UNKNOWN_PROJECT_STRUCTURE_FINAL_RE.search(raw[:1600]):
+        return False
+    allowed = {_compact_tool_name(tool.name) for tool in context.tools}
+    if not (allowed & (_DISCOVERY_TOOL_NAMES | _READLIKE_TOOL_NAMES | {"bash", "shell"})):
+        return False
+    ledger = build_evidence_ledger(context)
+    return ledger.has_discovery or "glob" in raw.lower() or "目录" in raw or "directory" in raw.lower()
 
 
 def _is_off_task_environment_configuration_final(context: ToolBridgeContext, text: str) -> bool:
