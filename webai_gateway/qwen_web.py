@@ -14,6 +14,7 @@ from .prompt_compaction import (
     compact_role_messages_as_ds2api_history,
     compact_web_prompt,
     prompt_preserved_task_state_diagnostics,
+    web_prompt_history_role,
 )
 
 
@@ -202,11 +203,14 @@ def qwen_messages_to_prompt_and_files(messages: Any, *, max_prompt_chars: int | 
         files.extend(message_files)
         if not text:
             continue
-        role_entries.append((role, text))
-        if role == "system":
+        prompt_role = web_prompt_history_role(role, text)
+        role_entries.append((prompt_role, text))
+        if prompt_role == "system":
             parts.append(f"System: {text}")
-        elif role == "assistant":
+        elif prompt_role == "assistant":
             parts.append(f"Assistant: {text}")
+        elif prompt_role == "tool":
+            parts.append(f"Tool: {text}")
         else:
             parts.append(f"User: {text}")
     prompt = "\n\n".join(parts)

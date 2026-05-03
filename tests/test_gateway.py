@@ -10002,6 +10002,67 @@ def test_qwen_messages_compaction_uses_ds2api_history_continuation() -> None:
     assert prompt.rfind("LATEST_SENTINEL") > prompt.rfind("Continue from the latest state")
 
 
+def test_qwen_messages_tool_observation_does_not_replace_current_request() -> None:
+    huge_system_prefix = "system bootstrap\n" + ("skill listing entry\n" * 500)
+    tool_protocol = (
+        "You are using WebAI Gateway's strict tool bridge.\n"
+        "Available tools: Skill, Glob, Read.\n"
+        "Required tool-call format:\n<|DSML|tool_calls>\n</|DSML|tool_calls>"
+    )
+    original_task = "/using-superpowers audit current project code and list improvements"
+    tool_observation = (
+        "Tool result for Glob (call id: call_1, is_error: false):\n"
+        "skills/content-rewriter/SKILL.md\nDS2API_HISTORY.txt\n\n"
+        "Use this tool result to continue the task."
+    )
+
+    prompt, files = qwen_messages_to_prompt_and_files(
+        [
+            {"role": "system", "content": huge_system_prefix + "\n\n" + tool_protocol},
+            {"role": "user", "content": original_task},
+            {
+                "role": "assistant",
+                "content": (
+                    'Assistant requested tool calls:\n<|DSML|tool_calls><|DSML|invoke name="Skill">'
+                    '<|DSML|parameter name="skill"><![CDATA[using-superpowers]]></|DSML|parameter>'
+                    "</|DSML|invoke></|DSML|tool_calls>"
+                ),
+            },
+            {"role": "user", "content": tool_observation},
+        ],
+        max_prompt_chars=1800,
+    )
+
+    assert files == []
+    marker = "=== CURRENT USER REQUEST (highest priority) ==="
+    assert marker in prompt
+    current_block = prompt[prompt.rfind(marker) :]
+    assert "audit current project code and list improvements" in current_block
+    assert "Tool result for Glob" not in current_block
+    assert "Use this tool result to continue the task" not in current_block
+
+
+def test_qwen_messages_renders_tool_observation_as_tool_role() -> None:
+    prompt, files = qwen_messages_to_prompt_and_files(
+        [
+            {"role": "user", "content": "audit current project code"},
+            {
+                "role": "user",
+                "content": (
+                    "Tool result for Read (call id: call_2, is_error: false):\n"
+                    "README content\n\n"
+                    "Use this tool result to continue the task."
+                ),
+            },
+        ],
+        max_prompt_chars=8000,
+    )
+
+    assert files == []
+    assert "Tool: Tool result for Read" in prompt
+    assert "User: Tool result for Read" not in prompt
+
+
 def test_qwen_messages_compaction_does_not_promote_tool_history_without_task_updates() -> None:
     huge_system_prefix = "system bootstrap\n" + ("skill listing entry\n" * 500)
     tool_protocol = (
@@ -14424,6 +14485,38 @@ def test_qwen_coder_messages_compaction_uses_ds2api_history_continuation() -> No
     assert "WebAI Gateway's strict tool bridge" in prompt
     assert "<|DSML|tool_calls>" in prompt
     assert "LATEST_SENTINEL" in prompt
+
+
+def test_qwen_coder_messages_tool_observation_does_not_replace_current_request() -> None:
+    huge_system_prefix = "system bootstrap\n" + ("skill listing entry\n" * 500)
+    tool_protocol = (
+        "You are using WebAI Gateway's strict tool bridge.\n"
+        "Available tools: Glob, Read, Edit.\n"
+        "Required tool-call format:\n<|DSML|tool_calls>\n</|DSML|tool_calls>"
+    )
+    prompt, files = qwen_coder_messages_to_prompt_and_files(
+        [
+            {"role": "system", "content": huge_system_prefix + "\n\n" + tool_protocol},
+            {"role": "user", "content": "audit current project code and list improvements"},
+            {"role": "assistant", "content": "Assistant requested tool calls: Glob({\"pattern\":\"*.py\"})"},
+            {
+                "role": "user",
+                "content": (
+                    "Tool result for Glob (call id: call_1, is_error: false):\n"
+                    "webai_gateway/qwen_coder.py\n\n"
+                    "Use this tool result to continue the task."
+                ),
+            },
+        ],
+        max_prompt_chars=1800,
+    )
+
+    assert files == []
+    marker = "=== CURRENT USER REQUEST (highest priority) ==="
+    assert marker in prompt
+    current_block = prompt[prompt.rfind(marker) :]
+    assert "audit current project code and list improvements" in current_block
+    assert "Tool result for Glob" not in current_block
 
 
 def test_qwen_coder_client_retries_metadata_only_phase_response() -> None:

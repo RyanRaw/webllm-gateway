@@ -260,10 +260,13 @@ def _looks_like_current_request_control_text(text: str) -> bool:
     compact = re.sub(r"\s+", " ", str(text or "").strip()).lower()
     if not compact:
         return True
+    if looks_like_gateway_tool_observation(text):
+        return True
     control_markers = (
         "do not request the same skill again",
         "use the loaded skill instructions already in the conversation",
         "continue the original user task",
+        "use this tool result to continue the task",
         "loaded skill instructions",
         "launching skill:",
         "skill loaded",
@@ -432,7 +435,24 @@ _SLASH_COMMAND_WITH_ARGS_RE = re.compile(
     r"^\s*/[A-Za-z0-9][A-Za-z0-9:_\.-]*(?:\s+(?P<body>.+))?\s*$",
     re.DOTALL,
 )
+_GATEWAY_TOOL_OBSERVATION_RE = re.compile(
+    r"^\s*(?:Tool result for|Tool call failed|Function result for)\b",
+    re.IGNORECASE,
+)
 _TASK_LIST_PARAM_NAMES = {"todos", "tasks", "items", "tasklist", "todolist"}
+
+
+def web_prompt_history_role(role: str, text: str) -> str:
+    normalized = str(role or "").strip().lower() or "user"
+    if normalized == "function":
+        return "tool"
+    if normalized == "user" and looks_like_gateway_tool_observation(text):
+        return "tool"
+    return normalized
+
+
+def looks_like_gateway_tool_observation(text: str) -> bool:
+    return bool(_GATEWAY_TOOL_OBSERVATION_RE.match(str(text or "")))
 
 
 def build_preserved_task_state_snapshot(entries: Iterable[tuple[str, str]], *, max_chars: int = 1200) -> str:
