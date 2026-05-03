@@ -10317,6 +10317,61 @@ def test_qwen_messages_compaction_does_not_promote_tool_history_without_task_upd
     assert prompt.rfind("LATEST_NEW_TASK_SENTINEL") > prompt.rfind("Continue from the latest state")
 
 
+def test_qwen_messages_compaction_preserves_active_tool_errors_without_task_updates() -> None:
+    huge_system_prefix = "system bootstrap\n" + ("tool schema detail\n" * 700)
+    tool_protocol = (
+        "You are using WebAI Gateway's strict tool bridge.\n"
+        "Available tools: mcp__chrome-devtools__list_pages, mcp__chrome-devtools__navigate_page, "
+        "mcp__web-search__get-single-web-page-content.\n"
+        "Required tool-call format:\n<|DSML|tool_calls>\n</|DSML|tool_calls>"
+    )
+    messages: list[dict[str, str]] = [
+        {"role": "system", "content": huge_system_prefix + "\n\n" + tool_protocol},
+        {
+            "role": "user",
+            "content": "Fetch https://mp.weixin.qq.com/s/fsi4KTbXy7T93sK54w3aFw and fix issues until success.",
+        },
+    ]
+    for index in range(12):
+        messages.extend(
+            [
+                {
+                    "role": "assistant",
+                    "content": (
+                        "Assistant requested tool calls:\n"
+                        '<|DSML|tool_calls><|DSML|invoke name="mcp__chrome-devtools__navigate_page">'
+                        '<|DSML|parameter name="url"><![CDATA[https://mp.weixin.qq.com/s/fsi4KTbXy7T93sK54w3aFw]]></|DSML|parameter>'
+                        "</|DSML|invoke></|DSML|tool_calls>"
+                    ),
+                },
+                {
+                    "role": "tool",
+                    "content": (
+                        "Tool result for mcp__chrome-devtools__navigate_page "
+                        f"(call id: call_{index}, is_error: true):\n"
+                        "The browser is already running for C:\\Users\\woody\\.cache\\chrome-devtools-mcp\\chrome-profile. "
+                        "Use --isolated to run multiple instances."
+                    ),
+                },
+            ]
+        )
+
+    prompt, files = qwen_messages_to_prompt_and_files(
+        messages,
+        max_prompt_chars=2600,
+        current_task_text="Fetch https://mp.weixin.qq.com/s/fsi4KTbXy7T93sK54w3aFw and fix issues until success.",
+    )
+
+    assert files == []
+    assert "# WebAI Gateway preserved task state" in prompt
+    assert "Recent tool calls:" in prompt
+    assert "mcp__chrome-devtools__navigate_page" in prompt
+    assert "Tool result signals:" in prompt
+    assert "browser is already running" in prompt
+    assert "Use --isolated" in prompt
+    assert "=== CURRENT USER REQUEST (highest priority) ===" in prompt
+
+
 def test_qwen_messages_current_request_skips_skill_control_text() -> None:
     huge_system_prefix = "system bootstrap\n" + ("skill listing entry\n" * 500)
     tool_protocol = (

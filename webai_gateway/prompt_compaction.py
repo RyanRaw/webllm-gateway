@@ -439,7 +439,8 @@ _ITEM_RE = re.compile(r"<\s*item\b[^>]*>(?P<body>.*?)</\s*item\s*>", re.IGNORECA
 _CDATA_RE = re.compile(r"^\s*<!\[CDATA\[(?P<body>.*)\]\]>\s*$", re.DOTALL)
 _RESULT_SIGNAL_RE = re.compile(
     r"\b(?:file does not exist|no such file|not found|is_error:\s*true|"
-    r"unchanged content|reported unchanged|already available in history|missing content)\b",
+    r"unchanged content|reported unchanged|already available in history|missing content|"
+    r"browser is already running|use --isolated|profile is already running|already running)\b",
     re.IGNORECASE,
 )
 _SLASH_COMMAND_WITH_ARGS_RE = re.compile(
@@ -469,10 +470,12 @@ def looks_like_gateway_tool_observation(text: str) -> bool:
 def build_preserved_task_state_snapshot(entries: Iterable[tuple[str, str]], *, max_chars: int = 1200) -> str:
     entry_list = [(role, text or "") for role, text in entries]
     tasks = _extract_task_updates(entry_list)
-    if not tasks:
+    recent_calls = _latest_unique(_extract_recent_tool_call_summaries(entry_list), limit=10)
+    result_signals = _latest_unique(_extract_tool_result_signals(entry_list), limit=6)
+    if not tasks and not (recent_calls or result_signals):
         return ""
-    recent_calls = _extract_recent_tool_call_summaries(entry_list)
-    result_signals = _extract_tool_result_signals(entry_list)
+    if not tasks and not _has_active_recent_tool_evidence(entry_list):
+        return ""
 
     lines = [
         PRESERVED_TASK_STATE_MARKER,
@@ -488,12 +491,15 @@ def build_preserved_task_state_snapshot(entries: Iterable[tuple[str, str]], *, m
             status = task.get("status") or "unknown"
             description = task.get("description") or "no description"
             lines.append(f"- Task {task_id}: {status} - {_one_line(description, 180)}")
+    if result_signals and not tasks:
+        lines.append("Tool result signals:")
+        lines.extend(f"- {_one_line(signal, 220)}" for signal in result_signals)
     if recent_calls:
         lines.append("Recent tool calls:")
-        lines.extend(f"- {summary}" for summary in recent_calls[-10:])
-    if result_signals:
+        lines.extend(f"- {summary}" for summary in recent_calls)
+    if result_signals and tasks:
         lines.append("Tool result signals:")
-        lines.extend(f"- {_one_line(signal, 220)}" for signal in result_signals[-6:])
+        lines.extend(f"- {_one_line(signal, 220)}" for signal in result_signals)
     return _fit_snapshot("\n".join(lines), max_chars=max_chars)
 
 
@@ -540,6 +546,45 @@ def _layered_history_counts(text: str) -> tuple[int, int]:
     if not match:
         return 0, 0
     return int(match.group(1)), int(match.group(2))
+
+
+def _has_active_recent_tool_evidence(entries: list[tuple[str, str]]) -> bool:
+    for role, text in reversed(entries):
+        content = (text or "").strip()
+        if not content:
+            continue
+        label = _history_role_label(role)
+        if label == "TOOL":
+            return True
+        if label == "ASSISTANT" and next(iter(_iter_invocations(content)), None) is not None:
+            return True
+        if label == "USER" and (
+            looks_like_gateway_tool_observation(content) or _looks_like_current_request_control_text(content)
+        ):
+            return True
+        return False
+    return False
+
+
+def _latest_unique(values: list[str], *, limit: int) -> list[str]:
+    seen: set[str] = set()
+    kept: list[str] = []
+    for value in reversed(values):
+        key = _recent_evidence_dedupe_key(value)
+        if key in seen:
+            continue
+        seen.add(key)
+        kept.insert(0, value)
+        if len(kept) >= limit:
+            break
+    return kept
+
+
+def _recent_evidence_dedupe_key(value: str) -> str:
+    key = _one_line(value, 1000)
+    key = re.sub(r"\bcall id:\s*[^,\):]+", "call id:<id>", key, flags=re.IGNORECASE)
+    key = re.sub(r"\btoolu(?:_call)?_[A-Za-z0-9_:-]+", "toolu_<id>", key)
+    return key
 
 
 def _extract_task_updates(entries: list[tuple[str, str]]) -> dict[str, dict[str, str]]:
@@ -741,11 +786,31 @@ def _extract_tool_result_signals(entries: list[tuple[str, str]]) -> list[str]:
     for role, text in entries:
         if str(role or "").strip().lower() not in {"tool", "user"}:
             continue
-        for line in (text or "").splitlines():
+        lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+        for index, line in enumerate(lines):
             if _RESULT_SIGNAL_RE.search(line):
-                signals.append(line.strip())
+                signal = line
+                if _looks_like_tool_result_error_header(line):
+                    detail = _first_tool_result_detail_after(lines, index)
+                    if detail:
+                        signal = f"{line} {detail}"
+                signals.append(signal)
                 break
     return signals
+
+
+def _looks_like_tool_result_error_header(line: str) -> bool:
+    lowered = (line or "").lower()
+    return "tool result for" in lowered and "is_error:" in lowered
+
+
+def _first_tool_result_detail_after(lines: list[str], index: int) -> str:
+    for line in lines[index + 1 :]:
+        lowered = line.lower()
+        if lowered.startswith("the tool call failed.") or lowered.startswith("use this tool result to continue"):
+            continue
+        return line
+    return ""
 
 
 def _iter_invocations(text: str) -> Iterable[tuple[str, dict[str, str]]]:
