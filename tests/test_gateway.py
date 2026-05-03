@@ -2797,6 +2797,74 @@ def test_tool_bridge_combines_referential_followup_with_prior_url_task() -> None
     assert followup in refined.task_text
 
 
+def test_tool_bridge_combines_local_project_reference_with_recent_path_context() -> None:
+    context = build_context(
+        [
+            {
+                "type": "function",
+                "function": {
+                    "name": "Bash",
+                    "description": "Run shell commands.",
+                    "parameters": {"type": "object"},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "Read",
+                    "description": "Read files.",
+                    "parameters": {"type": "object"},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "WebSearch",
+                    "description": "Search the web.",
+                    "parameters": {"type": "object"},
+                },
+            },
+        ],
+        ToolBridgeConfig(exposure_policy="all"),
+    )
+    first_task = "\u66f4\u65b0\u4e0bnexu\u8fd9\u4e2a\u9879\u76ee\u6700\u65b0\u7684github\u4ee3\u7801"
+    followup = "nexu\u8fd9\u4e2a\u9879\u76ee\u5b98\u65b9\u9ed8\u8ba4\u652f\u6301\u54ea\u4e9b\u6a21\u578b\uff1f\u652f\u6301gemini 3.1 pro\u5417"
+
+    refined = prefer_local_tools_for_local_agent_task(
+        context,
+        [
+            {"role": "user", "content": first_task},
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_git_status",
+                        "name": "Bash",
+                        "input": {"command": "cd E:/ProjectX/nexu && git status"},
+                    }
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_git_status",
+                        "content": "On branch main\nYour branch is up to date with 'origin/main'.",
+                    }
+                ],
+            },
+            {"role": "user", "content": followup},
+        ],
+    )
+
+    assert "E:/ProjectX/nexu" in refined.task_text
+    assert first_task in refined.task_text
+    assert followup in refined.task_text
+    assert refined.enabled is True
+
+
 def test_tool_bridge_skips_yaml_frontmatter_skill_body_for_task_anchor() -> None:
     context = build_context(
         [
@@ -15025,6 +15093,53 @@ def test_qwen_web_compaction_ignores_system_reminder_as_current_request() -> Non
     assert "Glob" in prompt
 
 
+def test_qwen_web_compaction_preserves_local_project_context_for_project_followup() -> None:
+    first_task = "\u66f4\u65b0\u4e0bnexu\u8fd9\u4e2a\u9879\u76ee\u6700\u65b0\u7684github\u4ee3\u7801"
+    followup = "nexu\u8fd9\u4e2a\u9879\u76ee\u5b98\u65b9\u9ed8\u8ba4\u652f\u6301\u54ea\u4e9b\u6a21\u578b\uff1f\u652f\u6301gemini 3.1 pro\u5417"
+    prompt, files = qwen_messages_to_prompt_and_files(
+        [
+            {"role": "system", "content": "system bootstrap\n" + ("large history\n" * 500)},
+            {"role": "user", "content": first_task},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_bash",
+                        "type": "function",
+                        "function": {
+                            "name": "Bash",
+                            "arguments": json.dumps(
+                                {"command": "cd E:/ProjectX/nexu && git status"},
+                                ensure_ascii=False,
+                            ),
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_bash",
+                "name": "Bash",
+                "content": "On branch main\nYour branch is up to date with 'origin/main'.",
+            },
+            {"role": "user", "content": followup},
+        ],
+        max_prompt_chars=1800,
+    )
+
+    assert files == []
+    assert "# WebAI Gateway preserved task state" in prompt
+    assert "Local project context:" in prompt
+    assert "E:/ProjectX/nexu" in prompt
+    marker = "=== CURRENT USER REQUEST (highest priority) ==="
+    assert marker in prompt
+    current_block = prompt[prompt.rfind(marker) :]
+    assert "E:/ProjectX/nexu" in current_block
+    assert first_task in current_block
+    assert followup in current_block
+
+
 def test_qwen_web_direct_payload_keeps_current_task_anchor_when_bridge_disabled(tmp_path: Path) -> None:
     seen_payloads: list[dict[str, Any]] = []
 
@@ -15574,6 +15689,91 @@ def test_qwen_web_auto_activation_keeps_local_github_push_on_tool_bridge(tmp_pat
     assert "WebAI Gateway's strict tool bridge" in prompt
     assert response.json()["content"] == [
         {"type": "tool_use", "id": "toolu_call_1", "name": "Bash", "input": {"command": "git status --short"}}
+    ]
+
+
+def test_qwen_web_auto_activation_keeps_local_project_reference_on_tool_bridge(tmp_path: Path) -> None:
+    seen: dict[str, Any] = {}
+
+    class CapturingQwenClient:
+        def __init__(self, credential: dict[str, Any], http_client: httpx.Client | None = None) -> None:
+            self.credential = credential
+
+        def chat_completions(self, payload: dict[str, Any]) -> dict[str, Any]:
+            seen["payload"] = payload
+            return _openai_response(
+                '```tool_json\n{"calls":[{"id":"call_1","name":"Read","input":{"file_path":"E:/ProjectX/nexu/README.md"}}]}\n```'
+            )
+
+    config = GatewayConfig(
+        server=ServerConfig(api_key="local-dev-key"),
+        upstream=UpstreamConfig(base_url="http://upstream.test/v1", model="web-model"),
+        provider_runtime=ProviderRuntimeConfig(native_web_search_policy="auto"),
+        tool_bridge=ToolBridgeConfig(activation_policy="auto", exposure_policy="all"),
+    )
+    client = TestClient(
+        create_app(
+            config=config,
+            credential_store=_credential_store(tmp_path),
+            qwen_client_factory=CapturingQwenClient,
+            http_client=_not_found_client(),
+        )
+    )
+
+    first_task = "\u66f4\u65b0\u4e0bnexu\u8fd9\u4e2a\u9879\u76ee\u6700\u65b0\u7684github\u4ee3\u7801"
+    followup = "nexu\u8fd9\u4e2a\u9879\u76ee\u5b98\u65b9\u9ed8\u8ba4\u652f\u6301\u54ea\u4e9b\u6a21\u578b\uff1f\u652f\u6301gemini 3.1 pro\u5417"
+
+    response = client.post(
+        "/v1/messages",
+        headers={**_headers(), "anthropic-version": "2023-06-01"},
+        json={
+            "model": "qwen-web/qwen3.6-plus",
+            "messages": [
+                {"role": "user", "content": first_task},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_git_status",
+                            "name": "Bash",
+                            "input": {"command": "cd E:/ProjectX/nexu && git status"},
+                        }
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_git_status",
+                            "content": "On branch main\nYour branch is up to date with 'origin/main'.",
+                        }
+                    ],
+                },
+                {"role": "user", "content": followup},
+            ],
+            "tools": [
+                {"name": "Bash", "description": "Run shell commands", "input_schema": {"type": "object"}},
+                {"name": "Read", "description": "Read files", "input_schema": {"type": "object"}},
+                {"name": "WebSearch", "description": "Search the web", "input_schema": {"type": "object"}},
+            ],
+            "max_tokens": 1024,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = seen["payload"]
+    assert payload.get("_webai_native_web_search") is False
+    assert "tools" not in payload
+    assert "tool_choice" not in payload
+    prompt = "\n".join(str(message.get("content", "")) for message in payload["messages"])
+    assert "WebAI Gateway's strict tool bridge" in prompt
+    assert "E:/ProjectX/nexu" in prompt
+    assert first_task in prompt
+    assert followup in prompt
+    assert response.json()["content"] == [
+        {"type": "tool_use", "id": "toolu_call_1", "name": "Read", "input": {"file_path": "E:/ProjectX/nexu/README.md"}}
     ]
 
 

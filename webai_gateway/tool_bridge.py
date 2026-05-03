@@ -708,9 +708,12 @@ def should_enable_native_web_search(messages: Any, policy: str) -> bool:
     if normalized != "auto":
         return False
     latest = _latest_human_user_text(messages)
+    effective = _effective_human_task_text(messages)
+    if _recent_local_project_context_anchor(messages, latest):
+        return False
     if _looks_like_external_web_lookup_task(latest):
         return True
-    if _looks_like_local_agent_task(latest):
+    if _looks_like_local_agent_task(effective):
         return False
     if _looks_like_web_search_task(latest):
         return True
@@ -4063,12 +4066,138 @@ def _effective_human_task_text(messages: Any) -> str:
     if not texts:
         return ""
     latest = texts[0]
+    local_project_context = _recent_local_project_context_anchor(messages, latest)
+    if local_project_context:
+        return f"{local_project_context}\nLatest user request: {latest.strip()}".strip()
     if not _looks_like_continuation_task(latest):
         return latest
     for text in texts[1:]:
         if text.strip() and not _looks_like_continuation_task(text):
             return f"{text.strip()}\n{latest.strip()}".strip()
     return latest
+
+
+def _recent_local_project_context_anchor(messages: Any, latest_user_text: str) -> str:
+    if not isinstance(messages, list) or not _looks_like_local_project_reference_task(latest_user_text):
+        return ""
+    project_path = _recent_local_project_path(messages)
+    if not project_path:
+        return ""
+    prior_task = _recent_prior_human_task_text(messages)
+    lines = [
+        "Active local project context:",
+        f"Project path: {project_path}",
+    ]
+    if prior_task:
+        lines.append(f"Previous user task: {_shorten(prior_task, 240)}")
+    lines.append(
+        "If the latest request asks about this project, use local project files and tool evidence before public web search."
+    )
+    return "\n".join(lines)
+
+
+def _looks_like_local_project_reference_task(text: str) -> bool:
+    value = re.sub(r"\s+", " ", (text or "").strip().lower())
+    if not value or len(value) > 500:
+        return False
+    markers = (
+        "\u8fd9\u4e2a\u9879\u76ee",
+        "\u8be5\u9879\u76ee",
+        "\u5f53\u524d\u9879\u76ee",
+        "\u672c\u9879\u76ee",
+        "\u8fd9\u4e2a\u4ed3\u5e93",
+        "\u8be5\u4ed3\u5e93",
+        "\u5f53\u524d\u4ed3\u5e93",
+        "\u672c\u4ed3\u5e93",
+        "\u9879\u76ee",
+        "\u4ed3\u5e93",
+        "this project",
+        "this repo",
+        "this repository",
+        "current project",
+        "current repo",
+        "current repository",
+        "local project",
+        "local repo",
+        "local repository",
+    )
+    if any(marker in value for marker in markers):
+        return True
+    return bool(re.search(r"\b[\w.-]+\s+(?:project|repo|repository)\b", value))
+
+
+def _recent_local_project_path(messages: list[Any]) -> str:
+    seen: set[str] = set()
+    for message in reversed(messages):
+        if not isinstance(message, dict):
+            continue
+        for text in _message_project_context_texts(message):
+            for path in _local_project_paths_from_text(text):
+                normalized = _normalize_path_for_compare(path)
+                if not normalized or normalized in seen:
+                    continue
+                seen.add(normalized)
+                if _windows_path_looks_like_directory(path):
+                    return _canonical_local_project_path(path)
+    return ""
+
+
+def _message_project_context_texts(message: dict[str, Any]) -> list[str]:
+    texts: list[str] = []
+    content_text = _content_to_text(message.get("content"))
+    if content_text.strip() and not _looks_like_skill_injection_text(content_text):
+        texts.append(content_text)
+    if str(message.get("role") or "") == "assistant":
+        for call in _message_tool_call_drafts(message):
+            command = _shell_command_from_input(call.input)
+            if command:
+                texts.append(command)
+            path = _tool_path_from_input(call.input)
+            if path:
+                texts.append(path)
+    return texts
+
+
+def _local_project_paths_from_text(text: str) -> list[str]:
+    raw = text or ""
+    paths: list[str] = []
+    for match in _QUOTED_WINDOWS_PATH_RE.finditer(raw):
+        paths.append(_canonical_local_project_path(match.group("path")))
+    for match in _WINDOWS_DRIVE_PATH_RE.finditer(raw):
+        paths.append(_canonical_local_project_path(match.group("path")))
+    return [path for path in paths if path]
+
+
+def _canonical_local_project_path(path: str) -> str:
+    return (path or "").strip().strip("\"'`").rstrip(".,;:，。；：)]}").replace("\\", "/").rstrip("/")
+
+
+def _recent_prior_human_task_text(messages: list[Any]) -> str:
+    latest_index = _latest_human_user_message_index(messages)
+    if latest_index <= 0:
+        return ""
+    for index in range(latest_index - 1, -1, -1):
+        message = messages[index]
+        if not isinstance(message, dict) or str(message.get("role") or "") != "user":
+            continue
+        if _message_is_tool_result(message) or _message_is_gateway_control_instruction(message):
+            continue
+        text = _human_task_text_from_message(message).strip()
+        if text:
+            return text
+    return ""
+
+
+def _latest_human_user_message_index(messages: list[Any]) -> int:
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if not isinstance(message, dict) or str(message.get("role") or "") != "user":
+            continue
+        if _message_is_tool_result(message) or _message_is_gateway_control_instruction(message):
+            continue
+        if _human_task_text_from_message(message).strip():
+            return index
+    return -1
 
 
 def _human_user_texts_newest_first(messages: Any) -> list[str]:
@@ -7197,13 +7326,20 @@ def _looks_like_update_existing_repo_task(text: str) -> bool:
 
 
 def _update_existing_repo_path_match(text: str) -> re.Match[str] | None:
-    raw = text or ""
+    raw = _latest_user_request_slice(text or "")
     for match in _WINDOWS_DRIVE_PATH_RE.finditer(raw):
         if not _windows_path_looks_like_directory(match.group("path")):
             continue
         if _has_update_marker_near(raw, match.start(), match.end()):
             return match
     return None
+
+
+def _latest_user_request_slice(text: str) -> str:
+    marker = "Latest user request:"
+    if marker not in (text or ""):
+        return text or ""
+    return (text or "").rsplit(marker, 1)[-1]
 
 
 def _windows_path_looks_like_directory(path: str) -> bool:

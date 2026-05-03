@@ -212,6 +212,8 @@ def _compact_role_messages_layered(
         blocks.append("=== PRESERVED SYSTEM AND TOOL PROTOCOL ===\n" + protocol_excerpt.strip())
 
     fixed = "\n\n".join(blocks + ["=== LATEST CONVERSATION TAIL ===", continuation])
+    if len(fixed) >= limit:
+        return _fit_layered_fixed_prompt(blocks, continuation, limit=limit)
     tail_budget = max(500, limit - len(fixed) - 4)
     tail = _fit_history_entries(latest_entries, max_chars=tail_budget)
     prompt = "\n\n".join(blocks + ["=== LATEST CONVERSATION TAIL ===", tail.rstrip(), continuation])
@@ -222,7 +224,35 @@ def _compact_role_messages_layered(
     if overflow < len(tail):
         tail = tail[overflow:].lstrip()
         prompt = "\n\n".join(blocks + ["=== LATEST CONVERSATION TAIL ===", tail.rstrip(), continuation])
-    return prompt[:limit]
+    if len(prompt) <= limit:
+        return prompt
+    return _fit_layered_fixed_prompt(blocks, continuation, limit=limit)
+
+
+def _fit_layered_fixed_prompt(blocks: list[str], continuation: str, *, limit: int) -> str:
+    label = "=== LATEST CONVERSATION TAIL ==="
+    fixed = "\n\n".join(blocks + [label, continuation])
+    if len(fixed) <= limit:
+        return fixed
+    snapshot = blocks[0] if blocks and blocks[0].startswith(PRESERVED_TASK_STATE_MARKER) else ""
+    remaining_blocks = blocks[1:] if snapshot else blocks
+    if snapshot:
+        snapshot_budget = limit - len(label) - len(continuation) - 4
+        if snapshot_budget > 0:
+            compact_snapshot = _fit_snapshot(snapshot, max_chars=snapshot_budget)
+            if len(compact_snapshot) > snapshot_budget:
+                compact_snapshot = compact_snapshot[:snapshot_budget].rstrip()
+            prompt = "\n\n".join([compact_snapshot, label, continuation])
+            if len(prompt) <= limit:
+                return prompt
+    without_snapshot = "\n\n".join(remaining_blocks + [label, continuation])
+    if snapshot and len(without_snapshot) < limit:
+        snapshot_budget = max(120, limit - len(without_snapshot) - 4)
+        compact_snapshot = _fit_snapshot(snapshot, max_chars=snapshot_budget)
+        prompt = "\n\n".join([compact_snapshot] + remaining_blocks + [label, continuation])
+        if len(prompt) <= limit:
+            return prompt
+    return fixed[-limit:].lstrip()
 
 
 def _layered_history_summary_line(*, original_count: int, latest_count: int, has_snapshot: bool) -> str:
@@ -238,6 +268,22 @@ def _layered_history_summary_line(*, original_count: int, latest_count: int, has
 
 
 def _latest_user_request(entries: list[tuple[str, str]]) -> str:
+    candidates = _user_request_candidates(entries)
+    if not candidates:
+        return ""
+    latest = candidates[0]
+    local_context = _recent_local_project_context_lines(entries, latest, prior_task=candidates[1] if len(candidates) > 1 else "")
+    if local_context:
+        return "\n".join(local_context + [f"Latest user request: {latest.strip()}"]).strip()
+    if not _looks_like_referential_followup_request(latest):
+        return latest
+    for prior in candidates[1:]:
+        if prior.strip() and not _looks_like_referential_followup_request(prior):
+            return f"{prior.strip()}\n{latest.strip()}".strip()
+    return latest
+
+
+def _user_request_candidates(entries: list[tuple[str, str]]) -> list[str]:
     candidates: list[str] = []
     for role, text in reversed(entries):
         if _history_role_label(role) != "USER":
@@ -248,15 +294,7 @@ def _latest_user_request(entries: list[tuple[str, str]]) -> str:
         task_text = _current_request_task_text(content)
         if task_text and not _looks_like_current_request_control_text(task_text):
             candidates.append(task_text)
-    if not candidates:
-        return ""
-    latest = candidates[0]
-    if not _looks_like_referential_followup_request(latest):
-        return latest
-    for prior in candidates[1:]:
-        if prior.strip() and not _looks_like_referential_followup_request(prior):
-            return f"{prior.strip()}\n{latest.strip()}".strip()
-    return latest
+    return candidates
 
 
 def _looks_like_referential_followup_request(text: str) -> bool:
@@ -316,6 +354,90 @@ def _looks_like_referential_followup_request(text: str) -> bool:
     return ("\u94fe\u63a5" in value or "url" in value) and (
         "\u63d0\u4f9b\u8fc7" in value or "provided" in value or "same" in value
     )
+
+
+def _recent_local_project_context_lines(
+    entries: list[tuple[str, str]],
+    latest_user_text: str,
+    *,
+    prior_task: str = "",
+) -> list[str]:
+    if not _looks_like_local_project_reference_request(latest_user_text):
+        return []
+    project_path = _recent_local_project_path(entries)
+    if not project_path:
+        return []
+    lines = [f"Project path: {project_path}"]
+    if prior_task:
+        lines.append(f"Previous user task: {_one_line(prior_task, 240)}")
+    lines.append("Use local project files and tool evidence before public web search when this request asks about this project.")
+    return lines
+
+
+def _looks_like_local_project_reference_request(text: str) -> bool:
+    value = re.sub(r"\s+", " ", (text or "").strip().lower())
+    if not value or len(value) > 500:
+        return False
+    markers = (
+        "\u8fd9\u4e2a\u9879\u76ee",
+        "\u8be5\u9879\u76ee",
+        "\u5f53\u524d\u9879\u76ee",
+        "\u672c\u9879\u76ee",
+        "\u8fd9\u4e2a\u4ed3\u5e93",
+        "\u8be5\u4ed3\u5e93",
+        "\u5f53\u524d\u4ed3\u5e93",
+        "\u672c\u4ed3\u5e93",
+        "\u9879\u76ee",
+        "\u4ed3\u5e93",
+        "this project",
+        "this repo",
+        "this repository",
+        "current project",
+        "current repo",
+        "current repository",
+        "local project",
+        "local repo",
+        "local repository",
+    )
+    if any(marker in value for marker in markers):
+        return True
+    return bool(re.search(r"\b[\w.-]+\s+(?:project|repo|repository)\b", value))
+
+
+def _recent_local_project_path(entries: list[tuple[str, str]]) -> str:
+    seen: set[str] = set()
+    for _, text in reversed(entries):
+        for path in _local_project_paths_from_text(text):
+            normalized = _normalize_path_for_compare(path)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            if _windows_path_looks_like_directory(path):
+                return path
+    return ""
+
+
+def _local_project_paths_from_text(text: str) -> list[str]:
+    paths: list[str] = []
+    for match in _WINDOWS_DRIVE_PATH_RE.finditer(text or ""):
+        path = _canonical_local_project_path(match.group("path"))
+        if path:
+            paths.append(path)
+    return paths
+
+
+def _canonical_local_project_path(path: str) -> str:
+    return (path or "").strip().strip("\"'`").rstrip(".,;:，。；：)]}").replace("\\", "/").rstrip("/")
+
+
+def _normalize_path_for_compare(path: str) -> str:
+    return _canonical_local_project_path(path).lower()
+
+
+def _windows_path_looks_like_directory(path: str) -> bool:
+    normalized = _canonical_local_project_path(path)
+    leaf = normalized.rsplit("/", 1)[-1]
+    return not bool(re.search(r"\.[A-Za-z0-9]{1,12}$", leaf))
 
 
 def _normalized_current_user_override(text: str | None) -> str:
@@ -533,6 +655,7 @@ _PLAIN_TOOL_CALL_RE = re.compile(
 _PLAIN_TOOL_ARG_RE = re.compile(
     r"(?P<key>[A-Za-z_][A-Za-z0-9_:-]*)\s*=\s*(?P<value>.*?)(?=,\s*[A-Za-z_][A-Za-z0-9_:-]*\s*=|$)"
 )
+_WINDOWS_DRIVE_PATH_RE = re.compile(r"(?<![\w/])(?P<path>[A-Za-z]:[\\/][^\s\"'&|;<>]*)")
 _RESULT_SIGNAL_RE = re.compile(
     r"\b(?:file does not exist|no such file|not found|is_error:\s*true|"
     r"unchanged content|reported unchanged|already available in history|missing content|"
@@ -736,9 +859,15 @@ def build_preserved_task_state_snapshot(entries: Iterable[tuple[str, str]], *, m
     tasks = _extract_task_updates(entry_list)
     recent_calls = _latest_unique(_extract_recent_tool_call_summaries(entry_list), limit=10)
     result_signals = _latest_unique(_extract_tool_result_signals(entry_list), limit=6)
-    if not tasks and not (recent_calls or result_signals):
+    user_candidates = _user_request_candidates(entry_list)
+    local_project_context = _recent_local_project_context_lines(
+        entry_list,
+        user_candidates[0] if user_candidates else "",
+        prior_task=user_candidates[1] if len(user_candidates) > 1 else "",
+    )
+    if not tasks and not (recent_calls or result_signals or local_project_context):
         return ""
-    if not tasks and not _has_active_recent_tool_evidence(entry_list):
+    if not tasks and not local_project_context and not _has_active_recent_tool_evidence(entry_list):
         return ""
 
     lines = [
@@ -760,6 +889,9 @@ def build_preserved_task_state_snapshot(entries: Iterable[tuple[str, str]], *, m
             status = task.get("status") or "unknown"
             description = task.get("description") or "no description"
             lines.append(f"- Task {task_id}: {status} - {_one_line(description, 180)}")
+    if local_project_context:
+        lines.append("Local project context:")
+        lines.extend(f"- {line}" for line in local_project_context)
     if result_signals and not tasks:
         lines.append("Tool result signals:")
         lines.extend(f"- {_one_line(signal, 220)}" for signal in result_signals)
