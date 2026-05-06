@@ -3338,6 +3338,20 @@ def _parse_bridge_chat_data(
                         stage="tool_refusal_recovery",
                         bridge_context=bridge_context,
                     )
+        elif _should_retry_malformed_tool_format_repair(bridge_result):
+            parsed, bridge_result, retry_state = _retry_repairable_tool_format_error(
+                parsed,
+                bridge_result,
+                retry_state,
+                app=app,
+                payload=payload,
+                bridge=bridge,
+                allowed_tools=allowed_tools,
+                bridge_context=bridge_context,
+                model=model,
+                retry_chat=retry_chat,
+                stage="post_repair_malformed_tool_repair",
+            )
     elif should_retry_incomplete_response(data):
         _record_tool_bridge_event(app, "tool_bridge_retry", stage="incomplete_response", model=model)
         retry_data = retry_chat(
@@ -3518,6 +3532,20 @@ def _parse_bridge_chat_data(
                                 stage="incomplete_missing_required_tool_input_recovery",
                                 bridge_context=bridge_context,
                             )
+                elif _should_retry_malformed_tool_format_repair(bridge_result):
+                    parsed, bridge_result, retry_state = _retry_repairable_tool_format_error(
+                        parsed,
+                        bridge_result,
+                        retry_state,
+                        app=app,
+                        payload=payload,
+                        bridge=bridge,
+                        allowed_tools=allowed_tools,
+                        bridge_context=bridge_context,
+                        model=model,
+                        retry_chat=retry_chat,
+                        stage="incomplete_post_repair_malformed_tool_repair",
+                    )
     if bridge:
         if _should_retry_no_progress_escalation(bridge_result):
             _record_tool_bridge_event(
@@ -3568,6 +3596,58 @@ def _parse_bridge_chat_data(
             bridge_context=bridge_context,
         )
     return parsed, bridge_result
+
+
+def _retry_repairable_tool_format_error(
+    parsed: dict[str, Any],
+    bridge_result: Any,
+    retry_state: RetryState,
+    *,
+    app: FastAPI,
+    payload: dict[str, Any],
+    bridge: bool,
+    allowed_tools: set[str],
+    bridge_context: Any,
+    model: str,
+    retry_chat: Any,
+    stage: str,
+) -> tuple[dict[str, Any], Any, RetryState]:
+    _record_tool_bridge_event(
+        app,
+        "tool_bridge_retry",
+        stage=stage,
+        model=model,
+        errorKind=bridge_result.error.kind,
+        errorMessage=_preview_text(bridge_result.error.message, max_chars=360),
+    )
+    repair_data = retry_chat(build_repair_payload(payload, bridge_result, allowed_tools=allowed_tools))
+    if not isinstance(repair_data, dict):
+        return parsed, bridge_result, retry_state
+    parsed, bridge_result = parse_chat_response(
+        repair_data,
+        bridge=bridge,
+        allowed_tools=allowed_tools,
+        model=model,
+        bridge_context=bridge_context,
+        return_bridge_result=True,
+    )
+    parsed, bridge_result, retry_state = _apply_controller_decision(
+        parsed,
+        bridge_result,
+        bridge_context=bridge_context,
+        model=model,
+        retry_state=retry_state,
+    )
+    if bridge:
+        _record_bridge_parse_event(
+            app,
+            bridge_result,
+            model=model,
+            allowed_tools=allowed_tools,
+            stage=stage,
+            bridge_context=bridge_context,
+        )
+    return parsed, bridge_result, retry_state
 
 
 def _apply_controller_decision(
@@ -3753,6 +3833,16 @@ def _should_retry_required_tool_choice_recovery(bridge_result: Any) -> bool:
 def _should_retry_missing_required_tool_input_recovery(bridge_result: Any) -> bool:
     error = getattr(bridge_result, "error", None)
     return bool(error and getattr(error, "kind", "") == "missing_required_tool_input")
+
+
+def _should_retry_malformed_tool_format_repair(bridge_result: Any) -> bool:
+    error = getattr(bridge_result, "error", None)
+    return bool(
+        error
+        and getattr(error, "repairable", False)
+        and getattr(error, "kind", "")
+        in {"malformed_json", "empty_tool_call", "invalid_tool_call", "invalid_input"}
+    )
 
 
 def _should_retry_no_progress_escalation(bridge_result: Any) -> bool:

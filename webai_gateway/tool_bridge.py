@@ -2558,10 +2558,12 @@ def parse_tool_response(text: str, context: ToolBridgeContext) -> BridgeResult:
         )
 
     candidates: list[Any] = []
+    unfenced_raw = _without_fenced_code_blocks(raw)
     marker_seen = bool(
         _FENCED_TOOL_RE.search(raw)
         or _XML_TOOL_RE.search(raw)
         or _has_dsml_tool_call_syntax(raw)
+        or _looks_like_ds2api_xml_tool_markup(unfenced_raw)
         or _LEGACY_FUNCTION_CALLS_RE.search(raw)
         or _TOOL_CODE_RE.search(raw)
     )

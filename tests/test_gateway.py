@@ -1837,6 +1837,71 @@ def test_webai2api_anthropic_stream_retries_short_setup_final_to_tool_use() -> N
     assert "这个需求一套更专业的" not in body
 
 
+def test_webai2api_anthropic_stream_repairs_malformed_tool_marker_after_setup_retry() -> None:
+    seen_payloads: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode("utf-8"))
+        seen_payloads.append(payload)
+        if len(seen_payloads) == 1:
+            return httpx.Response(200, json=_openai_response("这个需求一套更专业的。"), request=request)
+        if len(seen_payloads) == 2:
+            return httpx.Response(200, json=_openai_response("<||tool_calls>"), request=request)
+        return httpx.Response(
+            200,
+            json=_openai_response(
+                '<|DSML|tool_calls><|DSML|invoke name="Read">'
+                '<|DSML|parameter name="file_path"><![CDATA[C:/Users/test/.claude/settings.json]]></|DSML|parameter>'
+                "</|DSML|invoke></|DSML|tool_calls>"
+            ),
+            request=request,
+        )
+
+    client = TestClient(
+        create_app(
+            config=GatewayConfig(
+                server=ServerConfig(api_key="local-dev-key"),
+                upstream=UpstreamConfig(base_url="http://127.0.0.1:8500/v1", model="gpt-instant"),
+                tool_bridge=ToolBridgeConfig(activation_policy="auto", exposure_policy="local-agent", tool_profile="auto"),
+            ),
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+    )
+
+    with client.stream(
+        "POST",
+        "/v1/messages",
+        headers={**_headers(), "anthropic-version": "2023-06-01"},
+        json={
+            "model": "chatgpt_text/gpt-instant",
+            "max_tokens": 32000,
+            "stream": True,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "你帮我设置 claude code，以后输入 claude 后自动以 bypass permissions 方式启动",
+                }
+            ],
+            "tools": [
+                {"name": "Read", "description": "Read files", "input_schema": {"type": "object"}},
+                {"name": "Edit", "description": "Edit files", "input_schema": {"type": "object"}},
+            ],
+        },
+    ) as response:
+        body = response.read().decode("utf-8")
+
+    assert response.status_code == 200
+    assert len(seen_payloads) == 3
+    assert seen_payloads[1]["stream"] is False
+    assert seen_payloads[2]["stream"] is False
+    retry_prompt = "\n".join(str(message.get("content", "")) for message in seen_payloads[2]["messages"])
+    assert "<||tool_calls>" in retry_prompt
+    assert "工具调用 JSON 无效" in retry_prompt
+    assert '"type":"tool_use"' in body
+    assert '"name":"Read"' in body
+    assert "<||tool_calls>" not in body
+
+
 def test_tool_bridge_forced_single_tool_infers_missing_dsml_invoke_name() -> None:
     context = build_context(
         [
