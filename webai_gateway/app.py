@@ -3734,6 +3734,29 @@ def _apply_controller_decision(
             ),
             next_state,
         )
+    if decision.state == "FINAL" and decision.reason == "retry_budget_exhausted" and decision.retry_kind:
+        error_kind = decision.retry_kind
+        error = BridgeError(error_kind, _controller_retry_error_message(error_kind), repairable=False)
+        metadata = _bridge_result_controller_metadata(
+            bridge_result,
+            bridge_context=bridge_context,
+            controller_state=decision.state,
+            controller_reason=decision.reason,
+            retry_state=next_state,
+        )
+        content = _controller_retry_exhausted_text(error, bridge_context=bridge_context)
+        return (
+            _openai_response_from_stream_buffer(content, finish_reason="stop", model=model),
+            BridgeResult(
+                content=content,
+                tool_calls=[],
+                error=error,
+                warning=getattr(bridge_result, "warning", None),
+                raw_content=str(getattr(bridge_result, "raw_content", "") or getattr(bridge_result, "content", "") or ""),
+                **metadata,
+            ),
+            next_state,
+        )
     metadata = _bridge_result_controller_metadata(
         bridge_result,
         bridge_context=bridge_context,
@@ -3829,6 +3852,21 @@ def _copy_bridge_result_with_metadata(bridge_result: Any, **metadata: Any) -> An
         phases=bridge_result.phases,
         **metadata,
     )
+
+
+def _controller_retry_exhausted_text(error: BridgeError, *, bridge_context: Any) -> str:
+    allowed = sorted(str(tool.name) for tool in getattr(bridge_context, "tools", []) if str(getattr(tool, "name", "") or ""))
+    parts = [
+        "上游网页模型连续返回低信息或不完整的最终回复，Gateway 已拒绝把它当成成功结果。",
+        f"错误码：{error.kind}",
+    ]
+    if error.message:
+        parts.append(f"原因：{_preview_text(error.message, max_chars=260)}")
+    if allowed:
+        suffix = " ..." if len(allowed) > 16 else ""
+        parts.append(f"当前允许工具：{', '.join(allowed[:16])}{suffix}")
+    parts.append("请重试；如果仍然出现，建议切换更强的网页登录模型或把这段诊断发给 Gateway 适配层排查。")
+    return "\n".join(parts)
 
 
 def _should_retry_tool_refusal_recovery(bridge_result: Any) -> bool:

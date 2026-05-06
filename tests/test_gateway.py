@@ -1999,6 +1999,61 @@ def test_webai2api_anthropic_stream_retries_second_low_information_setup_final_t
     assert "That instruction use the appropriate one correctly." not in body
 
 
+def test_webai2api_anthropic_stream_rejects_repeated_low_information_setup_final_after_budget() -> None:
+    seen_payloads: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode("utf-8"))
+        seen_payloads.append(payload)
+        if len(seen_payloads) == 1:
+            return httpx.Response(200, json=_openai_response("这个需求一套更专业的。"), request=request)
+        if len(seen_payloads) == 2:
+            return httpx.Response(
+                200,
+                json=_openai_response("That instruction use the appropriate one correctly."),
+                request=request,
+            )
+        return httpx.Response(200, json=_openai_response("That error is"), request=request)
+
+    client = TestClient(
+        create_app(
+            config=GatewayConfig(
+                server=ServerConfig(api_key="local-dev-key"),
+                upstream=UpstreamConfig(base_url="http://127.0.0.1:8500/v1", model="gpt-instant"),
+                tool_bridge=ToolBridgeConfig(activation_policy="auto", exposure_policy="local-agent", tool_profile="auto"),
+            ),
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+    )
+
+    response = client.post(
+        "/v1/messages",
+        headers={**_headers(), "anthropic-version": "2023-06-01"},
+        json={
+            "model": "chatgpt_text/gpt-instant",
+            "max_tokens": 32000,
+            "stream": False,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "你帮我设置 claude code，以后输入 claude 后自动以 bypass permissions 方式启动",
+                }
+            ],
+            "tools": [
+                {"name": "Read", "description": "Read files", "input_schema": {"type": "object"}},
+                {"name": "Edit", "description": "Edit files", "input_schema": {"type": "object"}},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(seen_payloads) == 3
+    assert response.headers["x-webai-tool-bridge-error"] == "insufficient_final_evidence"
+    text = response.json()["content"][0]["text"]
+    assert "错误码：insufficient_final_evidence" in text
+    assert "That error is" not in text
+
+
 def test_tool_bridge_forced_single_tool_infers_missing_dsml_invoke_name() -> None:
     context = build_context(
         [
