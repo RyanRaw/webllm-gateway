@@ -554,6 +554,46 @@ def test_tool_controller_retries_status_only_final_after_tool_result() -> None:
     assert decision.reason == "status_only_final_without_task_answer"
 
 
+def test_tool_controller_retries_short_setup_final_without_tool_evidence() -> None:
+    result = BridgeResult(
+        content="这个需求一套更专业的。",
+        tool_calls=[],
+        raw_content="这个需求一套更专业的。",
+    )
+
+    decision = classify_bridge_result(
+        result,
+        _controller_context_with_tools(
+            ["Read", "Edit"],
+            task_text="你帮我设置 claude code，以后输入 claude 后自动以 bypass permissions 方式启动",
+        ),
+        RetryState(),
+    )
+
+    assert decision.state == "RETRY"
+    assert decision.reason == "insufficient_final_evidence"
+
+
+def test_tool_bridge_local_agent_chinese_setup_task_exposes_structured_tools() -> None:
+    context = build_context(
+        [
+            {
+                "type": "function",
+                "function": {"name": name, "description": f"{name} tool", "parameters": {"type": "object"}},
+            }
+            for name in ["Read", "Glob", "Grep", "Bash", "Edit", "Write", "Skill"]
+        ],
+        ToolBridgeConfig(exposure_policy="local-agent", tool_profile="auto", max_tools_in_prompt=32),
+    )
+
+    context = prefer_local_tools_for_local_agent_task(
+        context,
+        [{"role": "user", "content": "你帮我设置 claude code，以后输入 claude 后自动以 bypass permissions 方式启动"}],
+    )
+
+    assert {tool.name for tool in context.tools} == {"Read", "Glob", "Grep", "Bash", "Edit", "Write", "Skill"}
+
+
 def test_tool_controller_retries_no_task_final_after_tool_result() -> None:
     result = BridgeResult(
         content="Caveman mode active. No task given. Wait for input.",
@@ -1731,6 +1771,70 @@ def test_webai2api_upstream_anthropic_required_tool_choice_retries_plain_text() 
     assert tool_use["id"].startswith("toolu_")
     assert tool_use["name"] == "get_weather"
     assert tool_use["input"] == {"city": "Beijing"}
+
+
+def test_webai2api_anthropic_stream_retries_short_setup_final_to_tool_use() -> None:
+    seen_payloads: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode("utf-8"))
+        seen_payloads.append(payload)
+        if len(seen_payloads) == 1:
+            return httpx.Response(200, json=_openai_response("这个需求一套更专业的。"), request=request)
+        return httpx.Response(
+            200,
+            json=_openai_response(
+                '<|DSML|tool_calls><|DSML|invoke name="Read">'
+                '<|DSML|parameter name="file_path"><![CDATA[C:/Users/test/.claude/settings.json]]></|DSML|parameter>'
+                "</|DSML|invoke></|DSML|tool_calls>"
+            ),
+            request=request,
+        )
+
+    client = TestClient(
+        create_app(
+            config=GatewayConfig(
+                server=ServerConfig(api_key="local-dev-key"),
+                upstream=UpstreamConfig(base_url="http://127.0.0.1:8500/v1", model="gpt-instant"),
+                tool_bridge=ToolBridgeConfig(activation_policy="auto", exposure_policy="local-agent", tool_profile="auto"),
+            ),
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+    )
+
+    with client.stream(
+        "POST",
+        "/v1/messages",
+        headers={**_headers(), "anthropic-version": "2023-06-01"},
+        json={
+            "model": "chatgpt_text/gpt-instant",
+            "max_tokens": 32000,
+            "stream": True,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "你帮我设置 claude code，以后输入 claude 后自动以 bypass permissions 方式启动",
+                }
+            ],
+            "tools": [
+                {"name": "Read", "description": "Read files", "input_schema": {"type": "object"}},
+                {"name": "Edit", "description": "Edit files", "input_schema": {"type": "object"}},
+            ],
+        },
+    ) as response:
+        body = response.read().decode("utf-8")
+
+    assert response.status_code == 200
+    assert len(seen_payloads) == 2
+    assert seen_payloads[1]["stream"] is False
+    retry_prompt = "\n".join(str(message.get("content", "")) for message in seen_payloads[1]["messages"])
+    assert "insufficient_final_evidence" in retry_prompt
+    assert "Do not return a vague one-line acknowledgement" in retry_prompt
+    assert "这个需求一套更专业的" in retry_prompt
+    assert "text/event-stream" in response.headers["content-type"]
+    assert '"type":"tool_use"' in body
+    assert '"name":"Read"' in body
+    assert "这个需求一套更专业的" not in body
 
 
 def test_tool_bridge_forced_single_tool_infers_missing_dsml_invoke_name() -> None:

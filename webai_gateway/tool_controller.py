@@ -57,7 +57,8 @@ _MUTATION_TOOL_NAMES = {"edit", "editfile", "multiedit", "write", "writefile", "
 _VERIFICATION_TOOL_NAMES = {"bash", "shell", "terminal", "pytest", "test", "run_tests"}
 _REVIEW_TASK_RE = re.compile(r"\b(?:review|audit|inspect|analy[sz]e)\b|(?:审查|检查|评审|分析)", re.IGNORECASE)
 _MUTATION_TASK_RE = re.compile(
-    r"\b(?:implement|fix|repair|modify|update|change|write|edit|refactor)\b|(?:实现|修复|修改|落地|更新|编辑|写入)",
+    r"\b(?:implement|fix|repair|modify|update|change|write|edit|refactor|configure|setup|set\s+up|install|deploy)\b|"
+    r"(?:实现|修复|修改|落地|更新|编辑|写入|配置|设置|安装|部署)",
     re.IGNORECASE,
 )
 _VERIFICATION_NOT_RUN_RE = re.compile(

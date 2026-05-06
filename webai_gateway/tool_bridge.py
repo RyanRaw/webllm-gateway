@@ -388,6 +388,8 @@ _MUTATING_TASK_MARKERS = (
     "推送",
     "安装",
     "配置",
+    "设置",
+    "部署",
     "依赖",
 )
 _TEST_TASK_MARKERS = ("test", "tests", "pytest", "verify", "verification", "测试", "验证", "跑测试")
@@ -5185,16 +5187,21 @@ def _looks_like_local_agent_task(text: str) -> bool:
         "查看",
         "打开",
         "修改",
+        "设置",
+        "配置",
         "修复",
         "改进",
         "编辑",
         "写入",
         "创建",
+        "部署",
+        "启动",
         "运行",
         "执行",
         "测试",
         "命令",
         "终端",
+        "权限",
         "本地",
         "授权",
         "登录",
@@ -5829,6 +5836,25 @@ def build_repair_messages(messages: list[dict[str, Any]], bad_text: str, error: 
             "local-agent task. If more evidence is needed, output exactly one valid DSML tool block using an "
             "allowed tool such as Read, Glob, Grep, LSP, WebFetch, Edit, or Write. If the gathered evidence is enough, "
             "return a substantive final answer grounded in that evidence with no DSML tool block. No manual setup steps."
+        )
+        return [
+            *messages,
+            {"role": "assistant", "content": (bad_text or "")[:4000]},
+            {"role": "user", "content": repair_instruction},
+        ]
+    if error_kind == "insufficient_final_evidence":
+        repair_instruction = (
+            "Previous final answer did not contain enough tool-grounded evidence for this local-agent task.\n"
+            f"Error code: {error_kind}.\n"
+            f"Error: {reason}.\n"
+            "The listed tools are available through the downstream client, not your own runtime. "
+            "Do not say tools do not exist. Do not say you cannot access files or commands. "
+            "Do not return a vague one-line acknowledgement, status sentence, or promise to handle the task. "
+            "If the task needs setup, configuration, installation, deployment, code changes, or local inspection, "
+            "request exactly one materially necessary allowed tool using a valid DSML block. Prefer a discovery/read "
+            "tool when the target file or project state is unknown; use Edit/Write only when the needed change is "
+            "already identified from prior evidence. If no allowed tool can help, provide a substantive final answer "
+            "grounded only in the known context with no DSML tool block."
         )
         return [
             *messages,
