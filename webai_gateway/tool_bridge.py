@@ -1099,6 +1099,12 @@ def prefer_local_tools_for_local_agent_task(
             hidden_tools=_dedupe_tool_specs(hidden_tools),
             tool_choice_policy=context.tool_choice_policy,
         )
+    tool_choice_policy = _local_agent_required_tool_policy(
+        context,
+        latest,
+        local_tools,
+        has_tool_loop=has_tool_loop,
+    )
     return ToolBridgeContext(
         enabled=bool(local_tools) and context.mode != "off",
         mode=context.mode,
@@ -1127,8 +1133,84 @@ def prefer_local_tools_for_local_agent_task(
         recent_unchanged_read_summaries=recent_unchanged_read_summaries,
         has_repo_discovery_for_write=has_repo_discovery_for_write,
         hidden_tools=_dedupe_tool_specs(hidden_tools),
-        tool_choice_policy=context.tool_choice_policy,
+        tool_choice_policy=tool_choice_policy,
     )
+
+
+def _local_agent_required_tool_policy(
+    context: ToolBridgeContext,
+    task_text: str,
+    local_tools: list[ToolSpec],
+    *,
+    has_tool_loop: bool,
+) -> ToolChoicePolicy:
+    policy = context.tool_choice_policy
+    if policy.is_none() or policy.is_required():
+        return policy
+    if str(policy.mode or "").strip().lower() == "forced":
+        return policy
+    if has_tool_loop or not local_tools:
+        return policy
+    exposure_policy = (context.options.exposure_policy or "safe").strip().lower()
+    if exposure_policy not in {"local-agent", "local_agent", "code-agent", "code_agent"}:
+        return policy
+    if not _looks_like_local_agent_task(task_text):
+        return policy
+    if not (_task_explicitly_allows_mutation(task_text) or _local_agent_task_explicitly_requests_shell(task_text)):
+        return policy
+    forced_name = _initial_local_agent_forced_tool(context, task_text, local_tools)
+    if forced_name:
+        return ToolChoicePolicy(
+            mode="forced",
+            forced_name=forced_name,
+            allowed_names=frozenset({forced_name}),
+        )
+    return ToolChoicePolicy(
+        mode="required",
+        allowed_names=frozenset(tool.name for tool in local_tools if tool.name),
+    )
+
+
+def _initial_local_agent_forced_tool(
+    context: ToolBridgeContext,
+    task_text: str,
+    local_tools: list[ToolSpec],
+) -> str:
+    if _local_agent_task_explicitly_requests_shell(task_text):
+        shell_tool = _select_shell_execution_tool(local_tools)
+        if shell_tool:
+            return shell_tool.name
+
+    lowered = (task_text or "").lower()
+    config_or_path_task = bool(
+        re.search(r"\b[\w.-]+\.(?:py|js|ts|tsx|json|md|toml|yaml|yml|txt)\b", lowered)
+        or any(marker in lowered for marker in ("config", "setting", "settings", "配置", "设置", "claude"))
+    )
+    preferred_names = (
+        ("read", "readfile", "fileread") if config_or_path_task else ()
+    ) + (
+        "glob",
+        "grep",
+        "ls",
+        "lsp",
+        "read",
+        "readfile",
+        "fileread",
+        "webfetch",
+        "websearch",
+    )
+    seen: set[str] = set()
+    for compact in preferred_names:
+        if compact in seen:
+            continue
+        seen.add(compact)
+        for tool in local_tools:
+            if _compact_tool_name(tool.name) == compact and _is_profile_readonly_tool(tool, context.options):
+                return tool.name
+    for tool in local_tools:
+        if _is_profile_readonly_tool(tool, context.options):
+            return tool.name
+    return ""
 
 
 def build_local_repo_preflight_tool_call(context: ToolBridgeContext) -> ToolCallDraft | None:
@@ -1495,8 +1577,8 @@ def build_tool_prompt(tools: list[ToolSpec] | list[dict[str, Any]], options: Too
         f"{tool_manifest}\n\n"
         "Decision rules:\n"
         "- If the task can be answered from the conversation or prior Tool result messages, answer normally.\n"
-        "- If a tool is needed, output exactly one DSML tool block and no natural language outside it.\n"
-        "- Never use provider-native browsing tags such as <search>. Use only the DSML tool_calls wrapper below.\n"
+        "- If a tool is needed, output exactly one fenced tool_json block and no natural language outside it.\n"
+        "- Never use provider-native browsing tags such as <search>. Use only the tool_json calls wrapper below.\n"
         "- Never output summaries like 'Assistant requested tool calls'. Those are history text, not the required protocol.\n"
         "- Never say an available tool does not exist or that you lack permission for files, commands, Bash/Git, or project updates. Do not call AskUserQuestion to request permission; Request the listed tool directly and let the downstream client enforce permissions.\n"
         "- Do not call AskUserQuestion for optional next-step or scope selection; continue if the task is clear.\n"
@@ -1508,13 +1590,11 @@ def build_tool_prompt(tools: list[ToolSpec] | list[dict[str, Any]], options: Too
         "- For Glob/file-discovery tools, avoid repository-wide recursive patterns such as **/*, **/*.ext, or **/package.json unless the input also scopes the search to a narrow path. Prefer Read for known files, LS/list tools for directory overviews, or scoped patterns like src/**/*.py.\n"
         "- For public GitHub repository or source-code URLs, prefer machine-readable endpoints such as https://api.github.com/repos/<owner>/<repo>, the GitHub contents API, or raw.githubusercontent.com files instead of interactive HTML pages.\n\n"
         "Required tool-call format:\n"
-        "<|DSML|tool_calls>\n"
-        "  <|DSML|invoke name=\"tool_name\">\n"
-        "    <|DSML|parameter name=\"arg\"><![CDATA[value]]></|DSML|parameter>\n"
-        "  </|DSML|invoke>\n"
-        "</|DSML|tool_calls>\n"
-        "DSML rules: use one <|DSML|tool_calls> root; put each call in <|DSML|invoke name=\"...\">; put every top-level argument in <|DSML|parameter name=\"...\">; wrap all string values in <![CDATA[...]]>; objects use nested XML elements; arrays repeat <item>; do not wrap DSML in markdown fences. The first non-whitespace characters of a tool request must be <|DSML|tool_calls>. Compatibility: canonical <tool_calls>/<invoke>/<parameter> is accepted, but prefer DSML.\n"
-        "Never omit the opening <|DSML|tool_calls> tag. Wrong 1 - mixed text after DSML. Wrong 2 - markdown code fences. Wrong 3 - missing opening wrapper.\n"
+        "```tool_json\n"
+        "{\"calls\":[{\"id\":\"call_1\",\"name\":\"tool_name\",\"input\":{\"arg\":\"value\"}}]}\n"
+        "```\n"
+        "tool_json rules: use exactly one fenced tool_json block; use a top-level calls array; every call must have id, name, and object-shaped input; use only listed tool names and schema fields; do not output prose outside the fence.\n"
+        "Never output partial protocol markers such as <|tool_calls>, XML/DSML wrappers, or markdown fences with another language.\n"
         f"{_build_ds2api_style_tool_examples(specs)}"
         f"Default maximum tool calls per turn: {cfg.max_calls_per_turn}; read-only tools may use up to {cfg.max_readonly_calls_per_turn}. "
         "All arguments must be inside the input object."
@@ -1591,40 +1671,33 @@ def _compose_ds2api_tool_prompt(
 def _build_ds2api_tool_call_instructions(tool_names: list[str]) -> str:
     return (
         "TOOL CALL FORMAT - FOLLOW EXACTLY:\n\n"
-        "<|DSML|tool_calls>\n"
-        "  <|DSML|invoke name=\"TOOL_NAME_HERE\">\n"
-        "    <|DSML|parameter name=\"PARAMETER_NAME\"><![CDATA[PARAMETER_VALUE]]></|DSML|parameter>\n"
-        "  </|DSML|invoke>\n"
-        "</|DSML|tool_calls>\n\n"
+        "```tool_json\n"
+        "{\"calls\":[{\"id\":\"call_1\",\"name\":\"TOOL_NAME_HERE\",\"input\":{\"PARAMETER_NAME\":\"PARAMETER_VALUE\"}}]}\n"
+        "```\n\n"
         "RULES:\n"
-        "1) Use the <|DSML|tool_calls> wrapper format.\n"
-        "2) Put one or more <|DSML|invoke> entries under a single <|DSML|tool_calls> root.\n"
-        "3) Put the tool name in the invoke name attribute: <|DSML|invoke name=\"TOOL_NAME\">.\n"
-        "4) All string values must use <![CDATA[...]]>, even short ones. This includes code, scripts, file contents, prompts, paths, names, and queries.\n"
-        "5) Every top-level argument must be a <|DSML|parameter name=\"ARG_NAME\">...</|DSML|parameter> node.\n"
-        "6) Objects use nested XML elements inside the parameter body. Arrays may repeat <item> children.\n"
-        "7) Numbers, booleans, and null stay plain text.\n"
-        "8) Use only the parameter names in the tool schema. Do not invent fields.\n"
-        "9) Do NOT wrap XML in markdown fences. Do NOT output explanations, role markers, or internal monologue.\n"
-        "10) If you call a tool, the first non-whitespace characters of that tool block must be exactly <|DSML|tool_calls>.\n"
-        "11) Never omit the opening <|DSML|tool_calls> tag, even if you already plan to close with </|DSML|tool_calls>.\n"
-        "12) Compatibility note: the runtime also accepts the legacy XML tags <tool_calls> / <invoke> / <parameter>, but prefer the DSML-prefixed form above.\n\n"
+        "1) Use exactly one fenced ```tool_json block.\n"
+        "2) The JSON root object must contain a calls array.\n"
+        "3) Each call must include id, name, and input.\n"
+        "4) input must be an object, even when it is empty.\n"
+        "5) Use only the parameter names in the tool schema. Do not invent fields.\n"
+        "6) Do not output explanations, role markers, internal monologue, XML, or DSML.\n"
+        "7) If you call a tool, the first non-whitespace characters must be ```tool_json.\n"
+        "8) Never output partial protocol markers such as <|tool_calls>.\n\n"
         "PARAMETER SHAPES:\n"
-        "- string => <|DSML|parameter name=\"x\"><![CDATA[value]]></|DSML|parameter>\n"
-        "- object => <|DSML|parameter name=\"x\"><field>...</field></|DSML|parameter>\n"
-        "- array => <|DSML|parameter name=\"x\"><item>...</item><item>...</item></|DSML|parameter>\n"
-        "- number/bool/null => <|DSML|parameter name=\"x\">plain_text</|DSML|parameter>\n\n"
+        "- string => \"value\"\n"
+        "- object => {\"field\":\"value\"}\n"
+        "- array => [\"value\"]\n"
+        "- number/bool/null => JSON number, boolean, or null\n\n"
         "[WRONG - Do NOT do these]\n\n"
-        "Wrong 1 - mixed text after XML:\n"
-        "  <|DSML|tool_calls>...</|DSML|tool_calls> I hope this helps.\n"
-        "Wrong 2 - Markdown code fences:\n"
-        "  ```xml\n"
-        "  <|DSML|tool_calls>...</|DSML|tool_calls>\n"
-        "  ```\n"
-        "Wrong 3 - missing opening wrapper:\n"
-        "  <|DSML|invoke name=\"TOOL_NAME\">...</|DSML|invoke>\n"
-        "  </|DSML|tool_calls>\n\n"
-        "Remember: The ONLY valid way to use tools is the <|DSML|tool_calls>...</|DSML|tool_calls> block at the end of your response.\n\n"
+        "Wrong 1 - mixed text after JSON:\n"
+        "  ```tool_json\n"
+        "  {\"calls\":[...]}\n"
+        "  ``` I hope this helps.\n"
+        "Wrong 2 - XML/DSML wrappers:\n"
+        "  <|tool_calls> or <|DSML|tool_calls>\n"
+        "Wrong 3 - missing input object:\n"
+        "  {\"calls\":[{\"name\":\"TOOL_NAME\"}]}\n\n"
+        "Remember: The ONLY valid way to use tools is the fenced ```tool_json block at the end of your response.\n\n"
         + _build_ds2api_style_tool_examples_from_names(tool_names)
     )
 
@@ -1663,7 +1736,7 @@ def _bash_shell_dialect_guard_rule() -> str:
 
 
 def _build_ds2api_style_tool_examples(specs: list[ToolSpec]) -> str:
-    return _build_ds2api_style_tool_examples_from_specs(specs, header="Correct DSML examples")
+    return _build_ds2api_style_tool_examples_from_specs(specs, header="Correct tool_json examples")
 
 
 def _build_ds2api_style_tool_examples_from_names(tool_names: list[str]) -> str:
@@ -1683,10 +1756,10 @@ def _build_ds2api_style_tool_examples_from_specs(specs: list[ToolSpec], *, heade
         examples.append("Example B - Two tools in parallel:\n" + _render_ds2api_style_tool_block(basic_examples[:2]))
     nested = next((item for item in (_ds2api_style_nested_example_for_tool(spec) for spec in specs) if item), None)
     if nested:
-        examples.append("Example C - Tool with nested XML parameters:\n" + _render_ds2api_style_tool_block([nested]))
+        examples.append("Example C - Tool with nested parameters:\n" + _render_ds2api_style_tool_block([nested]))
     script = next((item for item in (_ds2api_style_script_example_for_tool(spec) for spec in specs) if item), "")
     if script:
-        examples.append("Example D - Tool with long script using CDATA (RELIABLE FOR CODE/SCRIPTS):\n" + script)
+        examples.append("Example D - Tool with long script (RELIABLE FOR CODE/SCRIPTS):\n" + script)
     if not examples:
         return ""
     return f"{header}\n\n" + "\n\n".join(examples) + "\n\n"
@@ -1808,15 +1881,16 @@ def _ds2api_style_script_example_for_tool(spec: ToolSpec) -> str:
 
 
 def _render_ds2api_style_tool_block(examples: list[tuple[str, list[tuple[str, str]]]]) -> str:
-    lines = ["<|DSML|tool_calls>"]
-    for name, params in examples:
-        lines.append(f'  <|DSML|invoke name="{html.escape(name, quote=True)}">')
-        for key, value in params:
-            rendered = value if _looks_like_ds2api_nested_example_value(value) else _dsml_cdata(value)
-            lines.append(f'    <|DSML|parameter name="{html.escape(key, quote=True)}">{rendered}</|DSML|parameter>')
-        lines.append("  </|DSML|invoke>")
-    lines.append("</|DSML|tool_calls>")
-    return "\n".join(lines)
+    calls = []
+    for index, (name, params) in enumerate(examples, start=1):
+        calls.append(
+            {
+                "id": f"call_{index}",
+                "name": name,
+                "input": {key: value for key, value in params},
+            }
+        )
+    return "```tool_json\n" + json.dumps({"calls": calls}, ensure_ascii=False, indent=2) + "\n```"
 
 
 def _looks_like_ds2api_nested_example_value(value: str) -> bool:
@@ -2569,13 +2643,13 @@ def parse_tool_response(text: str, context: ToolBridgeContext) -> BridgeResult:
     )
     malformed_seen = False
     for match in _FENCED_TOOL_RE.finditer(raw):
-        item = _loads(match.group(1))
+        item = _loads_tool_json_candidate(match.group(1), context)
         if item is None:
             malformed_seen = True
         else:
             candidates.append(item)
     for match in _XML_TOOL_RE.finditer(raw):
-        item = _loads(match.group(1))
+        item = _loads_tool_json_candidate(match.group(1), context)
         if item is None:
             malformed_seen = True
         else:
@@ -2597,7 +2671,7 @@ def parse_tool_response(text: str, context: ToolBridgeContext) -> BridgeResult:
     stripped = raw.strip()
     used_bare = False
     if not candidates and (stripped.startswith("{") or stripped.startswith("[")):
-        item = _loads(stripped)
+        item = _loads_tool_json_candidate(stripped, context)
         if item is None:
             malformed_seen = True
         elif not _looks_like_tool_json_candidate(item):
@@ -2678,7 +2752,7 @@ def parse_tool_response(text: str, context: ToolBridgeContext) -> BridgeResult:
                     "echoed_tool_history_without_tool_json",
                     (
                         "The model echoed previous tool-call history instead of emitting a current "
-                        "DSML tool request. Retry with exactly one current DSML <|DSML|tool_calls> block, "
+                        "tool_json request. Retry with exactly one current fenced tool_json block, "
                         "or answer only from actual prior tool results."
                     ),
                     repairable=True,
@@ -2695,8 +2769,8 @@ def parse_tool_response(text: str, context: ToolBridgeContext) -> BridgeResult:
                     "tool_call_markdown_without_tool_json",
                     (
                         "The model wrote an allowed tool call inside a normal markdown/code fence "
-                        f"without using the required DSML tool protocol ({markdown_artifact}). "
-                        "Request the tool with exact DSML, or answer from actual prior tool results without claiming execution."
+                        f"without using the required tool_json protocol ({markdown_artifact}). "
+                        "Request the tool with exact fenced tool_json, or answer from actual prior tool results without claiming execution."
                     ),
                     repairable=True,
                 ),
@@ -2717,7 +2791,7 @@ def parse_tool_response(text: str, context: ToolBridgeContext) -> BridgeResult:
                 tool_calls=[],
                 error=BridgeError(
                     "deferred_named_tool_action_without_call",
-                    "The model said it would use an allowed downstream tool but did not emit the required DSML tool call.",
+                    "The model said it would use an allowed downstream tool but did not emit the required fenced tool_json call.",
                     repairable=True,
                 ),
                 warning=warning,
@@ -2748,7 +2822,7 @@ def parse_tool_response(text: str, context: ToolBridgeContext) -> BridgeResult:
                     (
                         "The model produced a very long plain-text response in a strict tool-bridge turn "
                         "without requesting any allowed tool. It must either request one allowed tool with "
-                        "DSML or give a concise final answer from actual prior tool results."
+                        "fenced tool_json or give a concise final answer from actual prior tool results."
                     ),
                     repairable=True,
                 ),
@@ -2775,7 +2849,7 @@ def parse_tool_response(text: str, context: ToolBridgeContext) -> BridgeResult:
                     "shell_command_without_tool_json",
                     (
                         "The model described running a shell command instead of using an allowed downstream tool. "
-                        "Request an available tool with DSML, or ask the user to confirm shell execution "
+                        "Request an available tool with fenced tool_json, or ask the user to confirm shell execution "
                         "if shell is required."
                     ),
                 repairable=True,
@@ -2792,7 +2866,7 @@ def parse_tool_response(text: str, context: ToolBridgeContext) -> BridgeResult:
                     "shell_command_without_tool_json",
                     (
                         "The model wrote shell commands in a fenced code block instead of using an allowed "
-                        "downstream tool. Request an available tool with DSML, or ask the user "
+                        "downstream tool. Request an available tool with fenced tool_json, or ask the user "
                         "to confirm shell execution if shell is required."
                     ),
                 repairable=True,
@@ -2837,7 +2911,7 @@ def parse_tool_response(text: str, context: ToolBridgeContext) -> BridgeResult:
                     (
                         "The model returned plain text in an active local-agent tool loop, but the text still "
                         "describes a next action or incomplete step. Request an allowed downstream tool with "
-                        "DSML, or provide a complete final answer based only on actual prior tool results."
+                        "fenced tool_json, or provide a complete final answer based only on actual prior tool results."
                     ),
                     repairable=True,
                 ),
@@ -5776,7 +5850,7 @@ def build_repair_messages(messages: list[dict[str, Any]], bad_text: str, error: 
             "agent settings, restructuring, migration, deletion, or broad project changes that the user did not request. "
             "For focus, scope, priority, or area choices, choose the broad/default option implied by the task and move forward. "
             "Continue the original task using available evidence or a materially necessary allowed tool. If the user asked "
-            "for review, audit, analysis, or an improvement plan, provide that substantive answer with no DSML tool block."
+            "for review, audit, analysis, or an improvement plan, provide that substantive answer with no tool_json block."
         )
         return [
             *messages,
@@ -5820,8 +5894,8 @@ def build_repair_messages(messages: list[dict[str, Any]], bad_text: str, error: 
             f"Error: {reason}.\n"
             "Do not request the same Skill again. The skill result is already available in the conversation. "
             "Continue the original user task with a different allowed tool such as Read, Glob, Grep, Edit, or Write. "
-            "If the gathered evidence is already enough, provide a substantive final answer with no DSML tool block. "
-            "If more evidence is needed, output exactly one valid DSML tool block using a non-Skill tool."
+            "If the gathered evidence is already enough, provide a substantive final answer with no tool_json block. "
+            "If more evidence is needed, output exactly one valid fenced tool_json block using a non-Skill tool."
         )
         return [
             *messages,
@@ -5835,9 +5909,9 @@ def build_repair_messages(messages: list[dict[str, Any]], bad_text: str, error: 
             f"Error: {reason}.\n"
             "Do not ask the user to configure Claude, Codex, statusLine, settings.json, plugins, hooks, or badges "
             "unless the latest user task explicitly requested that exact configuration work. Continue the original "
-            "local-agent task. If more evidence is needed, output exactly one valid DSML tool block using an "
+            "local-agent task. If more evidence is needed, output exactly one valid fenced tool_json block using an "
             "allowed tool such as Read, Glob, Grep, LSP, WebFetch, Edit, or Write. If the gathered evidence is enough, "
-            "return a substantive final answer grounded in that evidence with no DSML tool block. No manual setup steps."
+            "return a substantive final answer grounded in that evidence with no tool_json block. No manual setup steps."
         )
         return [
             *messages,
@@ -5853,10 +5927,10 @@ def build_repair_messages(messages: list[dict[str, Any]], bad_text: str, error: 
             "Do not say tools do not exist. Do not say you cannot access files or commands. "
             "Do not return a vague one-line acknowledgement, status sentence, or promise to handle the task. "
             "If the task needs setup, configuration, installation, deployment, code changes, or local inspection, "
-            "request exactly one materially necessary allowed tool using a valid DSML block. Prefer a discovery/read "
+            "request exactly one materially necessary allowed tool using a valid fenced tool_json block. Prefer a discovery/read "
             "tool when the target file or project state is unknown; use Edit/Write only when the needed change is "
             "already identified from prior evidence. If no allowed tool can help, provide a substantive final answer "
-            "grounded only in the known context with no DSML tool block."
+            "grounded only in the known context with no tool_json block."
         )
         return [
             *messages,
@@ -5871,7 +5945,7 @@ def build_repair_messages(messages: list[dict[str, Any]], bad_text: str, error: 
             "Do not request the same Glob/Grep/LS/LSP input again unless a file-changing tool has run since then. "
             "Use the earlier result already in the conversation. If more evidence is required, request exactly one "
             "materially different allowed tool/input. If the evidence is enough, provide a substantive final answer "
-            "with no DSML tool block."
+            "with no tool_json block."
         )
         return [
             *messages,
@@ -5887,7 +5961,7 @@ def build_repair_messages(messages: list[dict[str, Any]], bad_text: str, error: 
             "If the latest Read result says unchanged/already in history/no file body, use the earlier Read result "
             "already in the conversation. If a later recovery message temporarily marks Read or Glob unavailable, "
             "obey that availability override even if the original tool manifest listed them. If the evidence is enough, "
-            "request an allowed progress tool such as Edit/MultiEdit/Write or provide a substantive final answer with no DSML tool block. "
+            "request an allowed progress tool such as Edit/MultiEdit/Write or provide a substantive final answer with no tool_json block. "
             "Only request another evidence tool when it is materially different and still allowed for this recovery turn."
         )
         return [
@@ -5905,7 +5979,7 @@ def build_repair_messages(messages: list[dict[str, Any]], bad_text: str, error: 
             "If a recovery message temporarily marks Bash, Read, Grep, Glob, LS, or LSP unavailable, obey that override even "
             "if the original tool manifest listed them. If more evidence is required, request exactly one materially different "
             "still-allowed tool/input. Prefer Edit/MultiEdit/Write for a real change when the evidence is enough. If the evidence "
-            "is enough for a final answer, provide a substantive final answer with no DSML tool block."
+            "is enough for a final answer, provide a substantive final answer with no tool_json block."
         )
         return [
             *messages,
@@ -5917,18 +5991,14 @@ def build_repair_messages(messages: list[dict[str, Any]], bad_text: str, error: 
             "Previous tool JSON selected a real allowed tool but omitted required input fields.\n"
             f"Error code: {error_kind}.\n"
             f"Error: {reason}.\n"
-            "Do not output a partial tool call. Rewrite exactly one valid DSML tool block with a complete input object. "
+            "Do not output a partial tool call. Rewrite exactly one valid fenced tool_json block with a complete input object. "
             "For Edit, the input must include file_path, old_string, and new_string; old_string must exactly match text "
             "from an earlier Read/tool_result. If you do not have the exact old_string, answer without JSON and state "
-            "which exact evidence is missing. No natural language outside DSML when requesting a tool.\n"
+            "which exact evidence is missing. No natural language outside the tool_json block when requesting a tool.\n"
             "Required Edit shape:\n"
-            "<|DSML|tool_calls>\n"
-            "  <|DSML|invoke name=\"Edit\">\n"
-            "    <|DSML|parameter name=\"file_path\"><![CDATA[path/to/file]]></|DSML|parameter>\n"
-            "    <|DSML|parameter name=\"old_string\"><![CDATA[old text]]></|DSML|parameter>\n"
-            "    <|DSML|parameter name=\"new_string\"><![CDATA[new text]]></|DSML|parameter>\n"
-            "  </|DSML|invoke>\n"
-            "</|DSML|tool_calls>"
+            "```tool_json\n"
+            "{\"calls\":[{\"id\":\"call_1\",\"name\":\"Edit\",\"input\":{\"file_path\":\"path/to/file\",\"old_string\":\"old text\",\"new_string\":\"new text\"}}]}\n"
+            "```"
         )
         return [
             *messages,
@@ -5945,11 +6015,10 @@ def build_repair_messages(messages: list[dict[str, Any]], bad_text: str, error: 
         "没有发起工具调用时，不要说“我先研究/让我查看/正在搜索”。 "
         "If the task needs a listed tool, request a tool using the protocol below.\n"
         "Do not use the literal placeholder name tool_name; replace it with one exact tool name from the allowed tools list.\n"
-        "Rewrite only one valid DSML tool block. Do not output explanation text. Required format:\n"
-        "<|DSML|tool_calls>\n"
-        "  <|DSML|invoke name=\"tool_name\">\n"
-        "  </|DSML|invoke>\n"
-        "</|DSML|tool_calls>"
+        "Rewrite only one valid fenced tool_json block. Do not output explanation text. Required format:\n"
+        "```tool_json\n"
+        "{\"calls\":[{\"id\":\"call_1\",\"name\":\"tool_name\",\"input\":{}}]}\n"
+        "```"
     )
     return [
         *messages,
@@ -8700,6 +8769,110 @@ def _loads(raw: str) -> Any | None:
         return json.loads((raw or "").strip())
     except Exception:
         return None
+
+
+def _loads_tool_json_candidate(raw: str, context: ToolBridgeContext | None = None) -> Any | None:
+    parsed = _loads(raw)
+    if parsed is not None:
+        if _looks_like_tool_json_candidate(parsed):
+            return parsed
+        required_fragment = _repair_required_tool_input_fragment(raw, context, parsed=parsed)
+        if required_fragment is not None:
+            return required_fragment
+        return parsed
+    repaired = _repair_missing_tool_calls_array_fragment(raw)
+    if repaired is not None:
+        return repaired
+    return _repair_required_tool_input_fragment(raw, context)
+
+
+def _repair_missing_tool_calls_array_fragment(raw: str) -> Any | None:
+    text = (raw or "").strip()
+    if not text or len(text) > 20000:
+        return None
+    if not re.match(r'^\{\s*"calls"\s*,\s*"name"\s*:', text, re.DOTALL):
+        return None
+    repaired = re.sub(r'^\{\s*"calls"\s*,', '{"calls":[{', text, count=1, flags=re.DOTALL)
+    parsed = _loads(repaired)
+    if parsed is not None and _looks_like_tool_json_candidate(parsed):
+        return parsed
+    return None
+
+
+def _repair_required_tool_input_fragment(
+    raw: str,
+    context: ToolBridgeContext | None,
+    *,
+    parsed: Any | None = None,
+) -> Any | None:
+    tool_name = _required_single_tool_name(context)
+    if not tool_name:
+        return None
+    text = (raw or "").strip()
+    if not text or len(text) > 20000:
+        return None
+    value = parsed
+    if value is None:
+        value = _decode_json_prefix(text)
+    if isinstance(value, dict):
+        repaired = _required_tool_call_from_input_value(value, tool_name)
+        if repaired is not None:
+            return repaired
+    input_value = _extract_json_object_after_key(text, "input")
+    if isinstance(input_value, dict):
+        return {"calls": [{"id": "call_1", "name": tool_name, "input": input_value}]}
+    return None
+
+
+def _required_single_tool_name(context: ToolBridgeContext | None) -> str:
+    if context is None or not context.tool_choice_policy.is_required():
+        return ""
+    if context.tool_choice_policy.forced_name:
+        return context.tool_choice_policy.forced_name
+    if len(context.allowed_names) == 1:
+        return next(iter(context.allowed_names))
+    return ""
+
+
+def _required_tool_call_from_input_value(value: dict[str, Any], tool_name: str) -> dict[str, Any] | None:
+    if any(key in value for key in ("calls", "name", "tool", "tool_name", "function")):
+        return None
+    input_value = value.get("input")
+    if not isinstance(input_value, dict):
+        return None
+    return {"calls": [{"id": "call_1", "name": tool_name, "input": input_value}]}
+
+
+def _decode_json_prefix(text: str) -> Any | None:
+    decoder = json.JSONDecoder()
+    try:
+        value, end = decoder.raw_decode(text)
+    except ValueError:
+        return None
+    trailing = text[end:].strip()
+    if trailing and any(char not in "]} \t\r\n" for char in trailing):
+        return None
+    return value
+
+
+def _extract_json_object_after_key(text: str, key: str) -> dict[str, Any] | None:
+    match = re.search(rf'"{re.escape(key)}"\s*:', text or "")
+    if not match:
+        return None
+    start = (text or "").find("{", match.end())
+    if start < 0:
+        return None
+    decoder = json.JSONDecoder()
+    try:
+        value, end = decoder.raw_decode((text or "")[start:])
+    except ValueError:
+        return None
+    if not isinstance(value, dict):
+        return None
+    trailing = (text or "")[start + end :].strip()
+    if trailing and any(char not in "}]\t\r\n " for char in trailing):
+        return None
+    return value
 
 
 def _as_text(value: Any) -> str:

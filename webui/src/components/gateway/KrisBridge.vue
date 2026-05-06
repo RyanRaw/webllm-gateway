@@ -187,10 +187,27 @@ const stepItems = computed(() => [
   { title: '使用模型', status: filteredModels.value.length ? 'finish' : 'wait' },
 ]);
 
-const progressTitle = computed(() => (actionKind.value === 'smoke' ? 'Provider 自检' : '授权进度'));
+const progressTitle = computed(() => (actionKind.value === 'smoke' ? '工具调用检测' : '网页登录进度'));
+const selectedProviderNotice = computed(() => {
+  const provider = selectedProvider.value;
+  if (!provider) return null;
+  if (provider.id === 'chatgpt') {
+    return {
+      type: 'warning',
+      message: 'ChatGPT 通过网页文本通路接入，不支持原生工具调用。Gateway 会用工具桥把 Claude Code 的工具请求转成网页模型能理解的文本协议；请先用“切换并检测”确认当前 Plus 账号的模型可用。',
+    };
+  }
+  if (provider.supportsNativeTools === false && String(provider.toolBridge || '').toLowerCase() !== 'off') {
+    return {
+      type: 'info',
+      message: '该平台通过网页文本通路接入，不支持原生工具调用；工具请求会由 Gateway 工具桥做标准协议转换。',
+    };
+  }
+  return null;
+});
 const progressStepItems = computed(() => {
   if (actionKind.value === 'smoke') {
-    return [{ title: '发起' }, { title: '协议闭环' }, { title: '完成' }];
+    return [{ title: '发起检测' }, { title: '工具桥闭环' }, { title: '完成' }];
   }
   return [
     { title: '启动' },
@@ -294,6 +311,12 @@ function capabilityLabels(provider) {
   if (caps.text) labels.push({ label: '文本', color: 'blue' });
   if (caps.image) labels.push({ label: '图片', color: 'green' });
   if (caps.video) labels.push({ label: '视频', color: 'orange' });
+  if (String(provider.toolBridge || '').toLowerCase() !== 'off') labels.push({ label: '网页文本通路', color: 'cyan' });
+  if (provider.supportsNativeTools) {
+    labels.push({ label: '原生工具', color: 'green' });
+  } else if (String(provider.toolBridge || '').toLowerCase() !== 'off') {
+    labels.push({ label: '工具桥', color: 'purple' });
+  }
   return labels;
 }
 
@@ -303,11 +326,17 @@ function modelCapabilityLabels(model) {
   const modelId = String(model.id || '');
   const type = String(model.type || '').toLowerCase();
   const imagePolicy = String(model.image_policy || model.imagePolicy || '').toLowerCase();
+  const caps = model.capabilities || {};
 
   if (type === 'text') {
     labels.push({ label: '文本', color: 'blue' });
     if (imagePolicy === 'optional' || imagePolicy === 'required') {
       labels.push({ label: '可附图', color: 'green' });
+    }
+    if (caps.supports_native_tools) {
+      labels.push({ label: '原生工具', color: 'green' });
+    } else if (caps.tool_bridge) {
+      labels.push({ label: '工具桥', color: 'purple' });
     }
     return labels;
   }
@@ -391,11 +420,11 @@ async function handleStartLogin(options = {}) {
   }
   const newAccount = Boolean(options.newAccount);
   Modal.confirm({
-    title: newAccount ? '新增 WebAI2API 授权账号？' : '进入 WebAI2API 登录模式？',
+    title: newAccount ? '新增网页账号？' : '修复当前网页登录？',
     content: newAccount
-      ? '这会为新账号创建独立浏览器 Profile，并让 WebAI2API 以网页登录模式重启。完成登录后请回到这里恢复 API 并刷新模型。'
-      : '这会让当前 Worker 以网页登录模式重启，用于修复或更新该账号登录态。完成后请回到这里恢复 API 并刷新模型。',
-    okText: '进入登录模式',
+      ? '这会为新账号创建独立浏览器 Profile，并打开网页登录窗口。完成登录后回到这里，点击“恢复 API 并刷新”。'
+      : '这会打开当前账号的网页登录窗口，用于修复登录态或更新账号权益。完成后回到这里，点击“恢复 API 并刷新”。',
+    okText: newAccount ? '新增并登录' : '打开登录窗口',
     cancelText: '取消',
     async onOk() {
       await startWebAI2APILogin(provider, { newAccount });
@@ -462,7 +491,7 @@ async function startWebAI2APILogin(provider, options = {}) {
     appendLog(
       workerName
         ? `正在以登录模式重启 Worker：${workerName}`
-        : '正在创建独立浏览器 Profile 并进入 WebAI2API 登录模式',
+        : '正在创建独立浏览器 Profile 并打开网页登录窗口',
     );
     const res = await fetch('/api/admin/webai2api/login/start', {
       method: 'POST',
@@ -480,8 +509,8 @@ async function startWebAI2APILogin(provider, options = {}) {
     if (data.instanceName || data.workerName) {
       appendLog(`登录目标：${data.instanceName || '-'} / ${data.workerName || '-'}`);
     }
-    appendLog(`请完成 ${provider.name} 网页登录，然后点击“恢复 API 并刷新”确认可用模型`);
-    message.success('已进入网页登录模式');
+    appendLog(`请在打开的窗口里完成 ${provider.name} 登录，然后回到这里点击“恢复 API 并刷新”`);
+    message.success('网页登录窗口已准备好');
     window.open('/tools/display', '_blank', 'noopener,noreferrer');
   } catch (error) {
     actionError.value = error.message || String(error);
@@ -570,7 +599,7 @@ async function runProviderSmoke() {
   resetActionState('smoke');
   actionLoading.value = true;
   try {
-    appendLog(`正在自检 ${provider.name}：模型、OpenAI 工具调用、Anthropic 工具闭环`);
+    appendLog(`正在检测 ${provider.name}：模型、OpenAI 工具调用、Anthropic 工具闭环`);
     const res = await fetch(`/api/admin/provider-smoke/${provider.id}`, { method: 'POST' });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
@@ -580,14 +609,14 @@ async function runProviderSmoke() {
       appendLog(`${state} · ${smokeResultLabel(item.id)}${detail ? ` · ${detail}` : ''}`);
     }
     if (!data.ok) {
-      actionError.value = `${provider.name} 自检未全部通过：${data.passed || 0}/${data.total || 0}`;
+      actionError.value = `${provider.name} 工具调用检测未全部通过：${data.passed || 0}/${data.total || 0}`;
       message.error(actionError.value);
       return;
     }
-    message.success(`${provider.name} 自检通过`);
+    message.success(`${provider.name} 工具调用检测通过`);
   } catch (error) {
     actionError.value = error.message || String(error);
-    appendLog(`自检失败：${actionError.value}`);
+    appendLog(`工具调用检测失败：${actionError.value}`);
     message.error(actionError.value);
   } finally {
     actionLoading.value = false;
@@ -627,6 +656,7 @@ async function validateAccount(account) {
         providerId: provider.id,
         accountId: account.id,
         modelIds: providerVisibleModelIds(provider),
+        force: true,
       }),
     });
     const data = await res.json().catch(() => ({}));
@@ -714,11 +744,11 @@ onMounted(loadOnboarding);
       <div class="hero-copy">
         <a-tag color="blue">WebAI Gateway</a-tag>
         <h1>网页登录向导</h1>
-        <p>选择网页模型平台，按提示完成浏览器登录，然后直接复制模型 ID 给 Claude Code / KrisAI 等客户端使用。</p>
+        <p>选择网页模型平台，登录账号，检测当前账号实际可用模型，然后复制模型 ID 给 Claude Code / KrisAI 等客户端使用。</p>
         <div class="hero-actions">
           <a-button type="primary" size="large" :loading="actionLoading" @click="handleStartLogin">
             <template #icon><LoginOutlined /></template>
-            {{ selectedProvider?.loginKind === 'direct' ? '打开授权浏览器' : '进入 WebAI2API 登录模式' }}
+            {{ selectedProvider?.loginKind === 'direct' ? '打开授权浏览器' : '登录或修复账号' }}
           </a-button>
           <a-button size="large" @click="loadOnboarding">
             <template #icon><ReloadOutlined /></template>
@@ -813,6 +843,12 @@ onMounted(loadOnboarding);
                 {{ cap.label }}
               </a-tag>
             </div>
+            <a-alert
+              v-if="selectedProviderNotice"
+              :type="selectedProviderNotice.type"
+              show-icon
+              :message="selectedProviderNotice.message"
+            />
 
             <div class="account-section">
               <div class="section-title">
@@ -827,7 +863,7 @@ onMounted(loadOnboarding);
                   @click="validateAccount(currentAccount)"
                 >
                   <template #icon><ExperimentOutlined /></template>
-                  验证模型
+                  检测当前账号模型
                 </a-button>
               </div>
 
@@ -875,7 +911,7 @@ onMounted(loadOnboarding);
                       @click="validateAccount(account)"
                     >
                       <template #icon><ExperimentOutlined /></template>
-                      验证
+                      {{ account.current ? '检测模型' : '切换并检测' }}
                     </a-button>
                     <a-button size="small" @click="openAccountEditor(account)">
                       <template #icon><EditOutlined /></template>
@@ -919,7 +955,7 @@ onMounted(loadOnboarding);
               <a-alert
                 type="info"
                 show-icon
-                message="WebAI2API 负责这些平台的浏览器缓存。进入登录模式后，在虚拟显示器或弹出的浏览器里登录。"
+                message="WebAI2API 会管理这些平台的浏览器缓存。登录模式只用于授权；完成后请回到这里恢复 API，然后检测模型。"
               />
             </template>
 
@@ -935,7 +971,7 @@ onMounted(loadOnboarding);
                 @click="handleStartLogin({ newAccount: true })"
               >
                 <template #icon><PlusOutlined /></template>
-                新增账号登录
+                新增网页账号
               </a-button>
               <a-button size="large" :disabled="!selectedProviderDefaultModel" @click="copySelectedDefaultModel">
                 <template #icon><CopyOutlined /></template>
@@ -949,7 +985,7 @@ onMounted(loadOnboarding);
                 @click="runProviderSmoke"
               >
                 <template #icon><RocketOutlined /></template>
-                运行自检
+                工具调用检测
               </a-button>
             </div>
 

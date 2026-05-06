@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import html
 import re
 import time
 import uuid
@@ -223,9 +222,11 @@ def _webai2api_current_tool_choice_policy_text(bridge_context: ToolBridgeContext
     allowed = ", ".join(allowed_names) or "(none)"
     lines = [
         f"[{WEBAI2API_CURRENT_TOOL_CHOICE_POLICY_MARKER}]",
-        "This current turn requires a Gateway tool call. Do not answer directly, browse, search, cite web results, or output prose.",
+        "This current turn requires a Gateway tool call encoded as a Gateway JSON instruction for the downstream client, not ChatGPT native tools. "
+        "You are not executing tools inside ChatGPT; you are only writing the JSON request that Gateway will route.",
+        "Do not answer directly, browse, search, cite web results, ask which tool to use, or output prose.",
         f"Allowed tool names for this turn: {allowed}.",
-        "The assistant response must start with <|DSML|tool_calls> and contain exactly one Gateway DSML tool-call block.",
+        "The assistant response must start with ```tool_json and contain exactly one Gateway tool_json block.",
     ]
     if mode == "forced":
         forced_name = str(getattr(policy, "forced_name", "") or "").strip()
@@ -237,7 +238,7 @@ def _webai2api_current_tool_choice_policy_text(bridge_context: ToolBridgeContext
         lines.append("Use at least one allowed tool. If only one tool is listed, use that tool.")
     example = _required_tool_choice_recovery_example(set(allowed_names), bridge_context)
     if example:
-        lines.append("Required DSML shape for this turn:")
+        lines.append("Required tool_json shape for this turn:")
         lines.append(example.strip())
     return "\n".join(lines)
 
@@ -338,7 +339,7 @@ def build_incomplete_response_retry_payload(payload: dict[str, Any], previous_co
     if previous:
         previous = f"\n\n上一轮回复：{previous[:500]}"
     bridge_instruction = (
-        "如果确实需要工具，请只输出一个 DSML <|DSML|tool_calls> block；如果不需要工具，请直接给完整最终答案。"
+        "如果确实需要工具，请只输出一个 fenced ```tool_json block；如果不需要工具，请直接给完整最终答案。"
         if bridge
         else "请直接给完整最终答案。"
     )
@@ -376,7 +377,7 @@ def build_unknown_tool_recovery_payload(
                 f"上一轮工具调用被 Gateway 拒绝：{reason}。\n"
                 f"当前真实允许的工具名只有：{allowed}。\n"
                 f"不要再请求未列出的工具，例如 {examples}。"
-                "如果确实需要工具，只能使用上面列出的真实工具名并输出一个 DSML <|DSML|tool_calls> block。"
+                "如果确实需要工具，只能使用上面列出的真实工具名并输出一个 fenced ```tool_json block。"
                 "如果这些工具不足以完成任务，请不要输出 JSON，直接基于已有上下文给出诚实、完整的最终回答，并说明限制。"
             ),
         }
@@ -451,12 +452,12 @@ def build_tool_refusal_recovery_payload(
                 "If the rejection says write_after_failed_read_without_discovery, do not Write the same missing path or a nearby missing path. "
                 "If it says write_after_failed_path_without_discovery, do not Write under the missing path. "
                 f"Use {_allowed_discovery_tool_phrase(effective_allowed_tools)} to discover the repository structure first.\n"
-                "If the task requires local project work, output exactly one DSML <|DSML|tool_calls> block using one allowed tool. "
+                "If the task requires local project work, output exactly one fenced ```tool_json block using one allowed tool. "
                 f"{progress_tool_hint}"
                 "If no listed tool can help, answer honestly without JSON. Never invent tool names.\n"
                 "Required format when using a tool:\n"
                 f"{example}\n"
-                "No natural language outside the DSML tool block when a tool is needed. No manual steps."
+                "No natural language outside the tool_json block when a tool is needed. No manual steps."
             ),
         }
     )
@@ -508,7 +509,7 @@ def build_missing_required_tool_input_recovery_payload(
                 "Fix the same tool call with a complete input object. Do not switch back to read/search/shell tools unless no same tool is listed above. "
                 "Do not output prose around a tool call.\n"
                 f"{edit_instruction}"
-                "If using a tool, output exactly one DSML <|DSML|tool_calls> block with every required input field. "
+                "If using a tool, output exactly one fenced ```tool_json block with every required input field. "
                 "If no complete valid tool input can be produced from the conversation, answer honestly without JSON.\n"
                 "Required complete format:\n"
                 f"{example}"
@@ -543,14 +544,16 @@ def build_required_tool_choice_recovery_payload(
                 "REQUIRED TOOL CHOICE RECOVERY\n"
                 "The previous reply did not contain a valid Gateway tool call even though this request requires one. "
                 "This is an internal Gateway retry; do not expose this diagnostic downstream.\n"
+                "This is a Gateway JSON instruction contract, not ChatGPT native tools; you are not executing tools inside ChatGPT. "
+                "Never answer that you cannot call tools, cannot access tools, or need the user to provide the city/tool again.\n"
                 "Use the tool schema already listed in the system prompt. Do not output prose, markdown fences, role labels, "
-                "provider-native browsing tags, or JSON outside DSML.\n"
+                "provider-native browsing tags, or JSON outside the fenced tool_json block.\n"
                 "Do not browse, search, cite web results, or answer with factual content on this retry; the only valid "
-                "assistant response is one Gateway DSML tool call for the required tool.\n"
+                "assistant response is one Gateway tool_json call for the required tool.\n"
                 f"Gateway error code: tool_choice_violation.\n"
                 f"Gateway rejection reason: {reason}\n"
                 f"Allowed tools for this required-tool retry: {allowed}.\n"
-                "Output exactly one DSML block. The first non-whitespace characters must be <|DSML|tool_calls>. "
+                "Output exactly one fenced tool_json block. The first non-whitespace characters must be ```tool_json. "
                 "Use only one of the allowed tool names above and include a complete object-shaped input using the schema. "
                 "If a tool was forced by tool_choice, that forced tool is the only allowed tool for this retry.\n"
                 "Required format:\n"
@@ -638,12 +641,42 @@ def _extract_required_tool_choice_named_value(key: str, task_text: str) -> str:
 def _extract_required_tool_choice_place_value(task_text: str) -> str:
     if not task_text:
         return ""
+    for match in re.finditer(
+        r"(?:查询|查|获取|看看|问一下)\s*([\u4e00-\u9fff]{2,12})(?:市|省|区|县)?(?:天气|气温|温度|预报|空气|AQI)",
+        task_text,
+    ):
+        value = _clean_required_tool_choice_place_value(match.group(1))
+        if value:
+            return value
+    for match in re.finditer(
+        r"([\u4e00-\u9fff]{2,20})(?:市|省|区|县)?(?:天气|气温|温度|预报|空气|AQI)",
+        task_text,
+    ):
+        value = _clean_required_tool_choice_place_value(match.group(1))
+        if value:
+            return value
+    for match in re.finditer(
+        r"(?:查询|查|获取|看看|问一下|城市(?:名)?(?:是|为|:|：)?)\s*([\u4e00-\u9fff]{2,20})(?:市|省|区|县)?",
+        task_text,
+    ):
+        value = _clean_required_tool_choice_place_value(match.group(1))
+        if value:
+            return value
     for match in re.finditer(r"\b([A-Z][a-zA-Z]{2,40}(?:\s+[A-Z][a-zA-Z]{2,40}){0,3})\b", task_text):
         value = match.group(1).strip()
         if value.lower() in {"call", "tool", "weather", "city", "do", "not", "answer"}:
             continue
         return value
     return ""
+
+
+def _clean_required_tool_choice_place_value(value: str) -> str:
+    value = str(value or "").strip(" ，。；;:：,.!?！？ \t\r\n")
+    value = re.sub(r"^(?:请|帮我|麻烦|调用|使用|工具|查询|查一下|查|获取|看看|问一下)+", "", value)
+    value = value.strip(" ，。；;:：,.!?！？ \t\r\n")
+    if value in {"查询", "调用", "工具", "天气", "城市", "一下"}:
+        return ""
+    return value[:80]
 
 
 def build_off_task_question_recovery_payload(
@@ -673,9 +706,9 @@ def build_off_task_question_recovery_payload(
                 f"Allowed tools excluding AskUserQuestion: {allowed}.\n"
                 "Continue the original task. If existing evidence is enough, return a substantive final answer with no JSON. "
                 "For review, audit, analysis, or improvement-plan tasks, prefer a direct final answer grounded in the gathered evidence.\n"
-                "If one more tool is materially necessary, output exactly one DSML <|DSML|tool_calls> block using a real allowed tool other than AskUserQuestion. "
+                "If one more tool is materially necessary, output exactly one fenced ```tool_json block using a real allowed tool other than AskUserQuestion. "
                 "Use Read, Grep, Glob, LSP, or WebFetch for evidence; use Edit or Write only when the latest user task explicitly asked you to modify files.\n"
-                "No manual permission request, no broad-scope question, and no natural language outside DSML when requesting a tool."
+                "No manual permission request, no broad-scope question, and no natural language outside tool_json when requesting a tool."
             ),
         }
     )
@@ -857,13 +890,8 @@ def _tool_refusal_recovery_example(allowed_tools: set[str], *, error_kind: str =
 
 
 def _dsml_example(name: str, args: dict[str, Any]) -> str:
-    lines = [f'<|DSML|tool_calls>', f'  <|DSML|invoke name="{html.escape(name, quote=True)}">']
-    for key, value in args.items():
-        lines.append(
-            f'    <|DSML|parameter name="{html.escape(str(key), quote=True)}">{_dsml_example_value(value)}</|DSML|parameter>'
-        )
-    lines.extend(["  </|DSML|invoke>", "</|DSML|tool_calls>"])
-    return "\n".join(lines)
+    payload = {"calls": [{"id": "call_1", "name": name, "input": args}]}
+    return "```tool_json\n" + json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n```"
 
 
 def _dsml_example_value(value: Any) -> str:
@@ -939,7 +967,7 @@ def build_virtual_loader_tool_recovery_payload(
                 "Do not call Skill, SlashCommand, Command, Agent, or any other unlisted tool unless it appears in the real allowed tool list.\n"
                 f"Real allowed tools for this turn: {allowed}.\n"
                 "Continue directly from the loaded instructions and complete the current user task. "
-                "If a real allowed tool is needed, output exactly one DSML <|DSML|tool_calls> block using only an allowed tool name. "
+                "If a real allowed tool is needed, output exactly one fenced ```tool_json block using only an allowed tool name. "
                 "If no allowed tool can help, answer honestly in normal text without JSON."
             ),
         }
@@ -1197,6 +1225,7 @@ def _looks_like_raw_tool_json(text: str) -> bool:
     return bool(
         looks_like_tool_protocol_output(raw)
         or "tool_json" in raw
+        or "tool_calls" in raw and ("<|" in raw or "<tool" in raw)
         or '"calls"' in raw
         or '"name"' in raw and any(key in raw for key in ('"input"', '"args"', '"arguments"'))
     )

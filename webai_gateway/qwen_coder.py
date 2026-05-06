@@ -56,7 +56,7 @@ QWEN_CODER_METADATA_RETRY_INSTRUCTION = (
     "The previous Qwen Coder web response contained only workflow metadata, such as {\"title\": ...}, "
     "or did not contain a final answer. Do not output JSON metadata, phase titles, task status, or "
     "artifact-only workflow events. Output the final assistant answer directly. If tool use is required, "
-    "output only the DSML <|DSML|tool_calls> block specified above."
+    "output only the fenced tool_json block specified above."
 )
 
 

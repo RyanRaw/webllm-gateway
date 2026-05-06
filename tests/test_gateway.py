@@ -208,6 +208,68 @@ def test_tool_bridge_accepts_ds2api_dsml_tool_calls() -> None:
     assert result.tool_calls[0].input == {"file_path": "README.md"}
 
 
+def test_tool_bridge_salvages_complete_tool_json_after_partial_marker() -> None:
+    context = _controller_context_with_tools(["Read"])
+
+    result = parse_tool_response(
+        '<|tool_calls>{"calls":[{"id":"call_1","name":"Read","input":{"file_path":"README.md"}}]}',
+        context,
+    )
+
+    assert result.error is None
+    assert result.content == ""
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].name == "Read"
+    assert result.tool_calls[0].input == {"file_path": "README.md"}
+
+
+def test_tool_bridge_repairs_gpt_thinking_calls_array_colon_fragment() -> None:
+    context = _controller_context_with_tools(["get_weather"])
+
+    result = parse_tool_response(
+        '```tool_json\n{"calls","name":"get_weather","input":{"city":"北京"}}]}\n```',
+        context,
+    )
+
+    assert result.error is None
+    assert result.content == ""
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].name == "get_weather"
+    assert result.tool_calls[0].input == {"city": "北京"}
+
+
+def test_tool_bridge_repairs_gpt_thinking_required_input_only_fragment() -> None:
+    context = build_context(
+        [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "get_weather tool",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
+                    },
+                },
+            }
+        ],
+        ToolBridgeConfig(exposure_policy="all"),
+        tool_choice={"type": "function", "function": {"name": "get_weather"}},
+    )
+
+    result = parse_tool_response(
+        '```tool_json\n{"input":{"city":"北京"}}]}\n```',
+        context,
+    )
+
+    assert result.error is None
+    assert result.content == ""
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].name == "get_weather"
+    assert result.tool_calls[0].input == {"city": "北京"}
+
+
 def test_tool_bridge_generates_ds2api_style_unique_ids_for_idless_xml_calls() -> None:
     context = _controller_context_with_tools(["Read"])
     raw = (
@@ -1303,7 +1365,7 @@ def test_webai2api_chatgpt_text_payload_uses_model_prompt_budget_compaction(mode
     assert "# DS2API_HISTORY.txt" in prompt
     assert "[Layered history compaction]" in prompt
     assert "TOOL CALL FORMAT - FOLLOW EXACTLY" in prompt
-    assert "<|DSML|tool_calls>" in prompt
+    assert "```tool_json" in prompt
     assert "LATEST_GPT_INSTANT_SENTINEL" in prompt
     assert "ANCIENT_BULK_SENTINEL" not in prompt
     choice = response.json()["choices"][0]
@@ -1351,7 +1413,7 @@ def test_injects_tools_and_returns_openai_tool_calls() -> None:
     assert system_messages
     assert "WebAI Gateway response language policy" in system_messages[0]
     assert "默认使用简体中文" in system_messages[0]
-    assert "<|DSML|tool_calls>" in system_messages[0]
+    assert "```tool_json" in system_messages[0]
     assert '"name": "read_file"' in system_messages[0]
     choice = response.json()["choices"][0]
     assert choice["finish_reason"] == "tool_calls"
@@ -1400,7 +1462,7 @@ def test_auto_tool_profile_preserves_explicit_required_tool_choice() -> None:
     assert "tools" not in seen["body"]
     assert "tool_choice" not in seen["body"]
     prompt = "\n".join(str(m["content"]) for m in seen["body"]["messages"] if m["role"] == "system")
-    assert "<|DSML|tool_calls>" in prompt
+    assert "```tool_json" in prompt
     assert '"name": "read_file"' in prompt
     choice = response.json()["choices"][0]
     assert choice["finish_reason"] == "tool_calls"
@@ -1474,13 +1536,13 @@ def test_webai2api_upstream_required_tool_choice_retries_plain_text_without_nati
     )
     assert "For this response, you MUST call at least one tool from the allowed list." in initial_prompt
     assert "WebAI Gateway current turn tool-choice policy" in initial_user
-    assert "This current turn requires a Gateway tool call" in initial_user
+    assert "Gateway JSON instruction" in initial_user
     assert seen_payloads[1]["stream"] is False
     retry_prompt = "\n".join(str(message.get("content", "")) for message in seen_payloads[1]["messages"])
     assert "REQUIRED TOOL CHOICE RECOVERY" in retry_prompt
     assert "Allowed tools for this required-tool retry: get_weather" in retry_prompt
     assert "Do not browse, search, cite web results" in retry_prompt
-    assert "<|DSML|tool_calls>" in retry_prompt
+    assert "```tool_json" in retry_prompt
     assert {event.get("stage") for event in events if event.get("kind") == "tool_bridge_retry"} >= {
         "required_tool_choice_recovery"
     }
@@ -1489,6 +1551,58 @@ def test_webai2api_upstream_required_tool_choice_retries_plain_text_without_nati
     tool_call = choice["message"]["tool_calls"][0]
     assert tool_call["function"]["name"] == "get_weather"
     assert json.loads(tool_call["function"]["arguments"]) == {"city": "Beijing"}
+
+
+def test_webai2api_required_tool_choice_policy_frames_tools_as_gateway_json_instruction() -> None:
+    seen_payloads: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode("utf-8"))
+        seen_payloads.append(payload)
+        return httpx.Response(200, json=_openai_response("请告诉我要查询哪个城市。"), request=request)
+
+    client = TestClient(
+        create_app(
+            config=GatewayConfig(
+                server=ServerConfig(api_key="local-dev-key"),
+                upstream=UpstreamConfig(base_url="http://127.0.0.1:8500/v1", model="gpt-thinking"),
+                tool_bridge=ToolBridgeConfig(activation_policy="auto", exposure_policy="all", tool_profile="all"),
+            ),
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+    )
+
+    response = client.post(
+        "/v1/messages",
+        headers={**_headers(), "anthropic-version": "2023-06-01"},
+        json={
+            "model": "gpt-thinking",
+            "max_tokens": 512,
+            "messages": [{"role": "user", "content": "请调用 get_weather 工具查询北京天气。"}],
+            "tools": [
+                {
+                    "name": "get_weather",
+                    "description": "查询天气",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
+                    },
+                }
+            ],
+            "tool_choice": {"type": "tool", "name": "get_weather"},
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(seen_payloads) >= 2
+    first_prompt = "\n".join(str(message.get("content", "")) for message in seen_payloads[0]["messages"])
+    retry_prompt = "\n".join(str(message.get("content", "")) for message in seen_payloads[1]["messages"])
+    assert "Gateway JSON instruction" in first_prompt
+    assert "not ChatGPT native tools" in first_prompt
+    assert "not executing tools inside ChatGPT" in retry_prompt
+    assert "\"city\":\"北京\"" in first_prompt
+    assert "\"city\":\"北京\"" in retry_prompt
 
 
 def test_webai2api_upstream_required_tool_choice_failure_returns_sanitized_diagnostic() -> None:
@@ -1525,7 +1639,7 @@ def test_webai2api_upstream_required_tool_choice_failure_returns_sanitized_diagn
     diagnostics = client.get("/api/admin/request-diagnostics").json()["events"]
 
     assert response.status_code == 200
-    assert len(seen_payloads) == 2
+    assert len(seen_payloads) == 3
     assert all("tools" not in payload and "tool_choice" not in payload for payload in seen_payloads)
     assert response.headers["x-webai-tool-bridge-error"] == "tool_choice_violation"
     assert "secret-token" not in response.text
@@ -1859,8 +1973,8 @@ def test_webai2api_anthropic_stream_retries_short_setup_final_to_tool_use() -> N
     assert len(seen_payloads) == 2
     assert seen_payloads[1]["stream"] is False
     retry_prompt = "\n".join(str(message.get("content", "")) for message in seen_payloads[1]["messages"])
-    assert "insufficient_final_evidence" in retry_prompt
-    assert "Do not return a vague one-line acknowledgement" in retry_prompt
+    assert "tool_choice_violation" in retry_prompt
+    assert "This current turn requires a Gateway tool call" in retry_prompt
     assert "这个需求一套更专业的" in retry_prompt
     assert "text/event-stream" in response.headers["content-type"]
     assert '"type":"tool_use"' in body
@@ -1933,6 +2047,52 @@ def test_webai2api_anthropic_stream_repairs_malformed_tool_marker_after_setup_re
     assert "<||tool_calls>" not in body
 
 
+def test_webai2api_anthropic_rejects_repeated_malformed_tool_marker_without_leak() -> None:
+    seen_payloads: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode("utf-8"))
+        seen_payloads.append(payload)
+        return httpx.Response(200, json=_openai_response("<|tool_calls>"), request=request)
+
+    client = TestClient(
+        create_app(
+            config=GatewayConfig(
+                server=ServerConfig(api_key="local-dev-key"),
+                upstream=UpstreamConfig(base_url="http://127.0.0.1:8500/v1", model="gpt-instant"),
+                tool_bridge=ToolBridgeConfig(activation_policy="auto", exposure_policy="local-agent", tool_profile="auto"),
+            ),
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+    )
+
+    response = client.post(
+        "/v1/messages",
+        headers={**_headers(), "anthropic-version": "2023-06-01"},
+        json={
+            "model": "chatgpt_text/gpt-instant",
+            "max_tokens": 32000,
+            "stream": False,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "你帮我设置 claude code，以后输入 claude 后自动以 bypass permissions 方式启动",
+                }
+            ],
+            "tools": [
+                {"name": "Read", "description": "Read files", "input_schema": {"type": "object"}},
+                {"name": "Edit", "description": "Edit files", "input_schema": {"type": "object"}},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(seen_payloads) >= 2
+    text = response.json()["content"][0]["text"]
+    assert "错误码：malformed_json" in text
+    assert "<|tool_calls>" not in text
+
+
 def test_webai2api_anthropic_stream_retries_second_low_information_setup_final_to_tool_use() -> None:
     seen_payloads: list[dict[str, Any]] = []
 
@@ -1994,7 +2154,7 @@ def test_webai2api_anthropic_stream_retries_second_low_information_setup_final_t
     assert len(seen_payloads) == 3
     retry_prompt = "\n".join(str(message.get("content", "")) for message in seen_payloads[2]["messages"])
     assert "That instruction use the appropriate one correctly." in retry_prompt
-    assert "insufficient_final_evidence" in retry_prompt
+    assert "tool_choice_violation" in retry_prompt
     assert '"type":"tool_use"' in body
     assert '"name":"Read"' in body
     assert "That instruction use the appropriate one correctly." not in body
@@ -2049,9 +2209,9 @@ def test_webai2api_anthropic_stream_rejects_repeated_low_information_setup_final
 
     assert response.status_code == 200
     assert len(seen_payloads) == 3
-    assert response.headers["x-webai-tool-bridge-error"] == "insufficient_final_evidence"
+    assert response.headers["x-webai-tool-bridge-error"] == "tool_choice_violation"
     text = response.json()["content"][0]["text"]
-    assert "错误码：insufficient_final_evidence" in text
+    assert "错误码：tool_choice_violation" in text
     assert "That error is" not in text
 
 
@@ -2174,11 +2334,11 @@ def test_strict_tool_bridge_accepts_calls_array_and_strips_content() -> None:
     assert "tools" not in seen["body"]
     assert "tool_choice" not in seen["body"]
     prompt = "\n".join(str(m["content"]) for m in seen["body"]["messages"] if m["role"] == "system")
-    assert "<|DSML|tool_calls>" in prompt
-    assert '<|DSML|invoke name="tool_name">' in prompt
+    assert "```tool_json" in prompt
+    assert '"name":"tool_name"' in prompt
     assert "no natural language outside it" in prompt
-    assert "Never omit the opening <|DSML|tool_calls> tag" in prompt
-    assert "Wrong 1 - mixed text after DSML" in prompt
+    assert "Never output partial protocol markers" in prompt
+    assert "top-level calls array" in prompt
     choice = response.json()["choices"][0]
     assert choice["finish_reason"] == "tool_calls"
     assert choice["message"]["content"] == ""
@@ -2310,7 +2470,7 @@ def test_strict_tool_bridge_repairs_malformed_tool_json_once() -> None:
     assert len(requests) == 2
     repair_text = "\n".join(str(m.get("content", "")) for m in requests[1]["messages"])
     assert "Previous tool call was invalid" in repair_text
-    assert "<|DSML|tool_calls>" in repair_text
+    assert "```tool_json" in repair_text
     choice = response.json()["choices"][0]
     assert choice["finish_reason"] == "tool_calls"
     assert choice["message"]["tool_calls"][0]["function"]["name"] == "read_file"
@@ -10252,6 +10412,62 @@ def test_onboarding_groups_webai2api_adapter_aliases_with_provider(tmp_path: Pat
     assert "unrelated-model" not in chatgpt["availableModels"]
 
 
+def test_onboarding_keeps_chatgpt_thinking_visible_when_sidecar_catalog_is_sparse(tmp_path: Path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/models":
+            return httpx.Response(
+                200,
+                json={
+                    "object": "list",
+                    "data": [
+                        {"id": "gpt-instant", "object": "model", "owned_by": "internal_server", "type": "text"},
+                        {"id": "chatgpt_text/gpt-instant", "object": "model", "owned_by": "chatgpt_text", "type": "text"},
+                    ],
+                },
+                request=request,
+            )
+        if request.url.path == "/admin/config/instances":
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "name": "plus_profile",
+                        "workers": [{"name": "plus", "type": "chatgpt_text", "mergeTypes": []}],
+                    }
+                ],
+                request=request,
+            )
+        if request.url.path == "/v1/cookies":
+            return httpx.Response(
+                200,
+                json={"cookies": [{"name": "__Secure-next-auth.session-token", "value": "ok"}]},
+                request=request,
+            )
+        return httpx.Response(404, json={"error": "unexpected"}, request=request)
+
+    client = TestClient(
+        create_app(
+            config=_config(),
+            config_path=tmp_path / "config.json",
+            credential_store=CredentialStore(tmp_path / "credentials"),
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+    )
+
+    response = client.get("/api/admin/onboarding")
+
+    assert response.status_code == 200
+    body = response.json()
+    chatgpt = next(item for item in body["providers"] if item["id"] == "chatgpt")
+    assert "gpt-thinking" in chatgpt["availableModels"]
+    assert "gpt-pro" in chatgpt["availableModels"]
+    model_ids = {item["id"] for item in body["models"]}
+    assert {"gpt-thinking", "gpt-pro"} <= model_ids
+    thinking = next(item for item in body["models"] if item["id"] == "gpt-thinking")
+    assert thinking["capabilities"]["supports_native_tools"] is False
+    assert thinking["capabilities"]["tool_bridge"] is True
+
+
 def test_onboarding_marks_webai2api_chatgpt_authorized_from_worker_cookies(tmp_path: Path) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v1/models":
@@ -10591,7 +10807,7 @@ def test_selecting_webai2api_account_syncs_worker_pool_without_touching_other_pr
     assert restart_payloads == [{"loginMode": False}]
     synced = posted_instances[-1]
     workers_by_instance = {item["name"]: item["workers"] for item in synced}
-    assert workers_by_instance["chatgpt_free_profile"] == []
+    assert "chatgpt_free_profile" not in workers_by_instance
     assert workers_by_instance["chatgpt_plus_profile"] == [
         {"name": "plus", "type": "chatgpt_text", "mergeTypes": []},
         {"name": "gemini", "type": "gemini_text", "mergeTypes": []},
@@ -10904,16 +11120,102 @@ def test_account_model_validation_caches_results_and_redacts_errors(tmp_path: Pa
         "/api/admin/accounts/validate",
         json={"providerId": "chatgpt", "accountId": account_id, "modelIds": ["gpt-instant", "chatgpt_text/gpt-pro"]},
     )
+    third = client.post(
+        "/api/admin/accounts/validate",
+        json={
+            "providerId": "chatgpt",
+            "accountId": account_id,
+            "modelIds": ["gpt-instant", "chatgpt_text/gpt-pro"],
+            "force": True,
+        },
+    )
 
     assert first.status_code == 200
     assert second.status_code == 200
-    assert chat_calls == ["gpt-instant", "chatgpt_text/gpt-pro"]
+    assert third.status_code == 200
+    assert chat_calls == ["gpt-instant", "chatgpt_text/gpt-pro", "gpt-instant", "chatgpt_text/gpt-pro"]
     validation = second.json()["validation"]
     assert validation["gpt-instant"]["status"] == "available"
     assert validation["chatgpt_text/gpt-pro"]["status"] == "unavailable"
     assert "session-secret" not in second.text
     assert "secret-token" not in second.text
     assert "[redacted]" in second.text
+
+
+def test_account_model_validation_selects_requested_webai2api_account_before_probe(tmp_path: Path) -> None:
+    posted_instances: list[Any] = []
+    restart_payloads: list[Any] = []
+    chat_calls: list[str] = []
+    instances = [
+        {
+            "name": "chatgpt_free_profile",
+            "workers": [{"name": "free", "type": "chatgpt_text", "mergeTypes": []}],
+        },
+        {
+            "name": "chatgpt_plus_profile",
+            "workers": [{"name": "plus", "type": "chatgpt_text", "mergeTypes": []}],
+        },
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/models":
+            return httpx.Response(
+                200,
+                json={
+                    "object": "list",
+                    "data": [
+                        {"id": "gpt-instant", "object": "model", "owned_by": "internal_server", "type": "text"},
+                        {"id": "gpt-thinking", "object": "model", "owned_by": "internal_server", "type": "text"},
+                    ],
+                },
+                request=request,
+            )
+        if request.url.path == "/admin/config/instances" and request.method == "GET":
+            return httpx.Response(200, json=instances, request=request)
+        if request.url.path == "/admin/config/instances" and request.method == "POST":
+            posted_instances.append(json.loads(request.content.decode("utf-8")))
+            return httpx.Response(200, json={"success": True}, request=request)
+        if request.url.path == "/admin/restart" and request.method == "POST":
+            restart_payloads.append(json.loads(request.content.decode("utf-8") or "{}"))
+            return httpx.Response(200, json={"success": True}, request=request)
+        if request.url.path == "/v1/cookies":
+            return httpx.Response(
+                200,
+                json={"cookies": [{"name": "__Secure-next-auth.session-token", "value": "ok"}]},
+                request=request,
+            )
+        if request.url.path == "/v1/chat/completions":
+            chat_calls.append(json.loads(request.content.decode("utf-8"))["model"])
+            return httpx.Response(200, json=_openai_response("ok"), request=request)
+        return httpx.Response(404, json={"error": "unexpected"}, request=request)
+
+    client = TestClient(
+        create_app(
+            config=replace(_config(), upstream=UpstreamConfig(base_url="http://127.0.0.1:8500/v1", model="gpt-instant")),
+            config_path=tmp_path / "config.json",
+            credential_store=CredentialStore(tmp_path / "credentials"),
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+    )
+    accounts = client.get("/api/admin/accounts", params={"providerId": "chatgpt"}).json()["accounts"]
+    plus_account = next(account for account in accounts if account["workerName"] == "plus")
+
+    response = client.post(
+        "/api/admin/accounts/validate",
+        json={"providerId": "chatgpt", "accountId": plus_account["id"], "modelIds": ["gpt-thinking"]},
+    )
+
+    assert response.status_code == 200
+    assert chat_calls == ["gpt-thinking"]
+    assert restart_payloads == [{"loginMode": False}]
+    synced = posted_instances[-1]
+    workers_by_instance = {item["name"]: item["workers"] for item in synced}
+    assert "chatgpt_free_profile" not in workers_by_instance
+    assert workers_by_instance["chatgpt_plus_profile"] == [
+        {"name": "plus", "type": "chatgpt_text", "mergeTypes": []}
+    ]
+    refreshed = client.get("/api/admin/accounts", params={"providerId": "chatgpt"}).json()
+    assert refreshed["currentAccountId"] == plus_account["id"]
 
 
 def test_vendored_webai2api_frontend_has_gateway_bridge_page() -> None:
@@ -10940,12 +11242,15 @@ def test_vendored_webai2api_frontend_has_gateway_bridge_page() -> None:
     assert "/api/admin/web-auth/browser/start" in bridge_source
     assert "/api/admin/webai2api/login/start" in bridge_source
     assert "/api/admin/webai2api/login/finish" in bridge_source
-    assert "打开授权浏览器" in bridge_source
-    assert "新增账号登录" in bridge_source
+    assert "新增网页账号" in bridge_source
+    assert "切换并检测" in bridge_source
+    assert "网页文本通路" in bridge_source
+    assert "不支持原生工具调用" in bridge_source
     assert "未授权" in bridge_source
     assert "可用模型" in bridge_source
     assert "http://127.0.0.1:8610/v1" in bridge_source
     assert "Claude Code" in bridge_source
+    assert "/health" in app_source
 
 
 def test_admin_root_serves_management_ui() -> None:
@@ -12549,10 +12854,10 @@ def test_tool_prompt_all_profile_uses_ds2api_schema_and_examples() -> None:
     assert "Tool: Agent" in prompt
     assert "TOOL CALL FORMAT - FOLLOW EXACTLY" in prompt
     assert "Available tools (allowed names only)" not in prompt
-    assert '<|DSML|invoke name="Edit">' in prompt
-    assert '<|DSML|parameter name="old_string"><![CDATA[foo]]></|DSML|parameter>' in prompt
-    assert '<|DSML|parameter name="new_string"><![CDATA[bar]]></|DSML|parameter>' in prompt
-    assert '<|DSML|invoke name="Agent">\n  </|DSML|invoke>' not in prompt
+    assert '"name": "Edit"' in prompt
+    assert '"old_string": "foo"' in prompt
+    assert '"new_string": "bar"' in prompt
+    assert '"name": "Agent",\n      "input": {}' not in prompt
 
 
 def test_tool_prompt_bash_tool_includes_shell_dialect_guard() -> None:
@@ -21229,6 +21534,48 @@ def test_request_diagnostics_redacts_response_preview_secrets(tmp_path: Path) ->
     assert "session-secret" not in preview
     assert "Authorization: [redacted]" in preview
     assert "token=[redacted]" in preview
+
+
+def test_request_diagnostics_records_redacted_tool_bridge_raw_preview_for_errors() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json=_openai_response("```tool_json\nnot-json Authorization: Bearer super-secret-token\n```"),
+            request=request,
+        )
+
+    config = GatewayConfig(
+        server=ServerConfig(api_key="local-dev-key"),
+        upstream=UpstreamConfig(base_url="http://upstream.test/v1", model="web-model"),
+        tool_bridge=ToolBridgeConfig(activation_policy="auto", exposure_policy="all"),
+    )
+    client = TestClient(create_app(config=config, http_client=httpx.Client(transport=httpx.MockTransport(handler))))
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers=_headers(),
+        json={
+            "model": "web-model",
+            "messages": [{"role": "user", "content": "北京天气怎样？"}],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "description": "Query weather",
+                        "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
+                    },
+                }
+            ],
+            "tool_choice": {"type": "function", "function": {"name": "get_weather"}},
+        },
+    )
+    diagnostics = client.get("/api/admin/request-diagnostics").json()["events"]
+
+    assert response.status_code == 200
+    preview = diagnostics[-1]["toolBridgeRawContentPreview"]
+    assert "super-secret-token" not in preview
+    assert "Authorization: [redacted]" in preview
 
 
 def test_anthropic_qwen_web_accepts_image_blocks_as_multimodal_payload(tmp_path: Path) -> None:

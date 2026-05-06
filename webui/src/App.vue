@@ -331,10 +331,10 @@ let disconnectModalShown = false;
 
 async function checkConnection() {
   try {
-    const res = await fetch('/admin/status', {
-      headers: settingsStore.getHeaders(),
+    const res = await fetch('/health', {
       signal: AbortSignal.timeout(5000)
     });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     if (res.ok && disconnectModalShown) {
       // 连接恢复，刷新页面
       disconnectModalShown = false;
@@ -345,8 +345,8 @@ async function checkConnection() {
     if (!disconnectModalShown && !isInitializing.value) {
       disconnectModalShown = true;
       Modal.warning({
-        title: '后端连接断开',
-        content: '无法连接到后端服务，请检查服务是否正在运行。连接恢复后页面将自动刷新。',
+        title: 'Gateway 暂时无法连接',
+        content: '无法连接到 WebAI Gateway。请检查本机 8610 服务是否仍在运行；连接恢复后页面将自动刷新。',
         okText: '我知道了',
         centered: true
       });

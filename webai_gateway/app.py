@@ -215,9 +215,10 @@ def create_app(
         cfg = current_config()
         models_payload = _load_gateway_models(client, cfg)
         models = models_payload.get("data") if isinstance(models_payload.get("data"), list) else []
-        model_ids = {item.get("id") for item in models if isinstance(item, dict)}
         provider_data = provider_payload(app.state.credential_store)["providers"]
         webai2api_instances = _load_webai2api_instances(client, cfg)
+        models = _with_onboarding_provider_catalog_models(models, provider_data, webai2api_instances)
+        model_ids = {item.get("id") for item in models if isinstance(item, dict)}
         webai2api_auth = _load_webai2api_auth_states(client, cfg, provider_data, webai2api_instances)
         providers: list[dict[str, Any]] = []
         authorized_count = 0
@@ -284,6 +285,57 @@ def create_app(
             "recommendedConnectionProfile": _recommended_connection_profile(connection_profiles),
         }
 
+
+    def _with_onboarding_provider_catalog_models(
+        models: list[Any],
+        providers: list[dict[str, Any]],
+        webai2api_instances: list[Any],
+    ) -> list[Any]:
+        out = [dict(item) if isinstance(item, dict) else item for item in models]
+        seen = {item.get("id") for item in out if isinstance(item, dict)}
+        for provider in providers:
+            if not _should_add_provider_catalog_models(provider, webai2api_instances):
+                continue
+            for model_id in _provider_catalog_model_ids_for_onboarding(provider, seen):
+                if model_id in seen:
+                    continue
+                seen.add(model_id)
+                out.append(_provider_catalog_model_payload(provider, model_id))
+        return out
+
+    def _should_add_provider_catalog_models(provider: dict[str, Any], webai2api_instances: list[Any]) -> bool:
+        provider_id = str(provider.get("id") or "")
+        if provider_id != "chatgpt":
+            return False
+        return bool(_webai2api_provider_instances(provider, webai2api_instances))
+
+    def _provider_catalog_model_ids_for_onboarding(provider: dict[str, Any], seen: set[Any]) -> list[str]:
+        provider_id = str(provider.get("id") or "")
+        declared_models = provider.get("models") if isinstance(provider.get("models"), list) else []
+        if provider_id == "chatgpt":
+            adapter_ids = [str(adapter) for adapter in provider.get("adapters", []) if isinstance(adapter, str)]
+            return [
+                model_id
+                for model_id in declared_models
+                if isinstance(model_id, str) and model_id in {"gpt-instant", "gpt-thinking", "gpt-pro"}
+                and not any(f"{adapter}/{model_id}" in seen for adapter in adapter_ids)
+            ]
+        return []
+
+    def _provider_catalog_model_payload(provider: dict[str, Any], model_id: str) -> dict[str, Any]:
+        provider_id = str(provider.get("id") or "")
+        return {
+            "id": model_id,
+            "object": "model",
+            "owned_by": provider_id,
+            "type": "text",
+            "capabilities": {
+                "tool_bridge": str(provider.get("toolBridge") or "strict").strip().lower() != "off",
+                "supports_native_tools": bool(provider.get("supportsNativeTools")),
+                "preferred_protocol": str(provider.get("preferredProtocol") or "openai"),
+            },
+            "availability_source": "provider_catalog",
+        }
 
     def _available_models_for_provider(
         provider: dict[str, Any],
@@ -443,10 +495,13 @@ def create_app(
         if current not in account_ids:
             current = next((account["id"] for account in accounts if account.get("authorized")), accounts[0]["id"] if accounts else "")
         model_availability = _model_availability_for_account(current, provider_models)
+        current_validation = _public_account_validation(app.state.account_registry.validation_for(current)) if current else {}
+        has_current_validation = any(model_id in current_validation for model_id in provider_models)
         available_models = [
             model_id
             for model_id in provider_models
             if model_availability.get(model_id, {}).get("status") != "unavailable"
+            and (not has_current_validation or model_availability.get(model_id, {}).get("status") == "available")
         ]
         for account in accounts:
             account["current"] = account["id"] == current
@@ -652,11 +707,21 @@ def create_app(
         model_ids = body.get("modelIds") if isinstance(body.get("modelIds"), list) else body.get("model_ids")
         if not isinstance(model_ids, list):
             model_ids = []
+        force_validation = bool(body.get("force") or body.get("refresh") or body.get("ignoreCache"))
         cfg = current_config()
+        instances = _load_webai2api_instances(client, cfg)
+        if provider.route != "direct":
+            if not _webai2api_selected_account_already_active(provider, parsed, instances):
+                _sync_webai2api_selected_account(provider, parsed)
+                if not _wait_for_webai2api_api_mode(client, cfg):
+                    raise HTTPException(status_code=502, detail="WebAI2API 正在重启，请稍后再检测模型")
+                instances = _load_webai2api_instances(client, cfg)
+            app.state.account_registry.set_current(provider.id, account_id)
         models_payload = _load_gateway_models(client, cfg)
         models = models_payload.get("data") if isinstance(models_payload.get("data"), list) else []
-        model_ids_known = {item.get("id") for item in models if isinstance(item, dict)}
         provider_payloads = provider_payload(app.state.credential_store)["providers"]
+        models = _with_onboarding_provider_catalog_models(models, provider_payloads, instances)
+        model_ids_known = {item.get("id") for item in models if isinstance(item, dict)}
         provider_dict = next((item for item in provider_payloads if item.get("id") == provider_id), None)
         if not provider_dict:
             raise HTTPException(status_code=404, detail="Provider 不存在")
@@ -666,10 +731,11 @@ def create_app(
             requested = provider_models
         validation: dict[str, Any] = {}
         for model_id in requested:
-            cached = app.state.account_registry.fresh_validation(account_id, model_id)
-            if cached is not None:
-                validation[model_id] = _public_account_validation({model_id: cached})[model_id]
-                continue
+            if not force_validation:
+                cached = app.state.account_registry.fresh_validation(account_id, model_id)
+                if cached is not None:
+                    validation[model_id] = _public_account_validation({model_id: cached})[model_id]
+                    continue
             result = await run_in_threadpool(_validate_account_model, cfg, model_id)
             saved = app.state.account_registry.save_validation(account_id, model_id, result)
             validation[model_id] = _public_account_validation({model_id: saved})[model_id]
@@ -825,6 +891,24 @@ def create_app(
                     return str(instance.get("name") or "")
         return ""
 
+    def _webai2api_selected_account_already_active(provider: Any, parsed_account: Any, instances: list[Any]) -> bool:
+        if not parsed_account.instance_name or not parsed_account.worker_name:
+            return False
+        active_provider_workers: list[tuple[str, str]] = []
+        provider_dict = {"adapters": list(getattr(provider, "adapters", ()))}
+        for instance in instances:
+            if not isinstance(instance, dict):
+                continue
+            instance_name = str(instance.get("name") or "")
+            workers = instance.get("workers") if isinstance(instance.get("workers"), list) else []
+            for worker in workers:
+                if not isinstance(worker, dict) or not _worker_supports_provider(worker, provider_dict):
+                    continue
+                worker_name = str(worker.get("name") or "")
+                if instance_name and worker_name:
+                    active_provider_workers.append((instance_name, worker_name))
+        return active_provider_workers == [(parsed_account.instance_name, parsed_account.worker_name)]
+
     def _sync_webai2api_selected_account(provider: Any, parsed_account: Any) -> None:
         if not parsed_account.instance_name or not parsed_account.worker_name:
             raise HTTPException(status_code=400, detail="WebAI2API 账号缺少 instance/worker")
@@ -891,8 +975,9 @@ def create_app(
                 trimmed = _worker_without_provider_adapters(worker, set(provider.adapters))
                 if trimmed is not None:
                     kept_workers.append(trimmed)
-            copied["workers"] = kept_workers
-            out.append(copied)
+            if kept_workers:
+                copied["workers"] = kept_workers
+                out.append(copied)
         return out
 
     def _provider_workers_snapshot(instances: list[Any], provider: Any) -> list[dict[str, Any]]:
@@ -1357,6 +1442,16 @@ def create_app(
         else:
             payload, bridge, allowed_tools, bridge_context = build_upstream_payload(openai_body, cfg)
             model = str(openai_body.get("model") or cfg.upstream.model)
+            _record_completion_started_diagnostic(
+                app,
+                endpoint="/v1/messages",
+                route="upstream",
+                model=model,
+                body=body,
+                stream=bool(body.get("stream")),
+                bridge=bridge,
+                bridge_context=bridge_context,
+            )
             preflight_data = build_preflight_chat_response(model, bridge_context)
             if preflight_data is not None:
                 _record_tool_bridge_event(app, "local_repo_preflight", model=model, **_tool_call_event_fields(preflight_data))
@@ -2661,6 +2756,12 @@ def _tool_bridge_completion_fields(bridge_result: Any) -> dict[str, Any]:
         fields["toolBridgeError"] = str(getattr(error, "kind", "") or "")
         fields["toolBridgeRepairable"] = bool(getattr(error, "repairable", False))
         fields["toolBridgeMessage"] = _preview_text(str(getattr(error, "message", "") or ""), max_chars=360)
+        raw_content = str(getattr(bridge_result, "raw_content", "") or "")
+        if raw_content:
+            fields["toolBridgeRawContentPreview"] = _preview_text(
+                _redact_sensitive_text(raw_content),
+                max_chars=360,
+            )
     warning = getattr(bridge_result, "warning", None)
     if warning:
         fields["toolBridgeWarning"] = _preview_text(str(warning), max_chars=360)
@@ -3216,7 +3317,7 @@ def _parse_bridge_chat_data(
                     stage="required_tool_choice_recovery",
                     bridge_context=bridge_context,
                 )
-    if bridge_result.error and bridge_result.error.repairable and not _should_retry_required_tool_choice_recovery(bridge_result):
+    if bridge_result.error and bridge_result.error.repairable:
         _record_tool_bridge_event(
             app,
             "tool_bridge_retry",
