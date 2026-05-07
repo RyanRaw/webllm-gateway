@@ -2774,6 +2774,18 @@ def parse_tool_response(text: str, context: ToolBridgeContext) -> BridgeResult:
         record_phase("extract", "ok", "plain_text/no_candidate")
         warning = "tool_result_claim_without_tool_call" if _TOOL_RESULT_CLAIM_RE.search(raw) else None
         fenced_shell_commands = _extract_fenced_shell_command_lines(raw)
+        if _looks_like_empty_or_garbled_fence_response(raw, context):
+            return finish(
+                content=raw,
+                tool_calls=[],
+                error=BridgeError(
+                    "malformed_json",
+                    "The model returned an empty or malformed markdown fence instead of a valid tool_json block.",
+                    repairable=True,
+                ),
+                warning=warning,
+                raw_content=raw,
+            )
         if (
             not marker_seen
             and not malformed_seen
@@ -3550,6 +3562,32 @@ def _without_fenced_code_blocks(text: str) -> str:
         pos = end
     out.append(raw[pos:])
     return "".join(out)
+
+
+def _looks_like_empty_or_garbled_fence_response(raw: str, context: ToolBridgeContext) -> bool:
+    stripped = (raw or "").strip()
+    if not stripped or not context.allowed_names:
+        return False
+    if stripped in {"```", "~~~"}:
+        return True
+    if not (stripped.startswith("```") or stripped.startswith("~~~")):
+        return False
+    ranges = _fenced_code_ranges(stripped)
+    if ranges and _without_fenced_code_blocks(stripped).strip():
+        return False
+    blocks = list(_FENCED_CODE_BLOCK_RE.finditer(stripped))
+    if not blocks and ranges:
+        return True
+    for block in blocks:
+        lang = (block.group("lang") or "").strip().lower()
+        body = (block.group("body") or "").strip()
+        if lang in {"tool_json", "json"} and not body:
+            return True
+        compact_body = re.sub(r"\s+", "", body)
+        if compact_body and len(compact_body) <= 24 and not re.search(r"[A-Za-z0-9_\u4e00-\u9fff]", compact_body):
+            return True
+    remainder = re.sub(r"[`\s~]+", "", stripped)
+    return bool(remainder and len(remainder) <= 24 and not re.search(r"[A-Za-z0-9_\u4e00-\u9fff]", remainder))
 
 
 def _cdata_starts_before_fence(line: str) -> bool:

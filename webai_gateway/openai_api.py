@@ -360,11 +360,25 @@ def should_retry_incomplete_response(data: dict[str, Any]) -> bool:
     content = _openai_message_content(data).strip()
     if not content:
         return False
+    if _looks_like_empty_or_garbled_fence_text(content):
+        return True
     if len(content) > 320:
         return False
     if _SUBSTANTIVE_ANSWER_MARKER_RE.search(content):
         return False
     return bool(_INCOMPLETE_PRELUDE_RE.search(_strip_leading_status_prefix(content)))
+
+
+def _looks_like_empty_or_garbled_fence_text(text: str) -> bool:
+    stripped = (text or "").strip()
+    if stripped in {"```", "~~~"}:
+        return True
+    if len(stripped) > 80 or not (stripped.startswith("```") or stripped.startswith("~~~")):
+        return False
+    if re.fullmatch(r"```(?:json|tool_json)?\s*```", stripped, re.IGNORECASE):
+        return True
+    remainder = re.sub(r"[`\s~]+", "", stripped)
+    return bool(remainder and len(remainder) <= 24 and not re.search(r"[A-Za-z0-9_\u4e00-\u9fff]", remainder))
 
 
 def _strip_leading_status_prefix(text: str) -> str:

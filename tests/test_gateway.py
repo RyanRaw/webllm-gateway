@@ -266,6 +266,22 @@ def test_tool_bridge_repairs_fenced_tool_json_tail_fragment() -> None:
     assert result.tool_calls == []
 
 
+@pytest.mark.parametrize("raw", ["```", "```} ```", "```json\n```"])
+def test_tool_bridge_repairs_empty_or_garbled_fence_in_tool_loop(raw: str) -> None:
+    context = _controller_context_with_tools(
+        ["Read", "Edit"],
+        task_text="Configure default claude launch permissions.",
+    )
+
+    result = parse_tool_response(raw, context)
+
+    assert result.error is not None
+    assert result.error.kind == "malformed_json"
+    assert result.error.repairable is True
+    assert result.content == raw
+    assert result.tool_calls == []
+
+
 def test_tool_bridge_repairs_optional_local_method_selection_without_tool_call() -> None:
     context = _controller_context_with_tools(
         ["Bash", "Read"],
@@ -2274,6 +2290,92 @@ def test_webai2api_gpt_thinking_repairs_incomplete_tool_json_marker_to_tool_use(
     assert tool_use["type"] == "tool_use"
     assert tool_use["name"] == "Read"
     assert tool_use["input"] == {"file_path": "C:/Users/test/.claude/settings.json"}
+
+
+def test_webai2api_gpt_thinking_repairs_empty_fence_to_tool_use() -> None:
+    seen_payloads: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode("utf-8"))
+        seen_payloads.append(payload)
+        if len(seen_payloads) == 1:
+            return httpx.Response(200, json=_openai_response("```} ```"), request=request)
+        return httpx.Response(
+            200,
+            json=_openai_response(
+                '<|DSML|tool_calls><|DSML|invoke name="Read">'
+                '<|DSML|parameter name="file_path"><![CDATA[C:/Users/test/.claude/settings.json]]></|DSML|parameter>'
+                "</|DSML|invoke></|DSML|tool_calls>"
+            ),
+            request=request,
+        )
+
+    client = TestClient(
+        create_app(
+            config=GatewayConfig(
+                server=ServerConfig(api_key="local-dev-key"),
+                upstream=UpstreamConfig(base_url="http://127.0.0.1:8500/v1", model="gpt-thinking"),
+                tool_bridge=ToolBridgeConfig(activation_policy="auto", exposure_policy="all", tool_profile="all"),
+            ),
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+    )
+
+    response = client.post(
+        "/v1/messages",
+        headers={**_headers(), "anthropic-version": "2023-06-01"},
+        json={
+            "model": "chatgpt_text/gpt-thinking",
+            "max_tokens": 32000,
+            "messages": [{"role": "user", "content": "Configure default claude launch permissions."}],
+            "tools": [
+                {"name": "Read", "description": "Read files", "input_schema": {"type": "object"}},
+                {"name": "Edit", "description": "Edit files", "input_schema": {"type": "object"}},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(seen_payloads) == 2
+    retry_prompt = "\n".join(str(message.get("content", "")) for message in seen_payloads[1]["messages"])
+    assert "malformed_json" in retry_prompt
+    assert "```} ```" not in response.text
+    tool_use = response.json()["content"][0]
+    assert tool_use["type"] == "tool_use"
+    assert tool_use["name"] == "Read"
+    assert tool_use["input"] == {"file_path": "C:/Users/test/.claude/settings.json"}
+
+
+def test_webai2api_retries_empty_fence_without_tools_to_text() -> None:
+    seen_payloads: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode("utf-8"))
+        seen_payloads.append(payload)
+        if len(seen_payloads) == 1:
+            return httpx.Response(200, json=_openai_response("```"), request=request)
+        return httpx.Response(200, json=_openai_response("ready"), request=request)
+
+    client = TestClient(
+        create_app(
+            config=GatewayConfig(
+                server=ServerConfig(api_key="local-dev-key"),
+                upstream=UpstreamConfig(base_url="http://127.0.0.1:8500/v1", model="gpt-thinking"),
+                tool_bridge=ToolBridgeConfig(activation_policy="auto", exposure_policy="local-agent"),
+            ),
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+    )
+
+    response = client.post(
+        "/v1/messages",
+        headers={**_headers(), "anthropic-version": "2023-06-01"},
+        json={"model": "gpt-thinking", "max_tokens": 512, "messages": [{"role": "user", "content": "hello"}]},
+    )
+
+    assert response.status_code == 200
+    assert len(seen_payloads) == 2
+    assert response.json()["content"] == [{"type": "text", "text": "ready"}]
 
 
 def test_webai2api_repairs_method_question_then_tool_json_tail_to_tool_use() -> None:
