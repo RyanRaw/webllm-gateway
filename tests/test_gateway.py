@@ -28,6 +28,7 @@ from webai_gateway.ds2api_oracle import DS2API_ORACLE_COMMIT, DS2API_ORACLE_VERS
 from webai_gateway.openai_api import (
     EMPTY_ASSISTANT_RESPONSE_TEXT,
     build_repair_payload,
+    build_upstream_payload,
     build_tool_call_sse,
     build_tool_refusal_recovery_payload,
     parse_chat_response,
@@ -2018,11 +2019,35 @@ def test_webai2api_gpt_thinking_repairs_chinese_setup_confirmation_to_tool_use()
     retry_prompt = "\n".join(str(message.get("content", "")) for message in seen_payloads[1]["messages"])
     assert "premature_clarification_without_tool_call" in retry_prompt
     assert "Do not ask the user" in retry_prompt
+    assert "protocol-formatting retry" in retry_prompt
     tool_use = response.json()["content"][0]
     assert tool_use["type"] == "tool_use"
     assert tool_use["id"].startswith("toolu_")
     assert tool_use["name"] == "Read"
     assert tool_use["input"] == {"file_path": "C:/Users/test/.claude/settings.json"}
+
+
+def test_local_agent_tool_context_recovers_command_permission_tasks_when_auto_filter_is_empty() -> None:
+    body = {
+        "model": "gpt-thinking",
+        "messages": [{"role": "user", "content": "Configure default command permissions for future launches."}],
+        "tools": [
+            {"type": "function", "function": {"name": "Bash", "description": "Run command", "parameters": {"type": "object"}}},
+            {"type": "function", "function": {"name": "Read", "description": "Read file", "parameters": {"type": "object"}}},
+            {"type": "function", "function": {"name": "Edit", "description": "Edit file", "parameters": {"type": "object"}}},
+        ],
+    }
+    config = GatewayConfig(
+        server=ServerConfig(api_key="local-dev-key"),
+        upstream=UpstreamConfig(base_url="http://127.0.0.1:8500/v1", model="gpt-thinking"),
+        tool_bridge=ToolBridgeConfig(activation_policy="auto", exposure_policy="local-agent", tool_profile="auto"),
+    )
+
+    _payload, bridge, allowed_tools, bridge_context = build_upstream_payload(body, config)
+
+    assert bridge is True
+    assert bridge_context.enabled is True
+    assert {"Bash", "Read", "Edit"} <= allowed_tools
 
 
 def test_webai2api_anthropic_stream_retries_short_setup_final_to_tool_use() -> None:

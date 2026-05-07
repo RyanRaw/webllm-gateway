@@ -69,6 +69,12 @@ _NATIVE_SEARCH_PLACEHOLDER_RE = re.compile(
     r"|(?:i(?:'ll| will)|i’ll|let me|i can|i am going to|i'm going to).{0,36}(?:search|look up|find|check))",
     re.IGNORECASE,
 )
+_RECOVERABLE_LOCAL_AGENT_TASK_RE = re.compile(
+    r"\b(?:configure|configuration|setup|set\s+up|setting|settings|permission|permissions|command|"
+    r"shell|terminal|bash|cmd|powershell|run|execute|install|deploy|edit|write|modify|change|fix)\b|"
+    r"(?:配置|设置|权限|命令|终端|运行|执行|启动|安装|部署|编辑|写入|修改|修复)",
+    re.IGNORECASE,
+)
 _INCOMPLETE_PRELUDE_RE = re.compile(
     r"^\s*(?:好的[，,。]?\s*)?"
     r"(?:(?:我(?:来|会|将|先)|让我|首先|接下来|现在|正在).{0,120}"
@@ -129,6 +135,19 @@ def build_upstream_payload(
         body.get("messages"),
         tool_choice=body.get("tool_choice"),
     )
+    if bridge and _should_recover_empty_local_agent_tool_context(config, bridge_context, body, tools):
+        bridge_context = build_context(
+            tools,
+            replace(config.tool_bridge, tool_profile="agent"),
+            mode=bridge_mode,
+            model=model,
+            tool_choice=body.get("tool_choice"),
+        )
+        bridge_context = prefer_local_tools_for_local_agent_task(
+            bridge_context,
+            body.get("messages"),
+            tool_choice=body.get("tool_choice"),
+        )
     if bridge and bridge_context.enabled:
         native_web_search = False
     allowed_tools: set[str] = set()
@@ -267,6 +286,40 @@ def _should_fallback_to_safe_exposure(
     if context.enabled and context.allowed_names:
         return False
     return True
+
+
+def _should_recover_empty_local_agent_tool_context(
+    config: GatewayConfig,
+    context: ToolBridgeContext,
+    body: dict[str, Any],
+    tools: Any,
+) -> bool:
+    if context.enabled and context.allowed_names:
+        return False
+    if not isinstance(tools, list) or not tools:
+        return False
+    options = config.tool_bridge
+    policy = (options.exposure_policy or "safe").strip().lower()
+    if policy not in {"local-agent", "local_agent", "code-agent", "code_agent"}:
+        return False
+    if (options.tool_profile or "auto").strip().lower().replace("_", "-") != "auto":
+        return False
+    task_text = _latest_recoverable_local_agent_task_text(body.get("messages"))
+    if not task_text:
+        return False
+    return bool(_RECOVERABLE_LOCAL_AGENT_TASK_RE.search(task_text))
+
+
+def _latest_recoverable_local_agent_task_text(messages: Any) -> str:
+    if not isinstance(messages, list):
+        return ""
+    for message in reversed(messages):
+        if not isinstance(message, dict) or str(message.get("role") or "") != "user":
+            continue
+        text = _as_text(message.get("content")).strip()
+        if text:
+            return text
+    return ""
 
 
 def build_preflight_chat_response(model: str, bridge_context: ToolBridgeContext) -> dict[str, Any] | None:

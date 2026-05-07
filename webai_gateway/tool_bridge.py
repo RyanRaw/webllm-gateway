@@ -5973,6 +5973,7 @@ def build_repair_messages(messages: list[dict[str, Any]], bad_text: str, error: 
             f"Error: {reason}.\n"
             "Do not ask the user whether you should do, generate, write, configure, inspect, or execute the already requested task. "
             "The listed tools are available through the downstream client, not your own runtime. "
+            "Treat this as a protocol-formatting retry: convert the next action implied by your previous answer into exactly one Gateway tool_json request, not a tutorial about JSON. "
             "If more evidence is needed, output exactly one valid fenced tool_json block using a materially necessary allowed tool "
             "such as Read, Glob, Grep, Bash, Edit, or Write. Prefer a discovery/read tool when the target file or project state is unknown. "
             "If no allowed tool can help, provide a substantive final answer without claiming that local changes were made."
