@@ -12,6 +12,7 @@ import httpx
 
 from webai_gateway.config import GatewayConfig
 from webai_gateway.assistant_turn import build_assistant_turn
+from webai_gateway.model_ids import normalize_model_id
 from webai_gateway.prompt_compaction import (
     STATELESS_WEB_API_GUARD,
     compact_role_messages_as_ds2api_history,
@@ -120,7 +121,7 @@ def build_upstream_payload(
         tool_choice=body.get("tool_choice"),
         provider_native_web_search=native_web_search,
     )
-    model = str(body.get("model") or config.upstream.model or "")
+    model = normalize_model_id(body.get("model"), config.upstream.model)
     bridge_context = build_context(tools, config.tool_bridge, mode=bridge_mode, model=model, tool_choice=body.get("tool_choice"))
     if bridge and _should_fallback_to_safe_exposure(config.tool_bridge, bridge_context, tools):
         bridge_context = build_context(

@@ -28,6 +28,7 @@ from webai_gateway.auto_research import build_auto_research_status
 from webai_gateway.config import GatewayConfig, config_to_admin, config_to_public, load_config, save_config, update_config
 from webai_gateway.deepseek_web import DEEPSEEK_DEFAULT_MODEL, DeepSeekWebClient, is_deepseek_web_model
 from webai_gateway.ds2api_oracle import DS2API_ORACLE_COMMIT, DS2API_ORACLE_VERSION
+from webai_gateway.model_ids import normalize_model_body, normalize_model_id
 from webai_gateway.openai_api import (
     bridge_error_headers,
     build_incomplete_response_retry_payload,
@@ -1217,7 +1218,7 @@ def create_app(
     ) -> Response:
         require_auth(authorization, x_api_key)
         cfg = current_config()
-        body = await _json_body(request)
+        body = normalize_model_body(await _json_body(request), default_model=cfg.upstream.model)
         if is_deepseek_web_model(body.get("model")):
             return await run_in_threadpool(_deepseek_web_chat, app, client, body, cfg)
         if is_qwen_web_model(body.get("model")):
@@ -1428,7 +1429,7 @@ def create_app(
     ) -> Response:
         require_auth(authorization, x_api_key)
         cfg = current_config()
-        body = await _json_body(request)
+        body = normalize_model_body(await _json_body(request), default_model=cfg.upstream.model)
         try:
             openai_body = anthropic_body_to_openai(
                 body,
@@ -1558,7 +1559,7 @@ def create_app(
         _remember_openai_tool_calls(app, parsed)
         anthropic_message = openai_response_to_anthropic(
             parsed,
-            original_model=str(body.get("model") or openai_body.get("model") or cfg.upstream.model),
+            original_model=normalize_model_id(body.get("model") or openai_body.get("model"), cfg.upstream.model),
         )
         response_headers = bridge_error_headers(bridge_result)
         response_headers.update(direct_bridge_headers)
@@ -1567,8 +1568,8 @@ def create_app(
             _record_completion_diagnostic(
                 app,
                 endpoint="/v1/messages",
-                route=_provider_route(str(openai_body.get("model") or cfg.upstream.model)),
-                model=str(body.get("model") or openai_body.get("model") or cfg.upstream.model),
+                route=_provider_route(normalize_model_id(openai_body.get("model"), cfg.upstream.model)),
+                model=normalize_model_id(body.get("model") or openai_body.get("model"), cfg.upstream.model),
                 body=body,
                 stream=True,
                 bridge=bool(bridge_result) or bool(direct_bridge_headers),
@@ -1583,8 +1584,8 @@ def create_app(
         _record_completion_diagnostic(
             app,
             endpoint="/v1/messages",
-            route=_provider_route(str(openai_body.get("model") or cfg.upstream.model)),
-            model=str(body.get("model") or openai_body.get("model") or cfg.upstream.model),
+            route=_provider_route(normalize_model_id(openai_body.get("model"), cfg.upstream.model)),
+            model=normalize_model_id(body.get("model") or openai_body.get("model"), cfg.upstream.model),
             body=body,
             stream=False,
             bridge=bool(bridge_result) or bool(direct_bridge_headers),
@@ -3238,10 +3239,22 @@ async def _json_body(request: Request) -> dict[str, Any]:
 
 def _append_web_models(data: dict[str, Any], *, include_webai2api_catalog: bool = False) -> dict[str, Any]:
     items = data.get("data") if isinstance(data.get("data"), list) else []
-    seen = {item.get("id") for item in items if isinstance(item, dict)}
+    normalized_items: list[Any] = []
+    seen: set[Any] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            normalized_items.append(item)
+            continue
+        model_id = normalize_model_id(item.get("id"))
+        if not model_id or model_id in seen:
+            continue
+        seen.add(model_id)
+        normalized_items.append({**item, "id": model_id})
+    items = normalized_items
     for item in catalog_model_payloads(include_webai2api=include_webai2api_catalog):
         model_id = item["id"]
         if model_id not in seen:
+            seen.add(model_id)
             items.append(item)
     return {**data, "object": data.get("object") or "list", "data": items}
 
@@ -3265,7 +3278,7 @@ def _build_direct_payload(
     default_model: str,
     provider_native_web_search: bool = False,
 ) -> tuple:
-    direct_body = {**body, "model": str(body.get("model") or default_model)}
+    direct_body = normalize_model_body(body, default_model=default_model)
     payload, bridge, allowed_tools, bridge_context = build_upstream_payload(
         direct_body,
         config,

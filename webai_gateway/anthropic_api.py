@@ -5,6 +5,7 @@ import time
 import uuid
 from typing import Any
 
+from webai_gateway.model_ids import normalize_model_id
 from webai_gateway.tool_bridge import normalize_anthropic_tools
 
 
@@ -34,7 +35,7 @@ def anthropic_body_to_openai(
         )
         out_messages.extend(converted)
     openai_body: dict[str, Any] = {
-        "model": str(body.get("model") or ""),
+        "model": normalize_model_id(body.get("model")),
         "messages": out_messages,
         "tools": normalize_anthropic_tools(body.get("tools")),
     }

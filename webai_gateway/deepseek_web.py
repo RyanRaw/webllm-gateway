@@ -5,6 +5,7 @@ from typing import Any
 
 import httpx
 
+from .model_ids import normalize_model_id
 
 DEEPSEEK_MODEL_PREFIX = "deepseek-web/"
 DEEPSEEK_DEFAULT_MODEL = "deepseek-v4-pro"
@@ -29,13 +30,18 @@ DEEPSEEK_WEB_ACCEPTED_MODELS = {
 
 
 def is_deepseek_web_model(model: Any) -> bool:
-    return isinstance(model, str) and (
-        model.startswith(DEEPSEEK_MODEL_PREFIX)
-        or model in DEEPSEEK_WEB_ACCEPTED_MODELS
+    normalized = normalize_model_id(model)
+    return bool(
+        normalized
+        and (
+            normalized.startswith(DEEPSEEK_MODEL_PREFIX)
+            or normalized in DEEPSEEK_WEB_ACCEPTED_MODELS
+        )
     )
 
 
 def normalize_deepseek_model(model: str) -> str:
+    model = normalize_model_id(model)
     short_model = model.removeprefix(DEEPSEEK_MODEL_PREFIX)
     return DEEPSEEK_WEB_MODEL_ALIASES.get(short_model, short_model or DEEPSEEK_DEFAULT_MODEL)
 

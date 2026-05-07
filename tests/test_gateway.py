@@ -25,6 +25,7 @@ from webai_gateway.config import (
     load_config,
 )
 from webai_gateway.ds2api_oracle import DS2API_ORACLE_COMMIT, DS2API_ORACLE_VERSION
+from webai_gateway.model_ids import normalize_model_id
 from webai_gateway.openai_api import (
     EMPTY_ASSISTANT_RESPONSE_TEXT,
     build_incomplete_response_retry_payload,
@@ -1270,6 +1271,82 @@ def test_models_returns_configured_model_when_upstream_models_unavailable() -> N
     assert qwen_preview["capabilities"]["supports_native_tools"] is False
     assert "gpt-instant" not in model_ids
     assert "sora-2" not in model_ids
+
+
+def test_model_id_normalization_strips_terminal_sgr_artifacts() -> None:
+    assert normalize_model_id("\x1b[1mqwen-web/qwen3.6-max-preview\x1b[0m") == "qwen-web/qwen3.6-max-preview"
+    assert normalize_model_id("qwen-web/qwen3.6-max-preview[1m]") == "qwen-web/qwen3.6-max-preview"
+    assert normalize_model_id("[1mqwen-web/qwen3.6-max-preview[0m") == "qwen-web/qwen3.6-max-preview"
+
+
+def test_models_response_normalizes_upstream_model_ids() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/models"):
+            return httpx.Response(
+                200,
+                json={
+                    "object": "list",
+                    "data": [
+                        {"id": "web-model[1m]", "object": "model"},
+                        {"id": "\x1b[1mqwen-web/qwen3.6-max-preview\x1b[0m", "object": "model"},
+                    ],
+                },
+                request=request,
+            )
+        return httpx.Response(404, request=request)
+
+    client = _client(handler)
+
+    response = client.get("/v1/models", headers=_headers())
+
+    assert response.status_code == 200
+    model_ids = [item["id"] for item in response.json()["data"]]
+    assert "web-model" in model_ids
+    assert "web-model[1m]" not in model_ids
+    assert model_ids.count("qwen-web/qwen3.6-max-preview") == 1
+
+
+def test_chat_request_normalizes_model_id_before_upstream_dispatch() -> None:
+    seen_payloads: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/chat/completions"):
+            seen_payloads.append(json.loads(request.content.decode("utf-8")))
+            return httpx.Response(200, json=_openai_response("ok"), request=request)
+        return httpx.Response(404, request=request)
+
+    client = _client(handler)
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers=_headers(),
+        json={"model": "web-model[1m]", "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    assert response.status_code == 200
+    assert seen_payloads[0]["model"] == "web-model"
+
+
+def test_anthropic_messages_normalizes_model_id_before_upstream_dispatch() -> None:
+    seen_payloads: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/chat/completions"):
+            seen_payloads.append(json.loads(request.content.decode("utf-8")))
+            return httpx.Response(200, json=_openai_response("ok"), request=request)
+        return httpx.Response(404, request=request)
+
+    client = _client(handler)
+
+    response = client.post(
+        "/v1/messages",
+        headers=_headers(),
+        json={"model": "web-model[1m]", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 64},
+    )
+
+    assert response.status_code == 200
+    assert seen_payloads[0]["model"] == "web-model"
+    assert response.json()["model"] == "web-model"
 
 
 def test_deepseek_web_catalog_prefers_v4_pro_models() -> None:
@@ -13328,7 +13405,7 @@ def test_deepseek_official_v4_pro_id_uses_saved_web_credentials(tmp_path: Path) 
 
     assert response.status_code == 200
     assert seen["credential"]["bearer"] == "bearer-secret"
-    assert seen["payload"]["model"] == "deepseek-v4-pro[1m]"
+    assert seen["payload"]["model"] == "deepseek-v4-pro"
     assert response.json()["choices"][0]["message"]["content"] == "来自 V4 Pro 网页模型"
 
 
@@ -19250,6 +19327,36 @@ def test_qwen_web_direct_payload_keeps_current_task_anchor_when_bridge_disabled(
     assert response.status_code == 200
     assert seen_payloads
     assert seen_payloads[0]["_webai_current_task_text"] == "What are the latest versions for openclaw and hermes-agent?"
+
+
+def test_qwen_web_route_normalizes_model_id_before_provider_dispatch(tmp_path: Path) -> None:
+    seen_payloads: list[dict[str, Any]] = []
+
+    class CapturingQwenClient:
+        def __init__(self, credential: dict[str, Any], http_client: httpx.Client | None = None, **_: Any) -> None:
+            self.credential = credential
+
+        def chat_completions(self, payload: dict[str, Any]) -> dict[str, Any]:
+            seen_payloads.append(payload)
+            return _openai_response("ok")
+
+    client = TestClient(
+        create_app(
+            config=_config(),
+            credential_store=_credential_store(tmp_path),
+            qwen_client_factory=CapturingQwenClient,
+            http_client=_not_found_client(),
+        )
+    )
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers=_headers(),
+        json={"model": "qwen-web/qwen3.6-max-preview[1m]", "messages": [{"role": "user", "content": "你好"}]},
+    )
+
+    assert response.status_code == 200
+    assert seen_payloads[0]["model"] == "qwen-web/qwen3.6-max-preview"
 
 
 def test_qwen_coder_client_retries_metadata_only_phase_response() -> None:

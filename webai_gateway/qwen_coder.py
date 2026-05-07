@@ -9,6 +9,7 @@ from typing import Any
 
 import httpx
 
+from .model_ids import normalize_model_id
 from .prompt_compaction import (
     STATELESS_WEB_API_GUARD,
     compact_role_messages_as_ds2api_history,
@@ -61,10 +62,11 @@ QWEN_CODER_METADATA_RETRY_INSTRUCTION = (
 
 
 def is_qwen_coder_model(model: Any) -> bool:
-    return isinstance(model, str) and model.startswith(QWEN_CODER_MODEL_PREFIX)
+    return normalize_model_id(model).startswith(QWEN_CODER_MODEL_PREFIX)
 
 
 def normalize_qwen_coder_model(model: str) -> str:
+    model = normalize_model_id(model)
     normalized = model.removeprefix(QWEN_CODER_MODEL_PREFIX) or "qwen3-coder-plus"
     return QWEN_CODER_MODEL_ALIASES.get(normalized, normalized)
 

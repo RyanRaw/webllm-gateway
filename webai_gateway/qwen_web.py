@@ -9,6 +9,7 @@ from typing import Any
 
 import httpx
 
+from .model_ids import normalize_model_id
 from .prompt_compaction import (
     STATELESS_WEB_API_GUARD,
     compact_role_messages_as_ds2api_history,
@@ -33,10 +34,11 @@ _TOOL_CALLS_MARKUP_RE = re.compile(
 
 
 def is_qwen_web_model(model: Any) -> bool:
-    return isinstance(model, str) and model.startswith(QWEN_MODEL_PREFIX)
+    return normalize_model_id(model).startswith(QWEN_MODEL_PREFIX)
 
 
 def normalize_qwen_model(model: str) -> str:
+    model = normalize_model_id(model)
     return model.removeprefix(QWEN_MODEL_PREFIX) or "qwen3.5-plus"
 
 
