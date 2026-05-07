@@ -99,6 +99,15 @@ WEBAI2API_BROWSER_NOT_READY_MARKERS = (
     "no selectable models",
     "model menu is empty",
 )
+WEBAI2API_MODEL_UNAVAILABLE_MARKERS = (
+    "无法选择 ChatGPT 模型",
+    "未检测到 Thinking",
+    "账号不支持该模型",
+    "当前页面可用模型：未检测到可选模型",
+    "does not support this model",
+    "no selectable model",
+    "no selectable models",
+)
 REQUEST_DIAGNOSTIC_LIMIT = 200
 TOOL_CALL_REGISTRY_LIMIT = 512
 OFF_TASK_QUESTION_ERROR_KINDS = {
@@ -1259,6 +1268,7 @@ def create_app(
                     )
                     if retry_response.status_code >= 400:
                         message = _upstream_http_error_message(retry_response)
+                        gateway_status_code = _gateway_status_code_for_upstream_http_error(retry_response)
                         _record_completion_error_diagnostic(
                             app,
                             endpoint="/v1/chat/completions",
@@ -1267,13 +1277,13 @@ def create_app(
                             body=body,
                             stream=True,
                             bridge=bridge,
-                            status_code=retry_response.status_code,
+                            status_code=gateway_status_code,
                             error_kind="upstream_http_error",
                             error=RuntimeError(message),
                             bridge_context=bridge_context,
                         )
                         raise HTTPException(
-                            status_code=502,
+                            status_code=gateway_status_code,
                             detail=_preview_text(_redact_sensitive_text(message), max_chars=800),
                         )
                     retry_data = retry_response.json()
@@ -1351,6 +1361,7 @@ def create_app(
             )
             if retry_response.status_code >= 400:
                 message = _upstream_http_error_message(retry_response)
+                gateway_status_code = _gateway_status_code_for_upstream_http_error(retry_response)
                 _record_completion_error_diagnostic(
                     app,
                     endpoint="/v1/chat/completions",
@@ -1359,13 +1370,13 @@ def create_app(
                     body=body,
                     stream=bool(body.get("stream")),
                     bridge=bridge,
-                    status_code=retry_response.status_code,
+                    status_code=gateway_status_code,
                     error_kind="upstream_http_error",
                     error=RuntimeError(message),
                     bridge_context=bridge_context,
                 )
                 raise HTTPException(
-                    status_code=502,
+                    status_code=gateway_status_code,
                     detail=_preview_text(_redact_sensitive_text(message), max_chars=800),
                 )
             retry_data = retry_response.json()
@@ -1477,6 +1488,7 @@ def create_app(
                 )
                 if response.status_code >= 400:
                     message = _upstream_http_error_message(response)
+                    gateway_status_code = _gateway_status_code_for_upstream_http_error(response)
                     _record_completion_error_diagnostic(
                         app,
                         endpoint="/v1/messages",
@@ -1485,13 +1497,13 @@ def create_app(
                         body=openai_body,
                         stream=bool(body.get("stream")),
                         bridge=bridge,
-                        status_code=response.status_code,
+                        status_code=gateway_status_code,
                         error_kind="upstream_http_error",
                         error=RuntimeError(message),
                         bridge_context=bridge_context,
                     )
                     raise HTTPException(
-                        status_code=502,
+                        status_code=gateway_status_code,
                         detail=_preview_text(_redact_sensitive_text(message), max_chars=800),
                     )
                 data = response.json()
@@ -1507,6 +1519,7 @@ def create_app(
                     )
                     if retry_response.status_code >= 400:
                         message = _upstream_http_error_message(retry_response)
+                        gateway_status_code = _gateway_status_code_for_upstream_http_error(retry_response)
                         _record_completion_error_diagnostic(
                             app,
                             endpoint="/v1/messages",
@@ -1515,13 +1528,13 @@ def create_app(
                             body=openai_body,
                             stream=bool(body.get("stream")),
                             bridge=bridge,
-                            status_code=retry_response.status_code,
+                            status_code=gateway_status_code,
                             error_kind="upstream_http_error",
                             error=RuntimeError(message),
                             bridge_context=bridge_context,
                         )
                         raise HTTPException(
-                            status_code=502,
+                            status_code=gateway_status_code,
                             detail=_preview_text(_redact_sensitive_text(message), max_chars=800),
                         )
                     retry_data = retry_response.json()
@@ -2534,6 +2547,7 @@ def _openai_upstream_http_error_response(
     response: httpx.Response,
     bridge_context: Any | None = None,
 ) -> JSONResponse:
+    status_code = _gateway_status_code_for_upstream_http_error(response)
     return _openai_completion_error_response(
         app,
         endpoint=endpoint,
@@ -2542,7 +2556,7 @@ def _openai_upstream_http_error_response(
         model=model,
         stream=stream,
         bridge=bridge,
-        status_code=502,
+        status_code=status_code,
         diagnostic_status_code=response.status_code,
         error_kind="upstream_http_error",
         message=_upstream_http_error_message(response),
@@ -2564,6 +2578,20 @@ def _openai_error_type(status_code: int) -> str:
     if status_code >= 500:
         return "api_error"
     return "invalid_request_error"
+
+
+def _gateway_status_code_for_upstream_http_error(response: httpx.Response) -> int:
+    if _is_webai2api_model_unavailable_response(response):
+        return 400
+    return 502
+
+
+def _is_webai2api_model_unavailable_response(response: httpx.Response) -> bool:
+    if response.status_code not in {400, 403, 500, 502, 503, 504}:
+        return False
+    preview = _extract_upstream_error_preview(response)
+    lowered = preview.lower()
+    return any(marker in preview or marker in lowered for marker in WEBAI2API_MODEL_UNAVAILABLE_MARKERS)
 
 
 def _upstream_http_error_message(response: httpx.Response) -> str:

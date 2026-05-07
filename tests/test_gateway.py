@@ -1831,9 +1831,53 @@ def test_webai2api_upstream_does_not_retry_permanent_model_unsupported(
         json={"model": "gpt-thinking", "max_tokens": 512, "messages": [{"role": "user", "content": "hello"}]},
     )
 
-    assert response.status_code == 502
+    assert response.status_code == 400
     assert len(seen_payloads) == 1
     assert sleep_delays == []
+
+
+def test_webai2api_upstream_empty_model_menu_returns_non_retryable_model_error_after_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen_payloads: list[dict[str, Any]] = []
+    sleep_delays: list[float] = []
+    unavailable_detail = (
+        "所有支持该模型的适配器都无法使用: 无法选择 ChatGPT 模型 Thinking。"
+        "当前页面可用模型：未检测到可选模型。未检测到 Thinking；"
+        "如果页面显示 Upgrade/Get Plus，说明当前 ChatGPT 账号不支持该模型。"
+        "请改用 gpt-instant，或在账号升级后重新启用该模型。"
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode("utf-8"))
+        seen_payloads.append(payload)
+        return httpx.Response(502, json={"detail": unavailable_detail}, request=request)
+
+    import webai_gateway.app as gateway_app
+
+    monkeypatch.setattr(gateway_app.time, "sleep", lambda seconds: sleep_delays.append(seconds))
+
+    client = TestClient(
+        create_app(
+            config=GatewayConfig(
+                server=ServerConfig(api_key="local-dev-key"),
+                upstream=UpstreamConfig(base_url="http://127.0.0.1:8500/v1", model="gpt-thinking"),
+                tool_bridge=ToolBridgeConfig(activation_policy="auto"),
+            ),
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+    )
+
+    response = client.post(
+        "/v1/messages",
+        headers={**_headers(), "anthropic-version": "2023-06-01"},
+        json={"model": "gpt-thinking", "max_tokens": 512, "messages": [{"role": "user", "content": "hello"}]},
+    )
+
+    assert response.status_code == 400
+    assert len(seen_payloads) == 1 + len(gateway_app.WEBAI2API_BROWSER_READY_RETRY_DELAYS_SECONDS)
+    assert sleep_delays == list(gateway_app.WEBAI2API_BROWSER_READY_RETRY_DELAYS_SECONDS)
+    assert "WebAI2API upstream returned HTTP 502" in response.text
 
 
 def test_webai2api_upstream_repairs_agent_description_only_tool_call() -> None:
