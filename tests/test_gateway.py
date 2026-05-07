@@ -316,6 +316,23 @@ def test_tool_bridge_repairs_terse_chinese_confirmation_without_tool_call() -> N
     assert result.tool_calls == []
 
 
+def test_tool_bridge_repairs_minimal_chinese_confirmation_fragment_without_tool_call() -> None:
+    context = _controller_context_with_tools(
+        ["Read", "Edit", "Write"],
+        task_text=(
+            "\u8bbe\u7f6e claude code \u4ee5\u540e\u8f93\u5165 claude "
+            "\u540e\u81ea\u52a8\u4ee5 bypass permissions \u65b9\u5f0f\u542f\u52a8"
+        ),
+    )
+
+    result = parse_tool_response("\u4f60\u5417\uff1f", context)
+
+    assert result.error is not None
+    assert result.error.kind == "premature_clarification_without_tool_call"
+    assert result.error.repairable is True
+    assert result.tool_calls == []
+
+
 def test_tool_bridge_repairs_gpt_thinking_calls_array_colon_fragment() -> None:
     context = _controller_context_with_tools(["get_weather"])
 
@@ -2314,6 +2331,75 @@ def test_webai2api_gpt_thinking_repairs_terse_chinese_confirmation_to_tool_use()
             return httpx.Response(
                 200,
                 json=_openai_response("\u4f60\u662f\u60f3\u5417\uff1f"),
+                request=request,
+            )
+        return httpx.Response(
+            200,
+            json=_openai_response(
+                '<|DSML|tool_calls><|DSML|invoke name="Read">'
+                '<|DSML|parameter name="file_path"><![CDATA[C:/Users/test/.claude/settings.json]]></|DSML|parameter>'
+                "</|DSML|invoke></|DSML|tool_calls>"
+            ),
+            request=request,
+        )
+
+    client = TestClient(
+        create_app(
+            config=GatewayConfig(
+                server=ServerConfig(api_key="local-dev-key"),
+                upstream=UpstreamConfig(base_url="http://127.0.0.1:8500/v1", model="gpt-thinking"),
+                tool_bridge=ToolBridgeConfig(activation_policy="auto", exposure_policy="all", tool_profile="all"),
+            ),
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+    )
+
+    response = client.post(
+        "/v1/messages",
+        headers={**_headers(), "anthropic-version": "2023-06-01"},
+        json={
+            "model": "chatgpt_text/gpt-thinking",
+            "max_tokens": 32000,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": (
+                        "\u4f60\u5e2e\u6211 \u8bbe\u7f6e claude code \u4ee5\u540e"
+                        "\u8f93\u5165 claude \u540e\u81ea\u52a8\u4ee5 bypass permissions "
+                        "\u65b9\u5f0f\u542f\u52a8"
+                    ),
+                }
+            ],
+            "tools": [
+                {"name": "Read", "description": "Read files", "input_schema": {"type": "object"}},
+                {"name": "Edit", "description": "Edit files", "input_schema": {"type": "object"}},
+                {"name": "Write", "description": "Write files", "input_schema": {"type": "object"}},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(seen_payloads) == 2
+    retry_prompt = "\n".join(str(message.get("content", "")) for message in seen_payloads[1]["messages"])
+    assert "premature_clarification_without_tool_call" in retry_prompt
+    assert "Do not ask the user" in retry_prompt
+    tool_use = response.json()["content"][0]
+    assert tool_use["type"] == "tool_use"
+    assert tool_use["id"].startswith("toolu_")
+    assert tool_use["name"] == "Read"
+    assert tool_use["input"] == {"file_path": "C:/Users/test/.claude/settings.json"}
+
+
+def test_webai2api_gpt_thinking_repairs_minimal_chinese_confirmation_fragment_to_tool_use() -> None:
+    seen_payloads: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode("utf-8"))
+        seen_payloads.append(payload)
+        if len(seen_payloads) == 1:
+            return httpx.Response(
+                200,
+                json=_openai_response("\u4f60\u5417\uff1f"),
                 request=request,
             )
         return httpx.Response(
