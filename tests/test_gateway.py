@@ -1756,7 +1756,14 @@ def test_webai2api_upstream_retries_transient_browser_not_ready_before_returning
         if len(seen_payloads) == 1:
             return httpx.Response(
                 502,
-                json={"detail": "所有候选都失败: 所有支持该模型的适配器都无法使用: 页面加载超时"},
+                json={
+                    "detail": (
+                        "所有候选都失败: 无法选择 ChatGPT 模型 Thinking。"
+                        "当前页面可用模型：未检测到可选模型。未检测到 Thinking；"
+                        "如果页面显示 Upgrade/Get Plus，说明当前 ChatGPT 账号不支持该模型。"
+                        "请改用 gpt-instant，或在账号升级后重新启用该模型。"
+                    )
+                },
                 request=request,
             )
         return httpx.Response(200, json=_openai_response("camoufox-ready"), request=request)

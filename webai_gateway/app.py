@@ -99,12 +99,6 @@ WEBAI2API_BROWSER_NOT_READY_MARKERS = (
     "no selectable models",
     "model menu is empty",
 )
-WEBAI2API_PERMANENT_MODEL_ERROR_MARKERS = (
-    "当前账号不支持该模型",
-    "账号不支持该模型",
-    "please run /login",
-    "request not allowed",
-)
 REQUEST_DIAGNOSTIC_LIMIT = 200
 TOOL_CALL_REGISTRY_LIMIT = 512
 OFF_TASK_QUESTION_ERROR_KINDS = {
@@ -2231,9 +2225,12 @@ def _is_webai2api_transient_browser_not_ready_response(response: httpx.Response)
         return False
     preview = _extract_upstream_error_preview(response)
     lowered = preview.lower()
-    if any(marker in lowered for marker in WEBAI2API_PERMANENT_MODEL_ERROR_MARKERS):
-        return False
-    return any(marker in preview or marker in lowered for marker in WEBAI2API_BROWSER_NOT_READY_MARKERS)
+    has_browser_not_ready_marker = any(
+        marker in preview or marker in lowered for marker in WEBAI2API_BROWSER_NOT_READY_MARKERS
+    )
+    if has_browser_not_ready_marker:
+        return True
+    return False
 
 
 def _webai2api_login_mode_recovery_allowed(app: FastAPI) -> bool:
