@@ -501,6 +501,14 @@ _OPTIONAL_LOCAL_ACTION_CONFIRMATION_RE = re.compile(
     r")",
     re.IGNORECASE | re.DOTALL,
 )
+_TERSE_OPTIONAL_LOCAL_ACTION_CONFIRMATION_RE = re.compile(
+    r"^\s*"
+    r"(?:\u4f60|\u60a8)?(?:\u662f)?"
+    r"(?:\u60f3|\u8981|\u9700\u8981|\u5e0c\u671b|\u786e\u8ba4|\u662f\u5426)"
+    r".{0,40}(?:\u5417|\u4e48|\uff1f|\?)"
+    r"\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
 _OPTIONAL_LOCAL_METHOD_SELECTION_RE = re.compile(
     r"("
     r"(?:\u4f60|\u60a8).{0,80}(?:\u60f3|\u5e0c\u671b|\u8981)"
@@ -5784,7 +5792,9 @@ def _looks_like_optional_local_action_confirmation(text: str, context: ToolBridg
     raw = (text or "").strip()
     if not raw or len(raw) > 1200:
         return False
-    if not _OPTIONAL_LOCAL_ACTION_CONFIRMATION_RE.search(raw):
+    matches_confirmation = _OPTIONAL_LOCAL_ACTION_CONFIRMATION_RE.search(raw)
+    matches_terse_confirmation = len(raw) <= 80 and _TERSE_OPTIONAL_LOCAL_ACTION_CONFIRMATION_RE.match(raw)
+    if not (matches_confirmation or matches_terse_confirmation):
         return False
     if not (
         context.has_tool_loop
