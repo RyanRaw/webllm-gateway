@@ -480,8 +480,8 @@ def test_ds2api_differential_openai_stream_format(ds2api_runner: Path) -> None:
 
 def test_ds2api_reference_commits_are_documented() -> None:
     assert_oracle_is_latest()
-    assert DS2API_MAIN_COMMIT == "aa2908403816e68c7a8b340c0481a2bf6b118f87"
-    assert DS2API_ORACLE_VERSION == "4.4.3"
+    assert DS2API_MAIN_COMMIT == "66e0fa568fc851a160280f7b49bce3f9a92646b5"
+    assert DS2API_ORACLE_VERSION == "4.4.4"
 
 
 def test_ds2api_parity_accepts_hyphenated_dsml_but_rejects_bare_hyphenated_xml() -> None:
