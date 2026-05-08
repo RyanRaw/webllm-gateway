@@ -23,6 +23,7 @@ from webai_gateway.tool_bridge import (
     ToolBridgeContext,
     build_context,
     build_local_repo_preflight_tool_call,
+    build_skill_loader_preflight_tool_call,
     build_repair_messages,
     extract_tool_calls,
     looks_like_tool_protocol_output,
@@ -327,6 +328,24 @@ def build_preflight_chat_response(model: str, bridge_context: ToolBridgeContext)
     call = build_local_repo_preflight_tool_call(bridge_context)
     if call is None:
         return None
+    return _tool_call_preflight_chat_response(model, bridge_context, call)
+
+
+def build_skill_loader_preflight_chat_response(
+    model: str,
+    bridge_context: ToolBridgeContext,
+) -> dict[str, Any] | None:
+    call = build_skill_loader_preflight_tool_call(bridge_context)
+    if call is None:
+        return None
+    return _tool_call_preflight_chat_response(model, bridge_context, call)
+
+
+def _tool_call_preflight_chat_response(
+    model: str,
+    bridge_context: ToolBridgeContext,
+    call: Any,
+) -> dict[str, Any]:
     return {
         "id": f"chatcmpl-{uuid.uuid4().hex}",
         "object": "chat.completion",

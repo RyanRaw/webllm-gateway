@@ -1276,6 +1276,97 @@ def build_local_repo_preflight_tool_call(context: ToolBridgeContext) -> ToolCall
     )
 
 
+_NON_SKILL_SLASH_COMMANDS = frozenset(
+    {
+        "clear",
+        "compact",
+        "exit",
+        "help",
+        "init",
+        "login",
+        "logout",
+        "model",
+        "permissions",
+        "plan",
+        "review",
+        "status",
+    }
+)
+_SKILL_SLASH_COMMAND_RE = re.compile(
+    r"^\s*/(?P<skill>[A-Za-z0-9_.:@-]{2,120})(?:\s+(?P<args>[\s\S]*?))?\s*$"
+)
+
+
+def build_skill_loader_preflight_tool_call(context: ToolBridgeContext) -> ToolCallDraft | None:
+    if not context.enabled:
+        return None
+    tool = _select_skill_loader_tool(context.tools)
+    if tool is None:
+        return None
+    command = _skill_loader_slash_command(context.task_text)
+    if command is None:
+        return None
+    skill_name, args = command
+    return ToolCallDraft(
+        id="call_skill_slash_1",
+        name=tool.name,
+        input=_skill_loader_input_for_schema(tool, skill_name, args),
+    )
+
+
+def _select_skill_loader_tool(tools: list[ToolSpec]) -> ToolSpec | None:
+    for tool in tools:
+        if _compact_tool_name(tool.name) == "skill":
+            return tool
+    return None
+
+
+def _skill_loader_slash_command(text: str) -> tuple[str, str] | None:
+    first_line = next((line.strip() for line in (text or "").splitlines() if line.strip()), "")
+    match = _SKILL_SLASH_COMMAND_RE.match(first_line)
+    if not match:
+        return None
+    skill_name = (match.group("skill") or "").strip()
+    compact = _compact_tool_name(skill_name)
+    if (
+        compact in _NON_SKILL_SLASH_COMMANDS
+        or (":" not in skill_name and "-" not in skill_name and "skill" not in compact)
+    ):
+        return None
+    return skill_name, (match.group("args") or "").strip()
+
+
+def _skill_loader_input_for_schema(tool: ToolSpec, skill_name: str, args: str) -> dict[str, Any]:
+    schema = tool.input_schema if isinstance(tool.input_schema, dict) else {}
+    properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+    required = schema.get("required") if isinstance(schema.get("required"), list) else []
+
+    key = _first_schema_key(("skill", "skill_name", "skillName", "name"), properties, required) or "skill"
+    out: dict[str, Any] = {key: skill_name}
+    if args:
+        args_key = _first_schema_key(("args", "arguments", "argument", "input"), properties, required)
+        if args_key:
+            out[args_key] = args
+        elif not properties:
+            out["args"] = args
+    return out
+
+
+def _first_schema_key(
+    candidates: tuple[str, ...],
+    properties: dict[str, Any],
+    required: list[Any],
+) -> str:
+    required_names = {str(name) for name in required if isinstance(name, str)}
+    for key in candidates:
+        if key in required_names:
+            return key
+    for key in candidates:
+        if key in properties:
+            return key
+    return ""
+
+
 def normalize_openai_tools(tools: Any, *, max_tools: int = 32) -> list[ToolSpec]:
     if not isinstance(tools, list):
         return []

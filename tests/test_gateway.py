@@ -13635,6 +13635,71 @@ def test_deepseek_anthropic_tool_use_round_trip_uses_native_tool_calls(tmp_path:
     assert block["input"] == {"city": "Beijing"}
 
 
+def test_deepseek_anthropic_skill_slash_preflights_to_skill_tool(tmp_path: Path) -> None:
+    class UnexpectedDeepSeekClient:
+        def __init__(self, credential: dict[str, Any], **_: Any) -> None:
+            self.credential = credential
+
+        def chat_completions(self, payload: dict[str, Any]) -> dict[str, Any]:
+            raise AssertionError("skill slash preflight should not call ds2api")
+
+    store = CredentialStore(tmp_path / "credentials")
+    store.save(
+        "deepseek-web",
+        {
+            "cookie": "ds_session_id=session-secret",
+            "bearer": "bearer-secret",
+            "userAgent": "Chrome Test",
+        },
+    )
+    client = TestClient(
+        create_app(
+            config=GatewayConfig(
+                server=ServerConfig(api_key="local-dev-key"),
+                upstream=UpstreamConfig(base_url="http://upstream.test/v1", model="web-model"),
+                tool_bridge=ToolBridgeConfig(exposure_policy="local-agent", max_tools_in_prompt=32),
+            ),
+            credential_store=store,
+            deepseek_client_factory=UnexpectedDeepSeekClient,
+            http_client=_not_found_client(),
+        )
+    )
+
+    response = client.post(
+        "/v1/messages",
+        headers={**_headers(), "anthropic-version": "2023-06-01"},
+        json={
+            "model": "deepseek-v4-pro",
+            "max_tokens": 256,
+            "messages": [{"role": "user", "content": "/superpowers:using-superpowers"}],
+            "tools": [
+                {
+                    "name": "Skill",
+                    "description": "Load an available skill",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"skill": {"type": "string"}, "args": {"type": "string"}},
+                        "required": ["skill"],
+                    },
+                },
+                {"name": "Read", "description": "Read files", "input_schema": {"type": "object"}},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["stop_reason"] == "tool_use"
+    assert body["content"] == [
+        {
+            "type": "tool_use",
+            "id": "toolu_call_skill_slash_1",
+            "name": "Skill",
+            "input": {"skill": "superpowers:using-superpowers"},
+        }
+    ]
+
+
 def test_qwen_web_client_uses_qwen_chat_api_and_parses_stream() -> None:
     seen: dict[str, Any] = {}
 

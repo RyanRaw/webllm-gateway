@@ -43,6 +43,7 @@ from webai_gateway.openai_api import (
     build_preflight_chat_response,
     build_repair_payload,
     build_required_tool_choice_recovery_payload,
+    build_skill_loader_preflight_chat_response,
     build_tool_refusal_recovery_payload,
     build_unknown_tool_recovery_payload,
     build_virtual_loader_tool_recovery_payload,
@@ -69,7 +70,13 @@ from webai_gateway.anthropic_api import (
 from webai_gateway.qwen_web import QwenWebClient, is_qwen_web_model
 from webai_gateway.qwen_coder import QwenCoderClient, is_qwen_coder_model
 from webai_gateway.semantic_judge import judge_bridge_semantics
-from webai_gateway.tool_bridge import BridgeError, BridgeResult, build_context, parse_tool_response
+from webai_gateway.tool_bridge import (
+    BridgeError,
+    BridgeResult,
+    build_context,
+    parse_tool_response,
+    prefer_local_tools_for_local_agent_task,
+)
 from webai_gateway.web_auth import (
     DEFAULT_CDP_URL,
     BrowserLauncher,
@@ -4253,9 +4260,10 @@ def _deepseek_web_chat(app: FastAPI, client: httpx.Client, body: dict[str, Any],
         raise HTTPException(status_code=401, detail="请先在控制台重新完成 DeepSeek 网页登录授权，确保已捕获 bearer token")
     payload, bridge, allowed_tools, bridge_context = _build_deepseek_direct_payload(body, config)
     model = str(payload.get("model") or DEEPSEEK_DEFAULT_MODEL)
-    preflight = _local_preflight_response(app, body, model, bridge_context)
-    if preflight is not None:
-        return preflight
+    preflight_data = build_skill_loader_preflight_chat_response(model, bridge_context)
+    if preflight_data is not None:
+        _record_tool_bridge_event(app, "skill_loader_preflight", model=model, **_tool_call_event_fields(preflight_data))
+        return JSONResponse(preflight_data)
     _record_completion_started_diagnostic(
         app,
         endpoint="/v1/chat/completions",
@@ -4745,7 +4753,18 @@ def _build_deepseek_direct_payload(
         config.provider_runtime.response_language,
     )
     bridge_mode = (config.tool_bridge.mode or config.upstream.tool_mode or "strict").strip().lower()
-    bridge_context = build_context([], config.tool_bridge, mode=bridge_mode, model=model)
+    bridge_context = build_context(
+        payload.get("tools"),
+        config.tool_bridge,
+        mode=bridge_mode,
+        model=model,
+        tool_choice=payload.get("tool_choice"),
+    )
+    bridge_context = prefer_local_tools_for_local_agent_task(
+        bridge_context,
+        payload.get("messages"),
+        tool_choice=payload.get("tool_choice"),
+    )
     return payload, False, set(), bridge_context
 
 
