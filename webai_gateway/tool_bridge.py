@@ -1298,7 +1298,7 @@ _SKILL_SLASH_COMMAND_RE = re.compile(
 
 
 def build_skill_loader_preflight_tool_call(context: ToolBridgeContext) -> ToolCallDraft | None:
-    if not context.enabled:
+    if not context.enabled or context.has_tool_loop:
         return None
     tool = _select_skill_loader_tool(context.tools)
     if tool is None:

@@ -3232,6 +3232,24 @@ def _redact_sensitive_text(value: str) -> str:
     return _SENSITIVE_ASSIGNMENT_RE.sub(r"\1[redacted]", redacted)
 
 
+def _redact_known_sensitive_values(value: str, sensitive_values: Any) -> str:
+    redacted = value or ""
+    for item in sensitive_values or ():
+        text = str(item or "").strip()
+        if len(text) < 6:
+            continue
+        redacted = redacted.replace(text, "[redacted]")
+        if "=" not in text and ";" not in text:
+            continue
+        for part in text.split(";"):
+            if "=" not in part:
+                continue
+            cookie_value = part.split("=", 1)[1].strip()
+            if len(cookie_value) >= 6:
+                redacted = redacted.replace(cookie_value, "[redacted]")
+    return redacted
+
+
 def _preview_text(value: str, *, max_chars: int = 240) -> str:
     text = " ".join((value or "").split())
     if len(text) <= max_chars:
@@ -3318,6 +3336,30 @@ def _local_preflight_response(app: FastAPI, body: dict[str, Any], model: str, br
             media_type="text/event-stream",
         )
     return JSONResponse(preflight_data)
+
+
+def _skill_loader_preflight_response(
+    app: FastAPI,
+    model: str,
+    bridge_context: Any,
+    *,
+    require_namespaced_slash: bool = False,
+) -> Response | None:
+    if require_namespaced_slash and not _looks_like_namespaced_skill_slash(getattr(bridge_context, "task_text", "")):
+        return None
+    preflight_data = build_skill_loader_preflight_chat_response(model, bridge_context)
+    if preflight_data is None:
+        return None
+    _record_tool_bridge_event(app, "skill_loader_preflight", model=model, **_tool_call_event_fields(preflight_data))
+    return JSONResponse(preflight_data)
+
+
+def _looks_like_namespaced_skill_slash(text: str) -> bool:
+    first_line = next((line.strip() for line in (text or "").splitlines() if line.strip()), "")
+    if not first_line.startswith("/"):
+        return False
+    command = first_line.split(None, 1)[0]
+    return ":" in command
 
 
 def _parse_bridge_chat_data(
@@ -4260,10 +4302,9 @@ def _deepseek_web_chat(app: FastAPI, client: httpx.Client, body: dict[str, Any],
         raise HTTPException(status_code=401, detail="请先在控制台重新完成 DeepSeek 网页登录授权，确保已捕获 bearer token")
     payload, bridge, allowed_tools, bridge_context = _build_deepseek_direct_payload(body, config)
     model = str(payload.get("model") or DEEPSEEK_DEFAULT_MODEL)
-    preflight_data = build_skill_loader_preflight_chat_response(model, bridge_context)
-    if preflight_data is not None:
-        _record_tool_bridge_event(app, "skill_loader_preflight", model=model, **_tool_call_event_fields(preflight_data))
-        return JSONResponse(preflight_data)
+    skill_preflight = _skill_loader_preflight_response(app, model, bridge_context, require_namespaced_slash=True)
+    if skill_preflight is not None:
+        return skill_preflight
     _record_completion_started_diagnostic(
         app,
         endpoint="/v1/chat/completions",
@@ -4401,6 +4442,9 @@ def _qwen_web_chat(app: FastAPI, client: httpx.Client, body: dict[str, Any], con
         provider_native_web_search=True,
     )
     model = str(payload.get("model") or "qwen-web/qwen3.5-plus")
+    skill_preflight = _skill_loader_preflight_response(app, model, bridge_context, require_namespaced_slash=True)
+    if skill_preflight is not None:
+        return skill_preflight
     preflight = _local_preflight_response(app, body, model, bridge_context)
     if preflight is not None:
         return preflight
@@ -4420,6 +4464,21 @@ def _qwen_web_chat(app: FastAPI, client: httpx.Client, body: dict[str, Any], con
         data = web_client.chat_completions(payload)
     except HTTPException:
         raise
+    except httpx.HTTPStatusError as exc:
+        _raise_direct_provider_http_status_error(
+            app,
+            exc,
+            endpoint="/v1/chat/completions",
+            route="qwen-web",
+            provider_label="Qwen Web",
+            model=model,
+            body=body,
+            stream=bool(body.get("stream")),
+            bridge=bridge,
+            bridge_context=bridge_context,
+            provider_diagnostic=getattr(web_client, "last_diagnostic", None),
+            sensitive_values=(credential.get("bearer"), credential.get("cookie")),
+        )
     except (TimeoutError, httpx.TimeoutException) as exc:
         provider_diagnostic = _merge_provider_diagnostics(
             getattr(web_client, "last_diagnostic", None), getattr(exc, "diagnostic", None)
@@ -4462,6 +4521,21 @@ def _qwen_web_chat(app: FastAPI, client: httpx.Client, body: dict[str, Any], con
         )
     except HTTPException:
         raise
+    except httpx.HTTPStatusError as exc:
+        _raise_direct_provider_http_status_error(
+            app,
+            exc,
+            endpoint="/v1/chat/completions",
+            route="qwen-web",
+            provider_label="Qwen Web",
+            model=model,
+            body=body,
+            stream=bool(body.get("stream")),
+            bridge=bridge,
+            bridge_context=bridge_context,
+            provider_diagnostic=getattr(web_client, "last_diagnostic", None),
+            sensitive_values=(credential.get("bearer"), credential.get("cookie")),
+        )
     except (TimeoutError, httpx.TimeoutException) as exc:
         provider_diagnostic = _merge_provider_diagnostics(
             getattr(web_client, "last_diagnostic", None), getattr(exc, "diagnostic", None)
@@ -4544,6 +4618,9 @@ def _qwen_coder_chat(app: FastAPI, client: httpx.Client, body: dict[str, Any], c
         provider_native_web_search=True,
     )
     model = str(payload.get("model") or "qwen-coder/qwen-coder-plus")
+    skill_preflight = _skill_loader_preflight_response(app, model, bridge_context, require_namespaced_slash=True)
+    if skill_preflight is not None:
+        return skill_preflight
     preflight = _local_preflight_response(app, body, model, bridge_context)
     if preflight is not None:
         return preflight
@@ -4563,6 +4640,21 @@ def _qwen_coder_chat(app: FastAPI, client: httpx.Client, body: dict[str, Any], c
         data = web_client.chat_completions(payload)
     except HTTPException:
         raise
+    except httpx.HTTPStatusError as exc:
+        _raise_direct_provider_http_status_error(
+            app,
+            exc,
+            endpoint="/v1/chat/completions",
+            route="qwen-coder",
+            provider_label="Qwen Coder Web",
+            model=model,
+            body=body,
+            stream=bool(body.get("stream")),
+            bridge=bridge,
+            bridge_context=bridge_context,
+            provider_diagnostic=getattr(web_client, "last_diagnostic", None),
+            sensitive_values=(credential.get("bearer"), credential.get("cookie")),
+        )
     except (TimeoutError, httpx.TimeoutException) as exc:
         provider_diagnostic = _merge_provider_diagnostics(
             getattr(web_client, "last_diagnostic", None), getattr(exc, "diagnostic", None)
@@ -4605,6 +4697,21 @@ def _qwen_coder_chat(app: FastAPI, client: httpx.Client, body: dict[str, Any], c
         )
     except HTTPException:
         raise
+    except httpx.HTTPStatusError as exc:
+        _raise_direct_provider_http_status_error(
+            app,
+            exc,
+            endpoint="/v1/chat/completions",
+            route="qwen-coder",
+            provider_label="Qwen Coder Web",
+            model=model,
+            body=body,
+            stream=bool(body.get("stream")),
+            bridge=bridge,
+            bridge_context=bridge_context,
+            provider_diagnostic=getattr(web_client, "last_diagnostic", None),
+            sensitive_values=(credential.get("bearer"), credential.get("cookie")),
+        )
     except (TimeoutError, httpx.TimeoutException) as exc:
         provider_diagnostic = _merge_provider_diagnostics(
             getattr(web_client, "last_diagnostic", None), getattr(exc, "diagnostic", None)
@@ -4823,6 +4930,46 @@ def _merge_provider_diagnostics(*items: Any) -> dict[str, Any]:
         if isinstance(item, dict):
             merged.update(item)
     return merged
+
+
+def _raise_direct_provider_http_status_error(
+    app: FastAPI,
+    exc: httpx.HTTPStatusError,
+    *,
+    endpoint: str,
+    route: str,
+    provider_label: str,
+    model: str,
+    body: dict[str, Any],
+    stream: bool,
+    bridge: bool,
+    bridge_context: Any,
+    provider_diagnostic: Any = None,
+    sensitive_values: Any = None,
+) -> None:
+    response = exc.response
+    status_code = response.status_code if 400 <= response.status_code <= 599 else 502
+    preview = _extract_upstream_error_preview(response) or response.reason_phrase or "empty response body"
+    message = f"{provider_label} upstream returned HTTP {response.status_code}: {preview}"
+    sanitized = _preview_text(
+        _redact_known_sensitive_values(_redact_sensitive_text(message), sensitive_values),
+        max_chars=800,
+    )
+    _record_completion_error_diagnostic(
+        app,
+        endpoint=endpoint,
+        route=route,
+        model=model,
+        body=body,
+        stream=stream,
+        bridge=bridge,
+        status_code=status_code,
+        error_kind="provider_http_error",
+        error=RuntimeError(sanitized),
+        provider_diagnostic=provider_diagnostic,
+        bridge_context=bridge_context,
+    )
+    raise HTTPException(status_code=status_code, detail=sanitized) from exc
 
 
 def _direct_provider_chat_payload_with_headers(

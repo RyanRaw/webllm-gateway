@@ -13700,6 +13700,118 @@ def test_deepseek_anthropic_skill_slash_preflights_to_skill_tool(tmp_path: Path)
     ]
 
 
+def test_qwen_web_anthropic_skill_slash_preflights_to_skill_tool(tmp_path: Path) -> None:
+    class UnexpectedQwenClient:
+        def __init__(self, credential: dict[str, Any], **_: Any) -> None:
+            self.credential = credential
+
+        def chat_completions(self, payload: dict[str, Any]) -> dict[str, Any]:
+            raise AssertionError("skill slash preflight should not call Qwen Web")
+
+    client = TestClient(
+        create_app(
+            config=GatewayConfig(
+                server=ServerConfig(api_key="local-dev-key"),
+                upstream=UpstreamConfig(base_url="http://upstream.test/v1", model="web-model"),
+                tool_bridge=ToolBridgeConfig(exposure_policy="local-agent", max_tools_in_prompt=32),
+            ),
+            credential_store=_credential_store(tmp_path),
+            qwen_client_factory=UnexpectedQwenClient,
+            http_client=_not_found_client(),
+        )
+    )
+
+    response = client.post(
+        "/v1/messages",
+        headers={**_headers(), "anthropic-version": "2023-06-01"},
+        json={
+            "model": "qwen-web/qwen3.6-plus",
+            "max_tokens": 256,
+            "messages": [{"role": "user", "content": "/superpowers:using-superpowers"}],
+            "tools": [
+                {
+                    "name": "Skill",
+                    "description": "Load an available skill",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"skill": {"type": "string"}, "args": {"type": "string"}},
+                        "required": ["skill"],
+                    },
+                },
+                {"name": "Read", "description": "Read files", "input_schema": {"type": "object"}},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["stop_reason"] == "tool_use"
+    assert body["content"] == [
+        {
+            "type": "tool_use",
+            "id": "toolu_call_skill_slash_1",
+            "name": "Skill",
+            "input": {"skill": "superpowers:using-superpowers"},
+        }
+    ]
+
+
+def test_qwen_coder_anthropic_skill_slash_preflights_to_skill_tool(tmp_path: Path) -> None:
+    class UnexpectedQwenCoderClient:
+        def __init__(self, credential: dict[str, Any], **_: Any) -> None:
+            self.credential = credential
+
+        def chat_completions(self, payload: dict[str, Any]) -> dict[str, Any]:
+            raise AssertionError("skill slash preflight should not call Qwen Coder")
+
+    client = TestClient(
+        create_app(
+            config=GatewayConfig(
+                server=ServerConfig(api_key="local-dev-key"),
+                upstream=UpstreamConfig(base_url="http://upstream.test/v1", model="web-model"),
+                tool_bridge=ToolBridgeConfig(exposure_policy="local-agent", max_tools_in_prompt=32),
+            ),
+            credential_store=_qwen_coder_credential_store(tmp_path),
+            qwen_coder_client_factory=UnexpectedQwenCoderClient,
+            http_client=_not_found_client(),
+        )
+    )
+
+    response = client.post(
+        "/v1/messages",
+        headers={**_headers(), "anthropic-version": "2023-06-01"},
+        json={
+            "model": "qwen-coder/qwen-coder-plus",
+            "max_tokens": 256,
+            "messages": [{"role": "user", "content": "/superpowers:using-superpowers"}],
+            "tools": [
+                {
+                    "name": "Skill",
+                    "description": "Load an available skill",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"skill": {"type": "string"}, "args": {"type": "string"}},
+                        "required": ["skill"],
+                    },
+                },
+                {"name": "Read", "description": "Read files", "input_schema": {"type": "object"}},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["stop_reason"] == "tool_use"
+    assert body["content"] == [
+        {
+            "type": "tool_use",
+            "id": "toolu_call_skill_slash_1",
+            "name": "Skill",
+            "input": {"skill": "superpowers:using-superpowers"},
+        }
+    ]
+
+
 def test_qwen_web_client_uses_qwen_chat_api_and_parses_stream() -> None:
     seen: dict[str, Any] = {}
 
@@ -19527,6 +19639,40 @@ def test_qwen_coder_client_retries_metadata_only_phase_response() -> None:
     assert qwen.last_diagnostic["metadata_retry_count"] == 1
 
 
+def test_qwen_web_client_retries_metadata_only_phase_response() -> None:
+    attempts: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/api/v2/chats/new"):
+            return httpx.Response(200, json={"data": {"id": "chat-test"}}, request=request)
+        if request.url.path.endswith("/api/v2/chat/completions"):
+            attempts.append(json.loads(request.content.decode("utf-8")))
+            if len(attempts) == 1:
+                content = b'data: {"choices":[{"delta":{"content":"{\\"title\\":\\"Review code and plan improvements\\"}","phase":"answer"}}]}\n\ndata: [DONE]\n\n'
+            else:
+                content = b'data: {"choices":[{"delta":{"content":"final answer","phase":"answer"}}]}\n\ndata: [DONE]\n\n'
+            return httpx.Response(200, content=content, request=request, headers={"content-type": "text/event-stream"})
+        return httpx.Response(404, request=request)
+
+    qwen = QwenWebClient(
+        {"cookie": "qwen_session=session-secret", "bearer": "bearer-secret", "userAgent": "Chrome Test"},
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    response = qwen.chat_completions(
+        {
+            "model": "qwen-web/qwen3.6-plus",
+            "messages": [{"role": "user", "content": "review code"}],
+        }
+    )
+
+    assert response["choices"][0]["message"]["content"] == "final answer"
+    assert len(attempts) == 2
+    assert "Do not output JSON metadata" in attempts[1]["messages"][0]["content"]
+    assert qwen.last_diagnostic["metadata_only_response"] is True
+    assert qwen.last_diagnostic["metadata_retry_count"] == 1
+
+
 def test_qwen_web_chat_passes_configured_provider_timeout(tmp_path: Path) -> None:
     seen: dict[str, Any] = {}
 
@@ -19664,6 +19810,49 @@ def test_qwen_web_timeout_returns_gateway_timeout(tmp_path: Path) -> None:
     assert error_event["providerStreamEvents"] == 3
     assert "session-secret" not in json.dumps(error_event)
     assert "bearer-secret" not in json.dumps(error_event)
+
+
+def test_qwen_web_http_status_error_propagates_provider_status(tmp_path: Path) -> None:
+    class RateLimitedQwenClient:
+        def __init__(self, credential: dict[str, Any], http_client: httpx.Client | None = None) -> None:
+            self.credential = credential
+            self.last_diagnostic = {"prompt_chars": 512, "message_count": 1}
+
+        def chat_completions(self, payload: dict[str, Any]) -> dict[str, Any]:
+            request = httpx.Request("POST", "https://chat.qwen.ai/api/v2/chat/completions")
+            response = httpx.Response(
+                429,
+                json={"error": {"message": "quota exceeded bearer-secret qwen_session=session-secret"}},
+                request=request,
+            )
+            raise httpx.HTTPStatusError("rate limited", request=request, response=response)
+
+    client = TestClient(
+        create_app(
+            config=_config(),
+            credential_store=_credential_store(tmp_path),
+            qwen_client_factory=RateLimitedQwenClient,
+            http_client=_not_found_client(),
+        )
+    )
+
+    response = client.post(
+        "/v1/messages",
+        headers={**_headers(), "anthropic-version": "2023-06-01"},
+        json={"model": "qwen-web/qwen3.6-plus", "messages": [{"role": "user", "content": "hello"}], "max_tokens": 1024},
+    )
+
+    assert response.status_code == 429
+    detail = response.json()["detail"]
+    assert "HTTP 429" in detail
+    assert "bearer-secret" not in detail
+    assert "session-secret" not in detail
+    diagnostics = client.get("/api/admin/request-diagnostics").json()["events"]
+    error_event = diagnostics[-1]
+    assert error_event["kind"] == "completion_error"
+    assert error_event["route"] == "qwen-web"
+    assert error_event["statusCode"] == 429
+    assert error_event["errorKind"] == "provider_http_error"
 
 
 def test_qwen_web_repair_retry_timeout_returns_gateway_timeout(tmp_path: Path) -> None:

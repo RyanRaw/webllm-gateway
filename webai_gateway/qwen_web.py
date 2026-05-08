@@ -25,6 +25,31 @@ QWEN_BASE_URL = "https://chat.qwen.ai"
 DEFAULT_QWEN_REQUEST_TIMEOUT_SECONDS = 300
 DEFAULT_QWEN_PROMPT_MAX_CHARS = 32000
 QWEN_TOOL_BRIDGE_RUNAWAY_OUTPUT_CHARS = 12000
+_QWEN_WEB_METADATA_KEYS = {
+    "action",
+    "chat_id",
+    "event",
+    "id",
+    "message_id",
+    "parent_id",
+    "phase",
+    "status",
+    "step",
+    "task",
+    "timestamp",
+    "title",
+    "type",
+    "uuid",
+}
+_QWEN_WEB_METADATA_SIGNAL_KEYS = {"event", "phase", "status", "step", "task", "title", "type"}
+_QWEN_WEB_FINAL_CONTENT_KEYS = {"answer", "calls", "content", "message", "text", "tool_calls"}
+QWEN_WEB_METADATA_RETRY_INSTRUCTION = (
+    "\n\n[WebAI Gateway API mode retry]\n"
+    "The previous Qwen Web response contained only workflow metadata, such as {\"title\": ...}, "
+    "or did not contain a final answer. Do not output JSON metadata, phase titles, task status, or "
+    "artifact-only workflow events. Output the final assistant answer directly. If tool use is required, "
+    "output only the fenced tool_json block specified above."
+)
 _DATA_URL_RE = re.compile(r"^data:(?P<media>[^;,]+);base64,(?P<data>.*)$", re.DOTALL)
 _TOOL_JSON_BLOCK_RE = re.compile(r"```tool_json\s*(.*?)```", re.IGNORECASE | re.DOTALL)
 _TOOL_CALLS_MARKUP_RE = re.compile(
@@ -84,6 +109,23 @@ class QwenWebClient:
                 files=files,
                 enable_web_search=bool(payload.get("_webai_native_web_search")),
             )
+            metadata_retry_count = 0
+            if _is_qwen_web_non_answer_text(content):
+                metadata_retry_count = 1
+                self.last_diagnostic["metadata_only_response"] = True
+                content = self.send_chat(
+                    chat_id=str(chat.get("chatId") or chat.get("chat_id") or chat.get("id") or ""),
+                    prompt=prompt.rstrip() + QWEN_WEB_METADATA_RETRY_INSTRUCTION,
+                    model=normalize_qwen_model(model),
+                    files=files,
+                    enable_web_search=bool(payload.get("_webai_native_web_search")),
+                )
+            self.last_diagnostic["metadata_retry_count"] = metadata_retry_count
+            if _is_qwen_web_non_answer_text(content):
+                self.last_diagnostic["metadata_retry_succeeded"] = False
+                content = ""
+            elif metadata_retry_count:
+                self.last_diagnostic["metadata_retry_succeeded"] = True
         except TimeoutError as exc:
             stream_diagnostic = getattr(exc, "diagnostic", {})
             if isinstance(stream_diagnostic, dict):
@@ -401,6 +443,32 @@ def _has_complete_tool_json(text: str) -> bool:
         if isinstance(parsed, (dict, list)):
             return True
     return False
+
+
+def _is_qwen_web_non_answer_text(text: str) -> bool:
+    stripped = (text or "").strip()
+    if not stripped:
+        return True
+    if _has_complete_tool_json(stripped):
+        return False
+    try:
+        parsed = json.loads(stripped)
+    except Exception:
+        return False
+    return _is_qwen_web_metadata_only(parsed)
+
+
+def _is_qwen_web_metadata_only(value: Any) -> bool:
+    if isinstance(value, list):
+        return bool(value) and all(_is_qwen_web_metadata_only(item) for item in value)
+    if not isinstance(value, dict):
+        return False
+    keys = {str(key) for key in value}
+    if not keys or keys & _QWEN_WEB_FINAL_CONTENT_KEYS:
+        return False
+    if not keys <= _QWEN_WEB_METADATA_KEYS:
+        return False
+    return bool(keys & _QWEN_WEB_METADATA_SIGNAL_KEYS)
 
 
 def _collect_qwen_text(data: Any, output: list[str], think_output: list[str]) -> None:
