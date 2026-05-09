@@ -6156,6 +6156,45 @@ def test_anthropic_converter_recovers_omitted_tool_use_from_registry() -> None:
     ]
 
 
+def test_anthropic_converter_drops_tool_result_status_text_from_task_stream() -> None:
+    openai_body = anthropic_body_to_openai(
+        {
+            "model": "web-model",
+            "messages": [
+                {"role": "user", "content": "Investigate why the local slash command stopped loading."},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_glob",
+                            "name": "Glob",
+                            "input": {"pattern": "**/*.md"},
+                        }
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "toolu_glob", "content": "CLAUDE.md\nAGENTS.md"},
+                        {"type": "text", "text": "Searched for 1 pattern, read 2 files"},
+                    ],
+                },
+            ],
+            "tools": [{"name": "Glob", "input_schema": {"type": "object"}}],
+            "max_tokens": 1024,
+        }
+    )
+
+    assert "Searched for 1 pattern" not in json.dumps(openai_body["messages"], ensure_ascii=False)
+    assert openai_body["messages"][-1] == {
+        "role": "tool",
+        "tool_call_id": "toolu_glob",
+        "name": "Glob",
+        "content": "CLAUDE.md\nAGENTS.md",
+    }
+
+
 def test_anthropic_messages_uses_registry_to_repair_repeated_read_when_tool_use_omitted() -> None:
     requests: list[dict[str, Any]] = []
 
@@ -21048,6 +21087,76 @@ def test_qwen_web_all_profile_retries_no_task_final_after_tool_loop(tmp_path: Pa
     assert "status_only_final_without_task_answer" in retry_prompt
     assert "审查当前项目的代码" in retry_prompt
     assert response.json()["content"] == [{"type": "tool_use", "id": "toolu_read", "name": "Read", "input": {"file_path": "README.md"}}]
+
+
+def test_qwen_web_local_agent_keeps_tool_loop_when_claude_status_text_follows_tool_result(tmp_path: Path) -> None:
+    seen_payloads: list[dict[str, Any]] = []
+
+    class ReadyOnlyQwenClient:
+        def __init__(self, credential: dict[str, Any], http_client: httpx.Client | None = None) -> None:
+            self.credential = credential
+
+        def chat_completions(self, payload: dict[str, Any]) -> dict[str, Any]:
+            seen_payloads.append(payload)
+            return _openai_response("I am ready to assist you. Please provide your request or question.")
+
+    config = GatewayConfig(
+        server=ServerConfig(api_key="local-dev-key"),
+        upstream=UpstreamConfig(base_url="http://upstream.test/v1", model="web-model"),
+        tool_bridge=ToolBridgeConfig(activation_policy="auto", exposure_policy="local-agent", tool_profile="auto"),
+    )
+    client = TestClient(
+        create_app(
+            config=config,
+            credential_store=_credential_store(tmp_path),
+            qwen_client_factory=ReadyOnlyQwenClient,
+            http_client=_not_found_client(),
+        )
+    )
+
+    response = client.post(
+        "/v1/messages?beta=true",
+        headers={**_headers(), "anthropic-version": "2023-06-01"},
+        json={
+            "model": "qwen-web/qwen3.6-max-preview",
+            "messages": [
+                {"role": "user", "content": "Investigate why the local slash command stopped loading and fix it."},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_glob",
+                            "name": "Glob",
+                            "input": {"pattern": "**/*.md"},
+                        }
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "toolu_glob", "content": "CLAUDE.md\nAGENTS.md"},
+                        {"type": "text", "text": "Searched for 1 pattern, read 2 files"},
+                    ],
+                },
+            ],
+            "tools": [
+                {"name": "Glob", "description": "Find files", "input_schema": {"type": "object"}},
+                {"name": "Read", "description": "Read files", "input_schema": {"type": "object"}},
+                {"name": "Bash", "description": "Run command", "input_schema": {"type": "object"}},
+            ],
+            "stream": True,
+            "max_tokens": 32000,
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(seen_payloads) >= 2
+    assert "Searched for 1 pattern" not in json.dumps(seen_payloads[0]["messages"], ensure_ascii=False)
+    assert "Investigate why the local slash command" in str(seen_payloads[0].get("_webai_current_task_text") or "")
+    assert response.headers["x-webai-tool-bridge-error"] == "status_only_final_without_task_answer"
+    assert "I am ready to assist you" not in response.text
+    assert "status_only_final_without_task_answer" in response.text
 
 
 def test_qwen_web_all_profile_preserves_task_after_direct_modify_followup(tmp_path: Path) -> None:
