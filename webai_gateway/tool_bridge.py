@@ -2929,6 +2929,8 @@ def parse_tool_response(text: str, context: ToolBridgeContext) -> BridgeResult:
                 warning=warning,
                 raw_content=raw,
             )
+        if _looks_like_substantive_chinese_improvement_plan(raw) and _allows_plain_review_or_plan_text(context):
+            return finish(content=raw, tool_calls=[], warning=warning, raw_content=raw)
         if _is_allowed_tool_denial(raw, context):
             return finish(
                 content=raw,
@@ -3086,6 +3088,13 @@ def parse_tool_response(text: str, context: ToolBridgeContext) -> BridgeResult:
                     "The model promised to implement, modify, write, patch, or update code but did not request an allowed downstream tool. Use an allowed tool call instead of describing the code change.",
                     repairable=True,
                 ),
+                warning=warning,
+                raw_content=raw,
+            )
+        if _is_loaded_virtual_loader_context_final(raw, context):
+            return finish(
+                content=raw,
+                tool_calls=[],
                 warning=warning,
                 raw_content=raw,
             )
@@ -5248,6 +5257,18 @@ def _looks_like_direct_action_followup_task(text: str) -> bool:
         "\u76f4\u63a5\u505a",
         "\u505a\u5427",
         "\u52a8\u624b\u505a",
+        "\u4f60\u5e2e\u6211\u6392\u67e5\u4fee\u590d\u4e0b",
+        "\u5e2e\u6211\u6392\u67e5\u4fee\u590d\u4e0b",
+        "\u6392\u67e5\u4fee\u590d\u4e0b",
+        "\u4f60\u5e2e\u6211\u6392\u67e5\u4e0b",
+        "\u5e2e\u6211\u6392\u67e5\u4e0b",
+        "\u4f60\u5e2e\u6211\u4fee\u590d\u4e0b",
+        "\u5e2e\u6211\u4fee\u590d\u4e0b",
+        "\u4f60\u6765\u6392\u67e5\u4fee\u590d",
+        "\u4f60\u6765\u4fee\u590d",
+        "\u6392\u67e5\u4e00\u4e0b",
+        "\u4fee\u590d\u4e00\u4e0b",
+        "\u5904\u7406\u4e00\u4e0b",
         "\u5f00\u59cb",
         "\u52a8\u624b",
         "do it",
@@ -5281,7 +5302,7 @@ def _looks_like_direct_action_followup_task(text: str) -> bool:
         re.fullmatch(
             r"(?:\u4f60|\u8bf7|\u9ebb\u70e6\u4f60|\u90a3\u5c31|\u53ef\u4ee5)?"
             r"(?:\u76f4\u63a5|\u7ee7\u7eed|\u5f00\u59cb|\u52a8\u624b)?"
-            r"(?:\u4fee\u6539|\u6539|\u6267\u884c|\u505a|\u843d\u5730)"
+            r"(?:\u6392\u67e5(?:\u4fee\u590d)?|\u4fee\u590d|\u5904\u7406|\u4fee\u6539|\u6539|\u6267\u884c|\u505a|\u843d\u5730)"
             r"(?:\u5427|\u554a|\u4e00\u4e0b|\u5c31\u884c|\u597d\u4e86)?",
             value,
         )
@@ -5785,6 +5806,8 @@ def _is_unproven_final_answer_without_tool_call(text: str, context: ToolBridgeCo
     raw = (text or "").strip()
     if not raw or len(raw) > 1200:
         return False
+    if _looks_like_substantive_chinese_improvement_plan(raw):
+        return False
     if _looks_like_complete_final_answer(raw, context):
         return False
     return bool(_UNPROVEN_FINAL_ACTION_RE.search(raw))
@@ -5801,6 +5824,14 @@ def _looks_like_complete_final_answer(text: str, context: ToolBridgeContext) -> 
     if _allows_plain_review_or_plan_text(context) and len(raw) >= 160:
         return not _UNPROVEN_FINAL_ACTION_RE.search(raw)
     return False
+
+
+def _looks_like_substantive_chinese_improvement_plan(text: str) -> bool:
+    raw = text or ""
+    return "\u8be6\u7ec6\u6539\u8fdb\u8ba1\u5212" in raw or "\u7487\ufe3e\u7c8f\u93c0\u7845\u7e58\u7481\u2033\u579d" in raw or (
+        "\u6539\u8fdb\u8ba1\u5212" in raw
+        and any(marker in raw for marker in ("\u57fa\u4e8e\u5df2\u6709", "\u57fa\u4e8e\u5df2\u8bfb", "\u5efa\u8bae"))
+    )
 
 
 def _is_runaway_plain_text_without_tool_call(text: str, context: ToolBridgeContext) -> bool:
@@ -8235,6 +8266,28 @@ def _allows_plain_review_or_plan_text(context: ToolBridgeContext) -> bool:
     if not _looks_like_readonly_review_task(task):
         return False
     return not _task_explicitly_allows_mutation(task)
+
+
+def _is_loaded_virtual_loader_context_final(text: str, context: ToolBridgeContext) -> bool:
+    raw = re.sub(r"\s+", " ", (text or "").strip().lower())
+    if not raw or len(raw) > 320:
+        return False
+    if "already loaded" not in raw:
+        return False
+    if not any(marker in raw for marker in ("skill", "slashcommand", "slash command", "instructions")):
+        return False
+    task = re.sub(r"\s+", " ", (context.task_text or "").strip().lower())
+    if not task:
+        return False
+    return any(
+        marker in task
+        for marker in (
+            "skill body is already loaded",
+            "loaded skill",
+            "already loaded in this conversation",
+            "base directory for this skill",
+        )
+    )
 
 
 def _looks_like_readonly_review_task(text: str) -> bool:

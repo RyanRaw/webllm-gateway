@@ -4331,6 +4331,232 @@ def test_openai_tool_controller_retries_no_task_final_after_tool_result() -> Non
     assert choice["message"]["tool_calls"][0]["function"]["name"] == "Read"
 
 
+def test_openai_tool_controller_fail_closes_repeated_qwen_tool_denial() -> None:
+    requests: list[dict[str, Any]] = []
+    denial = (
+        "I cannot directly access your local filesystem or use Claude Code tools. "
+        "Please inspect the project files yourself."
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content.decode("utf-8")))
+        return httpx.Response(200, json=_openai_response(denial), request=request)
+
+    config = GatewayConfig(
+        server=ServerConfig(api_key="local-dev-key"),
+        upstream=UpstreamConfig(base_url="http://upstream.test/v1", model="qwen-web/qwen3.6-max-preview"),
+        tool_bridge=ToolBridgeConfig(exposure_policy="all", tool_profile="agent"),
+    )
+    client = TestClient(create_app(config=config, http_client=httpx.Client(transport=httpx.MockTransport(handler))))
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers=_headers(),
+        json={
+            "model": "qwen-web/qwen3.6-max-preview",
+            "messages": [
+                {"role": "user", "content": "/superpowers:using-superpowers\nWhy is the slash command not loading?"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_skill",
+                            "type": "function",
+                            "function": {
+                                "name": "Skill",
+                                "arguments": "{\"skill\":\"superpowers:using-superpowers\"}",
+                            },
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_skill",
+                    "content": "Launching skill: superpowers:using-superpowers",
+                },
+                {"role": "user", "content": "Help me investigate and fix it."},
+            ],
+            "tools": [
+                {"type": "function", "function": {"name": "Skill", "parameters": {"type": "object"}}},
+                {"type": "function", "function": {"name": "Glob", "parameters": {"type": "object"}}},
+                {"type": "function", "function": {"name": "Read", "parameters": {"type": "object"}}},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(requests) >= 2
+    assert response.headers["x-webai-tool-bridge-error"] in {
+        "tool_denial_without_call",
+        "deferred_tool_action_without_call",
+    }
+    choice = response.json()["choices"][0]
+    assert choice["finish_reason"] == "stop"
+    assert "tool_calls" not in choice["message"]
+    assert "cannot directly access your local filesystem" not in choice["message"]["content"]
+    assert response.headers["x-webai-tool-bridge-error"] in choice["message"]["content"]
+
+
+def test_openai_tool_controller_fail_closes_repeated_ready_to_assist_after_tool_loop() -> None:
+    requests: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content.decode("utf-8")))
+        return httpx.Response(
+            200,
+            json=_openai_response("I am ready to assist you. Please provide your request or question."),
+            request=request,
+        )
+
+    config = GatewayConfig(
+        server=ServerConfig(api_key="local-dev-key"),
+        upstream=UpstreamConfig(base_url="http://upstream.test/v1", model="qwen-web/qwen3.6-max-preview"),
+        tool_bridge=ToolBridgeConfig(exposure_policy="all", tool_profile="agent"),
+    )
+    client = TestClient(create_app(config=config, http_client=httpx.Client(transport=httpx.MockTransport(handler))))
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers=_headers(),
+        json={
+            "model": "qwen-web/qwen3.6-max-preview",
+            "messages": [
+                {"role": "user", "content": "Review this local project and fix the failing setup."},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_glob",
+                            "type": "function",
+                            "function": {"name": "Glob", "arguments": "{\"pattern\":\"**/*.py\"}"},
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call_glob", "content": "webai_gateway/app.py\nwebai_gateway/tool_bridge.py"},
+            ],
+            "tools": [
+                {"type": "function", "function": {"name": "Glob", "parameters": {"type": "object"}}},
+                {"type": "function", "function": {"name": "Read", "parameters": {"type": "object"}}},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(requests) >= 2
+    assert response.headers["x-webai-tool-bridge-error"] == "status_only_final_without_task_answer"
+    choice = response.json()["choices"][0]
+    assert "I am ready to assist you" not in choice["message"]["content"]
+    assert "status_only_final_without_task_answer" in choice["message"]["content"]
+
+
+def test_anthropic_qwen_tool_controller_fail_closes_repeated_ready_to_assist_after_tool_loop() -> None:
+    requests: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content.decode("utf-8")))
+        return httpx.Response(
+            200,
+            json=_openai_response("I am ready to assist you. Please provide your request or question."),
+            request=request,
+        )
+
+    config = GatewayConfig(
+        server=ServerConfig(api_key="local-dev-key"),
+        upstream=UpstreamConfig(base_url="http://upstream.test/v1", model="qwen-web/qwen3.6-max-preview"),
+        tool_bridge=ToolBridgeConfig(exposure_policy="all", tool_profile="agent"),
+    )
+    client = TestClient(create_app(config=config, http_client=httpx.Client(transport=httpx.MockTransport(handler))))
+
+    response = client.post(
+        "/v1/messages?beta=true",
+        headers={**_headers(), "anthropic-version": "2023-06-01"},
+        json={
+            "model": "qwen-web/qwen3.6-max-preview",
+            "messages": [
+                {"role": "user", "content": "Review this local project and fix the failing setup."},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_glob",
+                            "name": "Glob",
+                            "input": {"pattern": "**/*.py"},
+                        }
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_glob",
+                            "content": "webai_gateway/app.py\nwebai_gateway/tool_bridge.py",
+                        }
+                    ],
+                },
+            ],
+            "tools": [
+                {"name": "Glob", "description": "Find files", "input_schema": {"type": "object"}},
+                {"name": "Read", "description": "Read files", "input_schema": {"type": "object"}},
+            ],
+            "max_tokens": 1024,
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(requests) >= 2
+    assert response.headers["x-webai-tool-bridge-error"] == "status_only_final_without_task_answer"
+    body = response.json()
+    assert body["stop_reason"] == "end_turn"
+    assert body["content"][0]["type"] == "text"
+    assert "I am ready to assist you" not in body["content"][0]["text"]
+    assert "status_only_final_without_task_answer" in body["content"][0]["text"]
+
+
+def test_build_upstream_payload_keeps_tool_loop_for_chinese_investigate_fix_followup() -> None:
+    config = GatewayConfig(
+        upstream=UpstreamConfig(base_url="http://upstream.test/v1", model="qwen-web/qwen3.6-max-preview"),
+        tool_bridge=ToolBridgeConfig(exposure_policy="all", tool_profile="agent"),
+    )
+    body = {
+        "model": "qwen-web/qwen3.6-max-preview",
+        "messages": [
+            {"role": "user", "content": "Review this local project and find setup issues."},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_glob",
+                        "type": "function",
+                        "function": {"name": "Glob", "arguments": "{\"pattern\":\"**/*.py\"}"},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_glob", "content": "webai_gateway/app.py"},
+            {"role": "assistant", "content": "I cannot directly access local files."},
+            {"role": "user", "content": "\u4f60\u5e2e\u6211\u6392\u67e5\u4fee\u590d\u4e0b"},
+        ],
+        "tools": [
+            {"type": "function", "function": {"name": "Glob", "parameters": {"type": "object"}}},
+            {"type": "function", "function": {"name": "Read", "parameters": {"type": "object"}}},
+        ],
+    }
+
+    payload, bridge, allowed_tools, bridge_context = build_upstream_payload(body, config)
+
+    assert bridge is True
+    assert allowed_tools == {"Glob", "Read"}
+    assert bridge_context.has_tool_loop is True
+    assert "Review this local project" in bridge_context.task_text
+    assert "\u4f60\u5e2e\u6211\u6392\u67e5\u4fee\u590d\u4e0b" in bridge_context.task_text
+    prompt_text = "\n".join(str(message.get("content", "")) for message in payload["messages"])
+    assert "Tool result for Glob" in prompt_text
+
+
 def test_semantic_final_judge_shadow_records_metadata_without_enforcing() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(

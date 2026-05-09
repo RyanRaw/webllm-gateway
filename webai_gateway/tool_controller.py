@@ -73,6 +73,7 @@ _STATUS_ONLY_TOOL_FINAL_RE = re.compile(
     r"\b(?:project\s+dir|project\s+directory|directory|folder|file|path)\b.{0,60}"
     r"\b(?:exist|exists|existed|found)\b|"
     r"\b(?:no\s+(?:task|request|instruction)s?\s+(?:given|provided|specified)|wait(?:ing)?\s+for\s+(?:your\s+)?input)\b|"
+    r"\b(?:i\s+am\s+ready\s+to\s+assist|i'm\s+ready\s+to\s+assist|ready\s+to\s+assist)\b|"
     r"(?:当前无明确任务|无明确任务|没有明确任务|缺乏明确(?:的)?(?:用户)?(?:任务|指令)|请提供(?:明确|具体)(?:的)?(?:指令|任务|需求)|等待(?:用户)?(?:指令|输入))|"
     r"\bcaveman\s+mode\s+active\b|"
     r"(?:command|tool|task|operation).{0,40}(?:no output|empty output)",
@@ -188,7 +189,13 @@ def classify_bridge_result(
 
     if _is_history_summary_final_without_task_answer(context, result.content):
         if state.repair_attempts >= max_repair_attempts:
-            return ControllerDecision("FINAL", reason="retry_budget_exhausted", bridge_result=result, retry_state=state)
+            return ControllerDecision(
+                "FINAL",
+                retry_kind="history_summary_final_without_task_answer",
+                reason="retry_budget_exhausted",
+                bridge_result=result,
+                retry_state=state,
+            )
         return ControllerDecision(
             "RETRY",
             retry_kind="history_summary_final_without_task_answer",
@@ -203,7 +210,13 @@ def classify_bridge_result(
 
     if _is_unknown_project_structure_final_without_task_answer(context, result.content):
         if state.repair_attempts >= max_repair_attempts:
-            return ControllerDecision("FINAL", reason="retry_budget_exhausted", bridge_result=result, retry_state=state)
+            return ControllerDecision(
+                "FINAL",
+                retry_kind="unknown_project_structure_final_without_task_answer",
+                reason="retry_budget_exhausted",
+                bridge_result=result,
+                retry_state=state,
+            )
         return ControllerDecision(
             "RETRY",
             retry_kind="unknown_project_structure_final_without_task_answer",
@@ -218,7 +231,13 @@ def classify_bridge_result(
 
     if _is_review_next_step_menu_final_without_task_answer(context, result.content):
         if state.repair_attempts >= max_repair_attempts:
-            return ControllerDecision("FINAL", reason="retry_budget_exhausted", bridge_result=result, retry_state=state)
+            return ControllerDecision(
+                "FINAL",
+                retry_kind="review_next_step_menu_final_without_task_answer",
+                reason="retry_budget_exhausted",
+                bridge_result=result,
+                retry_state=state,
+            )
         return ControllerDecision(
             "RETRY",
             retry_kind="review_next_step_menu_final_without_task_answer",
@@ -233,7 +252,13 @@ def classify_bridge_result(
 
     if _is_off_task_environment_configuration_final(context, result.content):
         if state.repair_attempts >= max_repair_attempts:
-            return ControllerDecision("FINAL", reason="retry_budget_exhausted", bridge_result=result, retry_state=state)
+            return ControllerDecision(
+                "FINAL",
+                retry_kind="off_task_environment_configuration_final",
+                reason="retry_budget_exhausted",
+                bridge_result=result,
+                retry_state=state,
+            )
         return ControllerDecision(
             "RETRY",
             retry_kind="off_task_environment_configuration_final",
@@ -248,7 +273,13 @@ def classify_bridge_result(
 
     if _is_status_only_final_without_task_answer(context, result.content):
         if state.repair_attempts >= max_repair_attempts:
-            return ControllerDecision("FINAL", reason="retry_budget_exhausted", bridge_result=result, retry_state=state)
+            return ControllerDecision(
+                "FINAL",
+                retry_kind="status_only_final_without_task_answer",
+                reason="retry_budget_exhausted",
+                bridge_result=result,
+                retry_state=state,
+            )
         return ControllerDecision(
             "RETRY",
             retry_kind="status_only_final_without_task_answer",
