@@ -13645,9 +13645,92 @@ def test_gateway_auth_accepts_common_openai_client_key_headers() -> None:
 
     assert client.get("/v1/models", headers={"Authorization": "bearer local-dev-key"}).status_code == 200
     assert client.get("/v1/models", headers={"Authorization": "  Bearer   local-dev-key  "}).status_code == 200
+    assert client.get("/v1/models", headers={"Authorization": "Bearer Bearer local-dev-key"}).status_code == 200
+    assert client.get("/v1/models", headers={"x-api-key": "Bearer local-dev-key"}).status_code == 200
     assert client.get("/v1/models", headers={"api-key": "local-dev-key"}).status_code == 200
     assert client.get("/v1/models", headers={"Authorization": "local-dev-key"}).status_code == 200
     assert client.get("/v1/models", headers={"Authorization": "Bearer wrong-key"}).status_code == 401
+
+
+def test_gpt_thinking_ds2api_backend_missing_web_login_falls_back_to_webai2api(tmp_path: Path) -> None:
+    seen: dict[str, Any] = {}
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        seen["upstream_path"] = request.url.path
+        return httpx.Response(200, json=_openai_response("来自 WebAI2API"), request=request)
+
+    client = TestClient(
+        create_app(
+            config=GatewayConfig(
+                server=ServerConfig(api_key="local-dev-key"),
+                upstream=UpstreamConfig(base_url="http://upstream.test/v1", model="web-model"),
+                provider_runtime=ProviderRuntimeConfig(gpt_thinking_backend="deepseek-ds2api"),
+            ),
+            credential_store=CredentialStore(tmp_path / "credentials"),
+            http_client=httpx.Client(transport=httpx.MockTransport(upstream)),
+        )
+    )
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers=_headers(),
+        json={"model": "gpt-thinking", "messages": [{"role": "user", "content": "ping"}]},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["choices"][0]["message"]["content"] == "来自 WebAI2API"
+    assert seen["upstream_path"] == "/v1/chat/completions"
+
+
+def test_gpt_thinking_ds2api_auth_failure_falls_back_to_webai2api(tmp_path: Path) -> None:
+    seen: dict[str, Any] = {}
+
+    class FailingDeepSeekClient:
+        def __init__(self, credential: dict[str, Any], **_: Any) -> None:
+            seen["credential"] = credential
+
+        def chat_completions(self, payload: dict[str, Any]) -> dict[str, Any]:
+            seen["deepseek_payload"] = payload
+            raise DeepSeekDs2apiError(401, "Invalid token. If this should be a DS2API key, add it to config.keys first.")
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        seen["upstream_path"] = request.url.path
+        seen["upstream_body"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(200, json=_openai_response("来自 WebAI2API"), request=request)
+
+    store = CredentialStore(tmp_path / "credentials")
+    store.save(
+        "deepseek-web",
+        {
+            "cookie": "ds_session_id=session-secret",
+            "bearer": "stale-bearer",
+            "userAgent": "Chrome Test",
+        },
+    )
+    client = TestClient(
+        create_app(
+            config=GatewayConfig(
+                server=ServerConfig(api_key="local-dev-key"),
+                upstream=UpstreamConfig(base_url="http://upstream.test/v1", model="web-model"),
+                provider_runtime=ProviderRuntimeConfig(gpt_thinking_backend="deepseek-ds2api"),
+            ),
+            credential_store=store,
+            deepseek_client_factory=FailingDeepSeekClient,
+            http_client=httpx.Client(transport=httpx.MockTransport(upstream)),
+        )
+    )
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers=_headers(),
+        json={"model": "gpt-thinking", "messages": [{"role": "user", "content": "ping"}]},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["choices"][0]["message"]["content"] == "来自 WebAI2API"
+    assert seen["deepseek_payload"]["model"] == "deepseek-v4-pro"
+    assert seen["upstream_path"] == "/v1/chat/completions"
+    assert seen["upstream_body"]["model"] == "gpt-thinking"
 
 
 def test_tool_bridge_observation_policy_round_trips_config(tmp_path: Path) -> None:
@@ -25060,7 +25143,7 @@ def test_deepseek_web_chat_requires_browser_login(tmp_path: Path) -> None:
         json={"model": "deepseek-web/deepseek-chat", "messages": [{"role": "user", "content": "你好"}]},
     )
 
-    assert response.status_code == 401
+    assert response.status_code == 424
     assert "DeepSeek" in response.json()["detail"]
     assert "bearer token" in response.json()["detail"]
 
@@ -25095,7 +25178,7 @@ def test_deepseek_web_chat_rejects_cookie_only_saved_credential(tmp_path: Path) 
         json={"model": "deepseek-v4-pro[1m]", "messages": [{"role": "user", "content": "你好"}]},
     )
 
-    assert response.status_code == 401
+    assert response.status_code == 424
     assert "DeepSeek" in response.json()["detail"]
     assert "授权" in response.json()["detail"]
 
@@ -25115,7 +25198,7 @@ def test_qwen_web_chat_requires_browser_login(tmp_path: Path) -> None:
         json={"model": "qwen-web/qwen3.6-max", "messages": [{"role": "user", "content": "你好"}]},
     )
 
-    assert response.status_code == 401
+    assert response.status_code == 424
     assert "请先在控制台完成 Qwen 网页登录授权" in response.json()["detail"]
 
 
@@ -25154,5 +25237,5 @@ def test_qwen_web_chat_rejects_cookie_only_credentials(tmp_path: Path) -> None:
         json={"model": "qwen-web/qwen3.6-max", "messages": [{"role": "user", "content": "你好"}]},
     )
 
-    assert response.status_code == 401
+    assert response.status_code == 424
     assert "请先在控制台完成 Qwen 网页登录授权" in response.json()["detail"]

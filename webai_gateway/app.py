@@ -240,12 +240,14 @@ def create_app(
         candidate = str(value).strip()
         if not candidate:
             return False
-        if secrets.compare_digest(candidate, expected):
-            return True
-        parts = candidate.split(None, 1)
-        if len(parts) == 2 and parts[0].lower() == "bearer":
-            return secrets.compare_digest(parts[1].strip(), expected)
-        return False
+        for _ in range(3):
+            if secrets.compare_digest(candidate, expected):
+                return True
+            parts = candidate.split(None, 1)
+            if len(parts) != 2 or parts[0].lower() != "bearer":
+                return False
+            candidate = parts[1].strip()
+        return secrets.compare_digest(candidate, expected)
 
     def require_auth(authorization: str | None, x_api_key: str | None = None, api_key: str | None = None) -> None:
         cfg = current_config()
@@ -1482,13 +1484,25 @@ def create_app(
         if is_qwen_coder_model(body.get("model")):
             return await run_in_threadpool(_qwen_coder_chat, app, client, body, cfg)
         if _gpt_thinking_uses_deepseek_ds2api(cfg) and _is_gpt_thinking_model(body.get("model")):
-            return await run_in_threadpool(
-                _deepseek_web_chat,
-                app,
-                client,
-                _gpt_thinking_body_for_deepseek_ds2api(body),
-                cfg,
-            )
+            try:
+                return await run_in_threadpool(
+                    _deepseek_web_chat,
+                    app,
+                    client,
+                    _gpt_thinking_body_for_deepseek_ds2api(body),
+                    cfg,
+                )
+            except HTTPException as exc:
+                if exc.status_code != 424:
+                    raise
+                _record_request_diagnostic(
+                    app,
+                    "gpt_thinking_ds2api_fallback",
+                    endpoint="/v1/chat/completions",
+                    route="deepseek-web",
+                    model=str(body.get("model") or ""),
+                    reason=_preview_text(_redact_sensitive_text(str(exc.detail)), max_chars=500),
+                )
         payload, bridge, allowed_tools, bridge_context = build_upstream_payload(body, cfg)
         model = str(payload.get("model") or cfg.upstream.model)
         preflight = _local_preflight_response(app, body, str(payload.get("model") or cfg.upstream.model), bridge_context)
@@ -5108,7 +5122,7 @@ def _call_deepseek_ds2api_with_retry(
 def _deepseek_web_chat(app: FastAPI, client: httpx.Client, body: dict[str, Any], config: GatewayConfig) -> Response:
     credential = app.state.credential_store.get("deepseek-web")
     if not is_credential_authorized("deepseek-web", credential):
-        raise HTTPException(status_code=401, detail="请先在控制台重新完成 DeepSeek 网页登录授权，确保已捕获 bearer token")
+        raise HTTPException(status_code=424, detail="请先在控制台重新完成 DeepSeek 网页登录授权，确保已捕获 bearer token")
     payload, bridge, allowed_tools, bridge_context = _build_deepseek_direct_payload(body, config)
     model = str(payload.get("model") or DEEPSEEK_DEFAULT_MODEL)
     skill_preflight = _skill_loader_preflight_response(app, model, bridge_context, require_namespaced_slash=True)
@@ -5128,7 +5142,7 @@ def _deepseek_web_chat(app: FastAPI, client: httpx.Client, body: dict[str, Any],
         web_client = _build_deepseek_web_client(app.state.deepseek_client_factory, credential, client, config)
         data = _call_deepseek_ds2api_with_retry(app, web_client, payload, config)
     except DeepSeekDs2apiError as exc:
-        status_code = exc.status_code if 400 <= exc.status_code <= 599 else 502
+        status_code = _provider_dependency_status_code(exc.status_code)
         _record_completion_error_diagnostic(
             app,
             endpoint="/v1/chat/completions",
@@ -5176,7 +5190,7 @@ def _deepseek_web_chat(app: FastAPI, client: httpx.Client, body: dict[str, Any],
     except HTTPException:
         raise
     except DeepSeekDs2apiError as exc:
-        status_code = exc.status_code if 400 <= exc.status_code <= 599 else 502
+        status_code = _provider_dependency_status_code(exc.status_code)
         _record_completion_error_diagnostic(
             app,
             endpoint="/v1/chat/completions",
@@ -5260,7 +5274,7 @@ def _deepseek_web_chat_payload(app: FastAPI, client: httpx.Client, body: dict[st
 def _qwen_web_chat(app: FastAPI, client: httpx.Client, body: dict[str, Any], config: GatewayConfig) -> Response:
     credential = app.state.credential_store.get("qwen")
     if not is_credential_authorized("qwen", credential):
-        raise HTTPException(status_code=401, detail="请先在控制台完成 Qwen 网页登录授权")
+        raise HTTPException(status_code=424, detail="请先在控制台完成 Qwen 网页登录授权")
     payload, bridge, allowed_tools, bridge_context = _build_direct_payload(
         body,
         config,
@@ -5436,7 +5450,7 @@ def _qwen_coder_chat_payload(app: FastAPI, client: httpx.Client, body: dict[str,
 def _qwen_coder_chat(app: FastAPI, client: httpx.Client, body: dict[str, Any], config: GatewayConfig) -> Response:
     credential = app.state.credential_store.get("qwen-coder")
     if not is_credential_authorized("qwen-coder", credential):
-        raise HTTPException(status_code=401, detail="请先在控制台完成 Qwen Coder 网页登录授权")
+        raise HTTPException(status_code=424, detail="请先在控制台完成 Qwen Coder 网页登录授权")
     payload, bridge, allowed_tools, bridge_context = _build_direct_payload(
         body,
         config,
@@ -5758,6 +5772,14 @@ def _merge_provider_diagnostics(*items: Any) -> dict[str, Any]:
     return merged
 
 
+def _provider_dependency_status_code(status_code: int) -> int:
+    if status_code in {401, 403}:
+        return 424
+    if 400 <= status_code <= 599:
+        return status_code
+    return 502
+
+
 def _raise_direct_provider_http_status_error(
     app: FastAPI,
     exc: httpx.HTTPStatusError,
@@ -5774,7 +5796,7 @@ def _raise_direct_provider_http_status_error(
     sensitive_values: Any = None,
 ) -> None:
     response = exc.response
-    status_code = response.status_code if 400 <= response.status_code <= 599 else 502
+    status_code = _provider_dependency_status_code(response.status_code)
     preview = _extract_upstream_error_preview(response) or response.reason_phrase or "empty response body"
     message = f"{provider_label} upstream returned HTTP {response.status_code}: {preview}"
     sanitized = _preview_text(
