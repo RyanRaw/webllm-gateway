@@ -11800,26 +11800,42 @@ def test_onboarding_returns_gateway_providers_and_models(tmp_path: Path) -> None
     assert body["gateway"]["baseUrl"] == "/v1"
     assert body["gateway"]["apiKey"] == "local-dev-key"
     assert body["gateway"]["defaultModel"] == "web-model"
-    assert body["summary"]["providers"] >= 10
-    assert body["summary"]["models"] >= 3
+    assert body["summary"]["providers"] == 4
+    assert body["summary"]["candidateProviders"] >= 10
+    assert body["summary"]["models"] >= 7
+    assert body["summary"]["candidateModels"] >= 3
     assert body["summary"]["authorizedProviders"] == 1
     assert body["summary"]["authorizedDirectProviders"] == 1
-    assert body["summary"]["webAI2APIProviders"] >= 1
+    assert body["summary"]["webAI2APIProviders"] == 1
+    assert {item["id"] for item in body["providers"]} == {"deepseek-web", "qwen", "qwen-coder", "chatgpt"}
     assert {item["id"] for item in body["models"]} >= {
+        "deepseek-v4-pro",
+        "qwen-web/qwen3.6-plus",
+        "qwen-coder/qwen-coder-plus",
+    }
+    assert "sidecar-model" not in {item["id"] for item in body["models"]}
+
+    candidate_response = client.get("/api/admin/onboarding", params={"includeCandidates": "true"})
+    assert candidate_response.status_code == 200
+    candidate_body = candidate_response.json()
+    assert candidate_body["summary"]["providers"] >= 10
+    assert candidate_body["summary"]["models"] >= 3
+    assert candidate_body["summary"]["webAI2APIProviders"] >= 1
+    assert {item["id"] for item in candidate_body["models"]} >= {
         "sidecar-model",
         "qwen-web/qwen3.6-plus",
     }
-    assert "gpt-instant" not in {item["id"] for item in body["models"]}
-    assert "deepseek-v4-pro" in {item["id"] for item in body["models"]}
-    assert "deepseek-v4-pro[1m]" not in {item["id"] for item in body["models"]}
-    assert "deepseek-web/deepseek-chat" not in {item["id"] for item in body["models"]}
-    deepseek = next(item for item in body["providers"] if item["id"] == "deepseek-web")
+    assert "gpt-instant" not in {item["id"] for item in candidate_body["models"]}
+    assert "deepseek-v4-pro" in {item["id"] for item in candidate_body["models"]}
+    assert "deepseek-v4-pro[1m]" not in {item["id"] for item in candidate_body["models"]}
+    assert "deepseek-web/deepseek-chat" not in {item["id"] for item in candidate_body["models"]}
+    deepseek = next(item for item in candidate_body["providers"] if item["id"] == "deepseek-web")
     assert deepseek["credential"]["authorized"] is True
     assert deepseek["availableModels"] == ["deepseek-v4-pro"]
     assert deepseek["modelCount"] == 1
     assert "ds2api" in deepseek["availabilityMessage"]
-    assert "session-secret" not in response.text
-    assert "bearer-secret" not in response.text
+    assert "session-secret" not in candidate_response.text
+    assert "bearer-secret" not in candidate_response.text
 
 
 def test_onboarding_groups_webai2api_adapter_aliases_with_provider(tmp_path: Path) -> None:
@@ -11862,7 +11878,7 @@ def test_onboarding_groups_webai2api_adapter_aliases_with_provider(tmp_path: Pat
         )
     )
 
-    response = client.get("/api/admin/onboarding")
+    response = client.get("/api/admin/onboarding", params={"includeCandidates": "true"})
 
     assert response.status_code == 200
     providers = {item["id"]: item for item in response.json()["providers"]}
@@ -12199,7 +12215,7 @@ def test_onboarding_connection_profiles_keep_stale_unavailable_models_for_rechec
         )
     )
 
-    response = client.get("/api/admin/onboarding")
+    response = client.get("/api/admin/onboarding", params={"includeCandidates": "true"})
 
     assert response.status_code == 200
     body = response.json()
@@ -13853,7 +13869,7 @@ def test_onboarding_marks_existing_qwen_cookie_only_file_unauthorized(tmp_path: 
         )
     )
 
-    response = client.get("/api/admin/onboarding")
+    response = client.get("/api/admin/onboarding", params={"includeCandidates": "true"})
 
     assert response.status_code == 200
     qwen = next(item for item in response.json()["providers"] if item["id"] == "qwen")

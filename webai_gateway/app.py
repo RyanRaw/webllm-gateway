@@ -106,6 +106,7 @@ WEBAI2API_AUTH_COOKIE_HINTS: dict[str, tuple[str, ...]] = {
         "__secure-oai-is",
     ),
 }
+HOMEPAGE_SUPPORTED_PROVIDER_IDS = {"deepseek-web", "qwen", "qwen-coder", "chatgpt"}
 TOOL_BRIDGE_EVENT_LIMIT = 200
 MEDIA_GENERATION_CACHE_LIMIT = 100
 MEDIA_GENERATION_TTL_SECONDS = 60 * 60
@@ -307,9 +308,6 @@ def create_app(
         model_ids = {item.get("id") for item in models if isinstance(item, dict)}
         webai2api_auth = _load_webai2api_auth_states(client, cfg, provider_data, webai2api_instances)
         providers: list[dict[str, Any]] = []
-        authorized_count = 0
-        authorized_direct = 0
-        webai2api_count = 0
         for provider in provider_data:
             provider_models = _available_models_for_provider(provider, models, model_ids)
             account_state = _provider_account_state(provider, provider_models, webai2api_instances)
@@ -323,13 +321,6 @@ def create_app(
                     "authorized": True,
                     "fields": {**(credential.get("fields") if isinstance(credential.get("fields"), dict) else {}), "cookie": True},
                 }
-            is_authorized = bool(credential.get("authorized"))
-            if is_authorized:
-                authorized_count += 1
-            if is_direct and is_authorized:
-                authorized_direct += 1
-            if not is_direct:
-                webai2api_count += 1
             providers.append(
                 {
                     **provider,
@@ -343,7 +334,13 @@ def create_app(
                     "loginKind": "direct" if is_direct else "webai2api",
                 }
             )
-        connection_profiles = _onboarding_connection_profiles(providers, cfg)
+        include_candidates = _include_onboarding_candidates(request)
+        visible_providers = providers if include_candidates else [
+            provider for provider in providers if _onboarding_provider_visible_on_homepage(provider)
+        ]
+        visible_model_ids = _onboarding_visible_model_ids(visible_providers)
+        visible_models = models if include_candidates else _filter_onboarding_models(models, visible_model_ids)
+        connection_profiles = _onboarding_connection_profiles(visible_providers, cfg)
         return {
             "gateway": {
                 "baseUrl": "/v1",
@@ -359,17 +356,84 @@ def create_app(
                 "upstreamBaseUrl": cfg.upstream.base_url,
             },
             "summary": {
-                "providers": len(providers),
-                "models": len(models),
-                "authorizedProviders": authorized_count,
-                "authorizedDirectProviders": authorized_direct,
-                "webAI2APIProviders": webai2api_count,
+                "providers": len(visible_providers),
+                "models": len(visible_models),
+                "authorizedProviders": _onboarding_authorized_provider_count(visible_providers),
+                "authorizedDirectProviders": _onboarding_authorized_direct_provider_count(visible_providers),
+                "webAI2APIProviders": _onboarding_webai2api_provider_count(visible_providers),
+                "candidateProviders": len(providers),
+                "candidateModels": len(models),
+                "hiddenCandidateProviders": max(len(providers) - len(visible_providers), 0),
             },
-            "providers": providers,
-            "models": models,
+            "providers": visible_providers,
+            "models": visible_models,
             "connectionProfiles": connection_profiles,
             "recommendedConnectionProfile": _recommended_connection_profile(connection_profiles),
         }
+
+
+    def _include_onboarding_candidates(request: Request) -> bool:
+        value = str(
+            request.query_params.get("includeCandidates")
+            or request.query_params.get("include_candidates")
+            or request.query_params.get("scope")
+            or ""
+        ).strip().lower()
+        return value in {"1", "true", "yes", "all", "candidates"}
+
+    def _onboarding_provider_visible_on_homepage(provider: dict[str, Any]) -> bool:
+        provider_id = str(provider.get("id") or "")
+        if provider_id in HOMEPAGE_SUPPORTED_PROVIDER_IDS:
+            return True
+        credential = provider.get("credential") if isinstance(provider.get("credential"), dict) else {}
+        accounts = provider.get("accounts") if isinstance(provider.get("accounts"), list) else []
+        has_authorized_account = bool(credential.get("authorized")) or any(
+            isinstance(account, dict) and bool(account.get("authorized")) for account in accounts
+        )
+        return has_authorized_account and bool(_onboarding_visible_model_ids([provider]))
+
+    def _onboarding_visible_model_ids(providers: list[dict[str, Any]]) -> set[str]:
+        model_ids: set[str] = set()
+        for provider in providers:
+            available_models = provider.get("availableModels") if isinstance(provider.get("availableModels"), list) else []
+            model_availability = provider.get("modelAvailability") if isinstance(provider.get("modelAvailability"), dict) else {}
+            for model_id in available_models:
+                if isinstance(model_id, str) and model_id.strip():
+                    model_ids.add(model_id)
+            for model_id, availability in model_availability.items():
+                if not isinstance(model_id, str) or not isinstance(availability, dict):
+                    continue
+                if availability.get("status") == "available":
+                    model_ids.add(model_id)
+        return model_ids
+
+    def _filter_onboarding_models(models: list[Any], visible_model_ids: set[str]) -> list[Any]:
+        if not visible_model_ids:
+            return []
+        return [
+            item
+            for item in models
+            if isinstance(item, dict) and isinstance(item.get("id"), str) and item.get("id") in visible_model_ids
+        ]
+
+    def _onboarding_authorized_provider_count(providers: list[dict[str, Any]]) -> int:
+        return sum(
+            1
+            for provider in providers
+            if isinstance(provider.get("credential"), dict) and bool(provider["credential"].get("authorized"))
+        )
+
+    def _onboarding_authorized_direct_provider_count(providers: list[dict[str, Any]]) -> int:
+        return sum(
+            1
+            for provider in providers
+            if provider.get("route") == "direct"
+            and isinstance(provider.get("credential"), dict)
+            and bool(provider["credential"].get("authorized"))
+        )
+
+    def _onboarding_webai2api_provider_count(providers: list[dict[str, Any]]) -> int:
+        return sum(1 for provider in providers if provider.get("route") != "direct")
 
 
     def _with_onboarding_provider_catalog_models(

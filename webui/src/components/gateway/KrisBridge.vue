@@ -78,7 +78,7 @@ const maskedToken = computed(() => {
   return `${gatewayToken.value.slice(0, 7)}...${gatewayToken.value.slice(-6)}`;
 });
 
-const providerPriority = ['deepseek-web', 'qwen', 'qwen-cn', 'chatgpt', 'gemini', 'lmarena', 'doubao', 'zai', 'sora'];
+const providerPriority = ['deepseek-web', 'qwen', 'qwen-coder', 'chatgpt'];
 const providers = computed(() => {
   const list = onboarding.value.providers || [];
   return [...list].sort((a, b) => {
@@ -798,7 +798,7 @@ onMounted(loadOnboarding);
       <div class="hero-copy">
         <a-tag color="blue">WebAI Gateway</a-tag>
         <h1>网页登录向导</h1>
-        <p>选择网页模型平台，登录账号，检测当前账号实际可用模型，然后复制模型 ID 给 Claude Code / KrisAI 等客户端使用。</p>
+        <p>首页只展示当前已经实际验证过的网页模型通路；登录账号、检测可用模型后，复制模型 ID 给 Claude Code / KrisAI 等客户端使用。</p>
         <div class="hero-actions">
           <a-button type="primary" size="large" :loading="actionLoading" @click="handleStartLogin">
             <template #icon><LoginOutlined /></template>
@@ -844,7 +844,7 @@ onMounted(loadOnboarding);
           <div class="panel-heading">
             <div>
               <h2>选择平台</h2>
-              <p>优先选择你已经有网页登录账号的平台。</p>
+              <p>仅保留已跑通过的授权通路；其它候选平台先收进诊断入口。</p>
             </div>
             <AppstoreOutlined />
           </div>
