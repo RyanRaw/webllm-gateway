@@ -105,7 +105,7 @@ WEBAI2API_AUTH_COOKIE_HINTS: dict[str, tuple[str, ...]] = {
 TOOL_BRIDGE_EVENT_LIMIT = 200
 MEDIA_GENERATION_CACHE_LIMIT = 100
 MEDIA_GENERATION_TTL_SECONDS = 60 * 60
-DEFAULT_IMAGE_GENERATION_MODEL = "gpt-image-1.5"
+DEFAULT_IMAGE_GENERATION_MODEL = "gpt-image-2"
 DEFAULT_VIDEO_GENERATION_MODEL = "sora-2"
 WEBAI2API_BROWSER_READY_RETRY_DELAYS_SECONDS = (2.0, 5.0, 10.0, 20.0)
 WEBAI2API_BROWSER_NOT_READY_MARKERS = (
@@ -3539,7 +3539,9 @@ def _run_webai2api_media_generation(
     text = response.text.strip()
     if text.startswith("data:") or "text/event-stream" in response.headers.get("content-type", ""):
         content, _finish_reason = parse_sse_text(response.text)
+        upstream_error = _extract_sse_error_message(response.text)
     else:
+        upstream_error = ""
         try:
             data = response.json()
         except ValueError as exc:
@@ -3549,8 +3551,49 @@ def _run_webai2api_media_generation(
         content = _openai_response_content(data)
     data_uri = _extract_media_data_uri(content, expected_kind=kind)
     if not data_uri:
+        if upstream_error:
+            raise HTTPException(
+                status_code=_gateway_status_code_for_upstream_error_message(upstream_error),
+                detail=_preview_text(_redact_sensitive_text(upstream_error), max_chars=800),
+            )
         raise HTTPException(status_code=502, detail=f"Upstream {kind} response did not contain media data")
     return data_uri
+
+
+def _extract_sse_error_message(text: str) -> str:
+    for block in (text or "").split("\n\n"):
+        for line in block.splitlines():
+            line = line.strip()
+            if not line.startswith("data:"):
+                continue
+            raw = line[5:].strip()
+            if raw == "[DONE]":
+                continue
+            try:
+                data = json.loads(raw)
+            except Exception:
+                continue
+            if not isinstance(data, dict):
+                continue
+            error = data.get("error")
+            if not isinstance(error, dict):
+                continue
+            message = error.get("message") or error.get("detail") or ""
+            code = error.get("code") or ""
+            if message and code:
+                return f"{code}: {message}"
+            if message:
+                return str(message)
+            if code:
+                return str(code)
+    return ""
+
+
+def _gateway_status_code_for_upstream_error_message(message: str) -> int:
+    lowered = str(message or "").lower()
+    if any(marker in lowered for marker in ("invalid_model", "invalid model", "model invalid", "does not support", "不支持")):
+        return 400
+    return 502
 
 
 def _media_user_message(prompt: str, input_images: list[str]) -> dict[str, Any]:

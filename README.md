@@ -108,9 +108,9 @@ Claude Code Best 可在 `/login` 里选择 `Anthropic Compatible`，或写入 `~
 
 如果某类工具结果会把上下文撑爆，例如 `Glob("*.md")` 返回大量 `node_modules`、`.pnpm`、`dist`、`build` 路径，应优先调整通用的 `tool_bridge.observationPolicy`，不要为某个模型或客户端写专用分支。
 
-网页登录模型的单次请求超时由通用 `providerRuntime.requestTimeoutSeconds` 控制，默认 180 秒。工具调用 JSON 一旦完整返回仍会提前结束请求，因此提高该值主要保护 `/init`、项目总结、长文档归纳等慢任务，不会刻意拖慢快速工具选择。
+网页登录模型的单次请求超时由通用 `providerRuntime.requestTimeoutSeconds` 控制，默认 300 秒。工具调用 JSON 一旦完整返回仍会提前结束请求，因此提高该值主要保护 `/init`、项目总结、长文档归纳等慢任务，不会刻意拖慢快速工具选择。
 
-网页登录模型的输入预算由 `providerRuntime.promptMaxChars` 控制，默认 12000 字符。超过预算时会保留开头、WebAI Gateway 工具协议和最后的用户任务，压缩中间的大段技能列表、规则列表或历史上下文，避免网页模型在第一轮请求里长时间无输出。
+网页登录模型的输入预算由 `providerRuntime.promptMaxChars` 控制，默认 32000 字符。超过预算时会保留开头、WebAI Gateway 工具协议和最后的用户任务，压缩中间的大段技能列表、规则列表或历史上下文，避免网页模型在第一轮请求里长时间无输出。
 
 ## 模型目录
 
@@ -159,8 +159,8 @@ WebAI2API 支持的站点和模型会继续透传并合并到 `/v1/models`。模
     "toolMode": "prompt"
   },
   "providerRuntime": {
-    "requestTimeoutSeconds": 180,
-    "promptMaxChars": 12000,
+    "requestTimeoutSeconds": 300,
+    "promptMaxChars": 32000,
     "nativeWebSearchPolicy": "auto",
     "responseLanguage": "zh-CN",
     "deepseekDs2apiBaseUrl": "http://127.0.0.1:9331/v1"
@@ -208,6 +208,10 @@ WebAI2API 支持的站点和模型会继续透传并合并到 `/v1/models`。模
 - `GET /api/admin/web-auth/credentials`
 - `DELETE /api/admin/web-auth/credentials/{provider_id}`
 - `GET /v1/models`
+- `POST /v1/images/generations`
+- `POST /v1/videos`
+- `GET /v1/videos/{video_id}`
+- `GET /v1/videos/{video_id}/content`
 - `POST /v1/chat/completions`
 - `POST /v1/messages`
 - `POST /v1/messages/count_tokens`

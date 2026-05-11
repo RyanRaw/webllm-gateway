@@ -11632,6 +11632,67 @@ def test_images_generations_wraps_webai2api_chat_media_response(tmp_path: Path) 
     assert body["data"] == [{"b64_json": "aGVsbG8="}]
 
 
+def test_images_generation_defaults_to_gpt_image_2(tmp_path: Path) -> None:
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(
+            200,
+            json=_openai_response("data:image/png;base64,aGVsbG8="),
+            request=request,
+        )
+
+    client = TestClient(
+        create_app(
+            config=_config(),
+            credential_store=CredentialStore(tmp_path / "credentials"),
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+    )
+
+    response = client.post(
+        "/v1/images/generations",
+        headers=_headers(),
+        json={"prompt": "red square", "response_format": "b64_json"},
+    )
+
+    assert response.status_code == 200
+    assert seen["body"]["model"] == "gpt-image-2"
+
+
+def test_images_generation_surfaces_webai2api_sse_errors(tmp_path: Path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            text=(
+                'data: {"error":{"message":"model invalid/backend pool does not support: '
+                'gpt-image-2","type":"invalid_request_error","code":"INVALID_MODEL"}}\n\n'
+                "data: [DONE]\n\n"
+            ),
+            headers={"content-type": "text/event-stream"},
+            request=request,
+        )
+
+    client = TestClient(
+        create_app(
+            config=_config(),
+            credential_store=CredentialStore(tmp_path / "credentials"),
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+    )
+
+    response = client.post(
+        "/v1/images/generations",
+        headers=_headers(),
+        json={"model": "gpt-image-2", "prompt": "red square"},
+    )
+
+    assert response.status_code == 400
+    assert "gpt-image-2" in response.json()["detail"]
+    assert "INVALID_MODEL" in response.json()["detail"]
+
+
 def test_videos_create_stores_retrievable_content_from_webai2api(tmp_path: Path) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -11678,6 +11739,7 @@ def test_media_models_are_advertised_with_image_and_video_capabilities(tmp_path:
             json={
                 "object": "list",
                 "data": [
+                    {"id": "gpt-image-2", "object": "model", "owned_by": "chatgpt", "type": "image"},
                     {"id": "gpt-image-1.5", "object": "model", "owned_by": "chatgpt", "type": "image"},
                     {"id": "sora-2", "object": "model", "owned_by": "sora", "type": "image"},
                 ],
@@ -11697,6 +11759,8 @@ def test_media_models_are_advertised_with_image_and_video_capabilities(tmp_path:
 
     assert response.status_code == 200
     models = {item["id"]: item for item in response.json()["data"]}
+    assert models["gpt-image-2"]["capabilities"]["image"] is True
+    assert models["gpt-image-2"]["capabilities"]["video"] is False
     assert models["gpt-image-1.5"]["capabilities"]["image"] is True
     assert models["gpt-image-1.5"]["capabilities"]["video"] is False
     assert models["sora-2"]["type"] == "video"

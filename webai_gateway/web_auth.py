@@ -48,7 +48,7 @@ class WebAuthProvider:
 
 
 WEBAI2API_MODELS: dict[str, tuple[str, ...]] = {
-    "chatgpt": ("gpt-image-1.5",),
+    "chatgpt": ("gpt-image-2", "gpt-image-1.5"),
     "chatgpt_text": ("gpt-instant", "gpt-thinking", "gpt-pro"),
     "deepseek_text": (
         "deepseek",
