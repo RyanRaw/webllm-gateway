@@ -205,6 +205,35 @@ const selectedProviderNotice = computed(() => {
   }
   return null;
 });
+const selectedProviderAccountStatus = computed(() => {
+  const provider = selectedProvider.value;
+  if (!provider || selectedProviderAccounts.value.length) return null;
+  const declaredModelCount = providerDeclaredModelCount(provider);
+
+  if (provider.loginKind !== 'direct') {
+    return {
+      tone: 'sidecar',
+      title: 'WebAI2API 账号池暂不可读',
+      description: `${provider.name} 的账号和浏览器登录态由 WebAI2API sidecar 管理。当前 Gateway 没有读到账号池；如果你之前登录过，通常只是 sidecar 或 API 没启动，不代表账号被清空。`,
+      note: declaredModelCount
+        ? `本地仍保留 ${declaredModelCount} 个候选模型配置；启动 sidecar 并刷新后，会显示实际可用账号和模型。`
+        : '启动 WebAI2API sidecar 并刷新后，会同步实际可用账号和模型。',
+      action: '可用“登录或修复账号”进入 WebAI2API 登录/恢复流程。',
+    };
+  }
+
+  return {
+    tone: 'direct',
+    title: '还没有检测到直连账号',
+    description: `${provider.name} 由 Gateway 直连登录态管理。点击“打开授权浏览器”完成登录后，Gateway 会保存非敏感 metadata 并刷新模型可用性。`,
+    note: '如果刚完成登录，请先刷新模型；如果仍为空，再重新打开授权浏览器检测登录态。',
+    action: '直连账号只保存在 Gateway 的本地 profile，不会写入 WebAI2API 账号池。',
+  };
+});
+const accountSectionHint = computed(() => {
+  if (currentAccount.value) return `当前使用：${currentAccount.value.displayName}`;
+  return selectedProviderAccountStatus.value?.title || '当前平台还没有检测到可用账号';
+});
 const progressStepItems = computed(() => {
   if (actionKind.value === 'smoke') {
     return [{ title: '发起检测' }, { title: '工具桥闭环' }, { title: '完成' }];
@@ -222,7 +251,7 @@ function isProviderReady(provider) {
   if (!provider) return false;
   if (provider.loginKind === 'direct') return Boolean(provider.credential?.authorized);
   if (provider.webAI2APIAuth?.checked) return Boolean(provider.credential?.authorized);
-  return true;
+  return providerAccountCount(provider) > 0 || providerModelCount(provider) > 0;
 }
 
 function isProviderAuthorized(provider) {
@@ -253,6 +282,25 @@ function providerModelCount(provider) {
 
 function providerAccountCount(provider) {
   return Array.isArray(provider?.accounts) ? provider.accounts.length : 0;
+}
+
+function providerDeclaredModelCount(provider) {
+  return Array.isArray(provider?.models) ? provider.models.length : 0;
+}
+
+function providerSubtitle(provider) {
+  const accountCount = providerAccountCount(provider);
+  const modelCount = providerModelCount(provider);
+  if (provider?.loginKind !== 'direct') {
+    if (!accountCount && !modelCount) {
+      const declaredModelCount = providerDeclaredModelCount(provider);
+      return declaredModelCount
+        ? `账号池暂不可读 · ${declaredModelCount} 个候选模型`
+        : '账号池暂不可读 · 等待 sidecar 同步';
+    }
+    return `${accountCount} 个账号 · ${modelCount} 个已验证模型 ID`;
+  }
+  return `${accountCount} 个账号 · ${modelCount} 个可用模型 ID`;
 }
 
 function accountPlanLabel(planType) {
@@ -806,7 +854,7 @@ onMounted(loadOnboarding);
             >
               <span class="provider-main">
                 <strong>{{ provider.name }}</strong>
-                <small>{{ providerAccountCount(provider) }} 个账号 · {{ providerModelCount(provider) }} 个可用模型 ID</small>
+                <small>{{ providerSubtitle(provider) }}</small>
               </span>
               <span class="provider-tags">
                 <a-tag v-if="isProviderAuthorized(provider)" color="success">已授权</a-tag>
@@ -854,7 +902,7 @@ onMounted(loadOnboarding);
               <div class="section-title">
                 <div>
                   <strong>授权账号</strong>
-                  <span>{{ currentAccount ? `当前使用：${currentAccount.displayName}` : '当前平台还没有检测到可用账号' }}</span>
+                  <span>{{ accountSectionHint }}</span>
                 </div>
                 <a-button
                   size="small"
@@ -920,7 +968,22 @@ onMounted(loadOnboarding);
                   </div>
                 </article>
               </div>
-              <a-empty v-else image="simple" description="暂无已授权账号。登录完成并刷新后会显示在这里。" />
+              <div
+                v-else
+                class="empty-account-state"
+                :class="`tone-${selectedProviderAccountStatus?.tone || 'neutral'}`"
+              >
+                <div class="empty-account-icon">
+                  <LinkOutlined v-if="selectedProvider?.loginKind !== 'direct'" />
+                  <LoginOutlined v-else />
+                </div>
+                <div class="empty-account-copy">
+                  <strong>{{ selectedProviderAccountStatus?.title || '暂无已授权账号' }}</strong>
+                  <p>{{ selectedProviderAccountStatus?.description || '登录完成并刷新后会显示在这里。' }}</p>
+                  <small v-if="selectedProviderAccountStatus?.note">{{ selectedProviderAccountStatus.note }}</small>
+                  <small v-if="selectedProviderAccountStatus?.action">{{ selectedProviderAccountStatus.action }}</small>
+                </div>
+              </div>
             </div>
 
             <a-alert
@@ -1006,6 +1069,90 @@ onMounted(loadOnboarding);
           </div>
         </section>
       </div>
+
+      <section class="panel architecture-panel">
+        <div class="panel-heading compact">
+          <div>
+            <h2>项目架构</h2>
+            <p>Gateway 只做协议适配和网页登录通路编排；工具执行、权限确认和本地副作用仍由下游客户端负责。</p>
+          </div>
+          <ApiOutlined />
+        </div>
+
+        <div class="architecture-map" aria-label="WebAI Gateway 架构图">
+          <article class="arch-stage">
+            <span class="arch-eyebrow">下游客户端</span>
+            <h3>统一接入层</h3>
+            <ul class="arch-list">
+              <li>
+                <strong>Claude Code</strong>
+                <small>Anthropic-compatible `/v1/messages`</small>
+              </li>
+              <li>
+                <strong>KrisAI / Hermes / OpenClaw</strong>
+                <small>OpenAI-compatible `/v1/chat/completions`、图片接口</small>
+              </li>
+            </ul>
+          </article>
+
+          <article class="arch-stage core">
+            <span class="arch-eyebrow">WebAI Gateway</span>
+            <h3>协议与能力编排</h3>
+            <ul class="arch-list">
+              <li>
+                <strong>Protocol Adapter</strong>
+                <small>OpenAI / Anthropic 请求、流式响应、模型目录</small>
+              </li>
+              <li>
+                <strong>ToolBridgeV2</strong>
+                <small>把标准工具调用转为网页模型可理解的文本协议</small>
+              </li>
+              <li>
+                <strong>Account / Model Registry</strong>
+                <small>只保存账号 metadata、可用性和 capability，不执行本地工具</small>
+              </li>
+            </ul>
+          </article>
+
+          <article class="arch-stage">
+            <span class="arch-eyebrow">Provider Runtime</span>
+            <h3>直连与 Sidecar</h3>
+            <ul class="arch-list">
+              <li>
+                <strong>Direct Provider</strong>
+                <small>Qwen Web、DeepSeek Web，按 ds2api 行为对齐</small>
+              </li>
+              <li>
+                <strong>WebAI2API Sidecar</strong>
+                <small>ChatGPT、Gemini、Sora、LMArena 等网页账号池</small>
+              </li>
+              <li>
+                <strong>ds2api Oracle</strong>
+                <small>作为 DeepSeek/Qwen 路线的协议和稳定性对照</small>
+              </li>
+            </ul>
+          </article>
+
+          <article class="arch-stage">
+            <span class="arch-eyebrow">网页登录上游</span>
+            <h3>真实网页模型</h3>
+            <ul class="arch-list">
+              <li>
+                <strong>ChatGPT / Gemini / Sora</strong>
+                <small>登录态在 WebAI2API sidecar 的浏览器缓存和账号池里</small>
+              </li>
+              <li>
+                <strong>Qwen / DeepSeek</strong>
+                <small>登录态由 Gateway direct profile 管理并做可用模型检测</small>
+              </li>
+            </ul>
+          </article>
+        </div>
+
+        <div class="architecture-note">
+          ChatGPT 之前授权过但这里显示为空，通常是因为只启动了 Gateway，未连接 WebAI2API sidecar。授权记录大概率仍在 sidecar 的浏览器缓存中；启动 sidecar 并刷新后才会同步账号和模型。
+        </div>
+      </section>
 
       <section class="panel models-panel">
         <div class="panel-heading compact">
@@ -1464,6 +1611,58 @@ onMounted(loadOnboarding);
   gap: 8px;
 }
 
+.empty-account-state {
+  align-items: flex-start;
+  background: #f8fafc;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  display: flex;
+  gap: 12px;
+  padding: 14px;
+}
+
+.empty-account-state.tone-sidecar {
+  background: #fff7ed;
+  border-color: #fed7aa;
+}
+
+.empty-account-state.tone-direct {
+  background: #f0f9ff;
+  border-color: #bae6fd;
+}
+
+.empty-account-icon {
+  align-items: center;
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  color: #1677ff;
+  display: inline-flex;
+  flex: 0 0 40px;
+  font-size: 18px;
+  height: 40px;
+  justify-content: center;
+  width: 40px;
+}
+
+.empty-account-copy {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.empty-account-copy strong {
+  color: #0f172a;
+}
+
+.empty-account-copy p,
+.empty-account-copy small {
+  color: #475569;
+  line-height: 1.55;
+  margin: 0;
+  text-wrap: pretty;
+}
+
 .field-block {
   display: grid;
   gap: 8px;
@@ -1475,8 +1674,86 @@ onMounted(loadOnboarding);
 }
 
 .models-panel,
+.architecture-panel,
 .config-panel {
   margin-bottom: 16px;
+}
+
+.architecture-map {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.arch-stage {
+  background: #f8fafc;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  padding: 14px;
+}
+
+.arch-stage.core {
+  background: #eff6ff;
+  border-color: #bfdbfe;
+}
+
+.arch-eyebrow {
+  color: #1677ff;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.arch-stage h3 {
+  font-size: 15px;
+  margin: 0;
+}
+
+.arch-list {
+  display: grid;
+  gap: 8px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.arch-list li {
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 6px;
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 9px;
+}
+
+.arch-list strong,
+.arch-list small {
+  overflow-wrap: anywhere;
+}
+
+.arch-list strong {
+  color: #0f172a;
+  font-size: 13px;
+}
+
+.arch-list small {
+  color: #64748b;
+  line-height: 1.45;
+  text-wrap: pretty;
+}
+
+.architecture-note {
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  border-radius: 8px;
+  color: #7c2d12;
+  line-height: 1.6;
+  margin-top: 12px;
+  padding: 12px 14px;
+  text-wrap: pretty;
 }
 
 .model-toolbar {
@@ -1552,6 +1829,7 @@ onMounted(loadOnboarding);
 @media (max-width: 980px) {
   .hero-panel,
   .workspace-grid,
+  .architecture-map,
   .config-grid {
     grid-template-columns: 1fr;
   }
@@ -1569,6 +1847,12 @@ onMounted(loadOnboarding);
 
   .stat-grid {
     grid-template-columns: 1fr;
+  }
+
+  .section-title,
+  .empty-account-state {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }
 </style>
