@@ -12898,7 +12898,7 @@ def test_vendored_webai2api_frontend_has_gateway_bridge_page() -> None:
     assert "/gateway/kris-bridge" in main_source
     assert "/dashboard" not in main_source
     assert "redirect: '/'" in main_source
-    assert "网页登录向导" in app_source
+    assert "网页登录 API" in app_source
     assert "publicRoutes" in app_source
     assert "WebAI Gateway" in app_source
     assert "状态概览" not in app_source
@@ -12914,8 +12914,10 @@ def test_vendored_webai2api_frontend_has_gateway_bridge_page() -> None:
     assert "新增网页账号" not in bridge_source
     assert "添加授权账号" in bridge_source
     assert "切换并检测" in bridge_source
-    assert "网页文本通路" in bridge_source
-    assert "不支持原生工具调用" in bridge_source
+    assert "把网页账号变成可调用 API" in bridge_source
+    assert "登录 Worker" not in bridge_source
+    assert "项目架构" not in bridge_source
+    assert "工具桥" not in bridge_source
     assert "账号池暂不可读" not in bridge_source
     assert "需要登录" in bridge_source
     assert "打开网页登录授权" in bridge_source
@@ -12939,6 +12941,7 @@ def test_open_source_release_materials_are_present() -> None:
         "docs/installation.md",
         "docs/media-generation.md",
         "docs/third-party-runtime.md",
+        "docs/gateway-architecture-map.md",
         ".github/workflows/ci.yml",
     ]
 
@@ -12947,6 +12950,7 @@ def test_open_source_release_materials_are_present() -> None:
 
     readme = (root / "README.md").read_text(encoding="utf-8")
     architecture = (root / "docs" / "architecture.md").read_text(encoding="utf-8")
+    architecture_map = (root / "docs" / "gateway-architecture-map.md").read_text(encoding="utf-8")
     installation = (root / "docs" / "installation.md").read_text(encoding="utf-8")
     media = (root / "docs" / "media-generation.md").read_text(encoding="utf-8")
     third_party = (root / "docs" / "third-party-runtime.md").read_text(encoding="utf-8")
@@ -12964,6 +12968,8 @@ def test_open_source_release_materials_are_present() -> None:
     assert "ds2api" in third_party and "AGPL-3.0" in third_party
     assert "Gateway 不执行本地工具" in architecture
     assert "flowchart" in architecture
+    assert "```mermaid" in architecture_map
+    assert "产品首页不展示系统架构" in architecture_map
     assert "python -m pytest -q" in ci
     assert "corepack pnpm build" in ci
     assert "credentials/" in gitignore
@@ -12979,6 +12985,7 @@ def test_open_source_release_materials_are_present() -> None:
         "NOTICE.md",
         ".env.example",
         "docs/architecture.md",
+        "docs/gateway-architecture-map.md",
         "docs/auto-research-loop.md",
         "docs/installation.md",
         "docs/media-generation.md",
@@ -13625,6 +13632,22 @@ def test_admin_config_update_persists_and_reloads_auth_token(tmp_path: Path) -> 
     assert client.get("/v1/models", headers=_headers()).status_code == 401
     assert client.get("/v1/models", headers={"Authorization": "Bearer new-local-key"}).status_code == 200
     assert seen["path"] == "/v1/models"
+
+
+def test_gateway_auth_accepts_common_openai_client_key_headers() -> None:
+    client = _client(
+        lambda request: httpx.Response(
+            200,
+            json={"object": "list", "data": [{"id": "web-model", "object": "model"}]},
+            request=request,
+        )
+    )
+
+    assert client.get("/v1/models", headers={"Authorization": "bearer local-dev-key"}).status_code == 200
+    assert client.get("/v1/models", headers={"Authorization": "  Bearer   local-dev-key  "}).status_code == 200
+    assert client.get("/v1/models", headers={"api-key": "local-dev-key"}).status_code == 200
+    assert client.get("/v1/models", headers={"Authorization": "local-dev-key"}).status_code == 200
+    assert client.get("/v1/models", headers={"Authorization": "Bearer wrong-key"}).status_code == 401
 
 
 def test_tool_bridge_observation_policy_round_trips_config(tmp_path: Path) -> None:

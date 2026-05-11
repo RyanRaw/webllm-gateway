@@ -153,7 +153,7 @@ onUnmounted(() => {
         <span class="brand-mark"><RocketOutlined /></span>
         <div>
           <strong>WebAI Gateway</strong>
-          <small>网页登录向导</small>
+          <small>网页登录 API</small>
         </div>
       </div>
       <a-space wrap>
@@ -163,7 +163,7 @@ onUnmounted(() => {
         </a-button>
         <a-button danger @click="openLoginModal">
           <template #icon><PoweroffOutlined /></template>
-          控制台令牌
+          访问令牌
         </a-button>
       </a-space>
     </header>
@@ -222,20 +222,20 @@ onUnmounted(() => {
 }
 
 .app-shell {
-  background: #f6f8fb;
-  color: #172033;
+  background: #f5f7f8;
+  color: #111827;
   min-height: 100vh;
 }
 
 .topbar {
   align-items: center;
-  background: rgba(255, 255, 255, 0.92);
-  border-bottom: 1px solid #e6eaf0;
+  background: rgba(255, 255, 255, 0.96);
+  border-bottom: 1px solid #dbe4ed;
   display: flex;
   gap: 16px;
   justify-content: space-between;
-  min-height: 72px;
-  padding: 14px 28px;
+  min-height: 68px;
+  padding: 14px 32px;
   position: sticky;
   top: 0;
   z-index: 20;
@@ -250,10 +250,10 @@ onUnmounted(() => {
 
 .brand-mark {
   align-items: center;
-  background: #e8f1ff;
-  border: 1px solid #bfdbfe;
+  background: #ecfdf5;
+  border: 1px solid #a7f3d0;
   border-radius: 8px;
-  color: #1677ff;
+  color: #0f766e;
   display: inline-flex;
   font-size: 20px;
   height: 40px;
@@ -268,17 +268,18 @@ onUnmounted(() => {
 
 .brand strong {
   font-size: 18px;
+  letter-spacing: 0;
 }
 
 .brand small,
 .muted {
-  color: #64748b;
+  color: #667085;
 }
 
 .content-shell {
   margin: 0 auto;
-  max-width: 1480px;
-  padding: 20px;
+  max-width: 1220px;
+  padding: 22px;
 }
 
 .drawer-stack {
@@ -286,7 +287,7 @@ onUnmounted(() => {
 }
 
 .result-box {
-  background: #0f172a;
+  background: #101828;
   border-radius: 8px;
   color: #e5e7eb;
   margin: 0;

@@ -234,13 +234,31 @@ def create_app(
     def current_config() -> GatewayConfig:
         return app.state.config
 
-    def require_auth(authorization: str | None, x_api_key: str | None = None) -> None:
+    def auth_value_matches(value: str | None, expected: str) -> bool:
+        if value is None:
+            return False
+        candidate = str(value).strip()
+        if not candidate:
+            return False
+        if secrets.compare_digest(candidate, expected):
+            return True
+        parts = candidate.split(None, 1)
+        if len(parts) == 2 and parts[0].lower() == "bearer":
+            return secrets.compare_digest(parts[1].strip(), expected)
+        return False
+
+    def require_auth(authorization: str | None, x_api_key: str | None = None, api_key: str | None = None) -> None:
         cfg = current_config()
         if not cfg.server.api_key:
             return
-        expected = f"Bearer {cfg.server.api_key}"
-        if authorization != expected and x_api_key != cfg.server.api_key:
-            raise HTTPException(status_code=401, detail="Unauthorized")
+        expected = cfg.server.api_key
+        if (
+            auth_value_matches(authorization, expected)
+            or auth_value_matches(x_api_key, expected)
+            or auth_value_matches(api_key, expected)
+        ):
+            return
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
     def require_local_admin(request: Request) -> None:
         host = request.client.host if request.client else ""
@@ -1366,8 +1384,12 @@ def create_app(
         )
 
     @app.get("/v1/models")
-    def models(authorization: str | None = Header(default=None), x_api_key: str | None = Header(default=None, alias="x-api-key")) -> JSONResponse:
-        require_auth(authorization, x_api_key)
+    def models(
+        authorization: str | None = Header(default=None),
+        x_api_key: str | None = Header(default=None, alias="x-api-key"),
+        api_key: str | None = Header(default=None, alias="api-key"),
+    ) -> JSONResponse:
+        require_auth(authorization, x_api_key, api_key)
         cfg = current_config()
         try:
             response = client.get(cfg.upstream.base_url.rstrip("/") + "/models", headers=upstream_headers(cfg))
@@ -1384,8 +1406,9 @@ def create_app(
         request: Request,
         authorization: str | None = Header(default=None),
         x_api_key: str | None = Header(default=None, alias="x-api-key"),
+        api_key: str | None = Header(default=None, alias="api-key"),
     ) -> JSONResponse:
-        require_auth(authorization, x_api_key)
+        require_auth(authorization, x_api_key, api_key)
         cfg = current_config()
         body = await _json_body(request)
         result = await run_in_threadpool(_create_image_generation_response, app, client, cfg, body)
@@ -1396,8 +1419,9 @@ def create_app(
         request: Request,
         authorization: str | None = Header(default=None),
         x_api_key: str | None = Header(default=None, alias="x-api-key"),
+        api_key: str | None = Header(default=None, alias="api-key"),
     ) -> JSONResponse:
-        require_auth(authorization, x_api_key)
+        require_auth(authorization, x_api_key, api_key)
         cfg = current_config()
         body = await _json_body(request)
         result = await run_in_threadpool(_create_video_generation_response, app, client, cfg, body)
@@ -1408,8 +1432,9 @@ def create_app(
         video_id: str,
         authorization: str | None = Header(default=None),
         x_api_key: str | None = Header(default=None, alias="x-api-key"),
+        api_key: str | None = Header(default=None, alias="api-key"),
     ) -> JSONResponse:
-        require_auth(authorization, x_api_key)
+        require_auth(authorization, x_api_key, api_key)
         item = _get_cached_media_generation(app, video_id)
         if item is None:
             raise HTTPException(status_code=404, detail="Video generation not found")
@@ -1420,8 +1445,9 @@ def create_app(
         video_id: str,
         authorization: str | None = Header(default=None),
         x_api_key: str | None = Header(default=None, alias="x-api-key"),
+        api_key: str | None = Header(default=None, alias="api-key"),
     ) -> Response:
-        require_auth(authorization, x_api_key)
+        require_auth(authorization, x_api_key, api_key)
         item = _get_cached_media_generation(app, video_id)
         if item is None:
             raise HTTPException(status_code=404, detail="Video generation not found")
@@ -1436,8 +1462,9 @@ def create_app(
         request: Request,
         authorization: str | None = Header(default=None),
         x_api_key: str | None = Header(default=None, alias="x-api-key"),
+        api_key: str | None = Header(default=None, alias="api-key"),
     ) -> Response:
-        require_auth(authorization, x_api_key)
+        require_auth(authorization, x_api_key, api_key)
         cfg = current_config()
         body = normalize_model_body(await _json_body(request), default_model=cfg.upstream.model)
         if is_deepseek_web_model(body.get("model")):
@@ -1652,8 +1679,9 @@ def create_app(
         request: Request,
         authorization: str | None = Header(default=None),
         x_api_key: str | None = Header(default=None, alias="x-api-key"),
+        api_key: str | None = Header(default=None, alias="api-key"),
     ) -> JSONResponse:
-        require_auth(authorization, x_api_key)
+        require_auth(authorization, x_api_key, api_key)
         body = await _json_body(request)
         return JSONResponse(anthropic_count_tokens(body))
 
@@ -1663,8 +1691,9 @@ def create_app(
         request: Request,
         authorization: str | None = Header(default=None),
         x_api_key: str | None = Header(default=None, alias="x-api-key"),
+        api_key: str | None = Header(default=None, alias="api-key"),
     ) -> Response:
-        require_auth(authorization, x_api_key)
+        require_auth(authorization, x_api_key, api_key)
         cfg = current_config()
         body = normalize_model_body(await _json_body(request), default_model=cfg.upstream.model)
         try:

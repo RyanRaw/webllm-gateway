@@ -31,7 +31,6 @@ const actionLogs = ref([]);
 const actionKind = ref('');
 const accountActionId = ref('');
 const selectedProviderId = ref('');
-const selectedWorkerName = ref('');
 const modelSearch = ref('');
 const modelScope = ref('selected');
 const imagePrompt = ref('一张干净的产品摄影图：蓝色玻璃质感的 AI 网关设备，白色背景，柔和棚拍光');
@@ -41,7 +40,6 @@ const imageError = ref('');
 const imageResultUrl = ref('');
 const tokenVisible = ref(false);
 const cdpUrl = ref('http://127.0.0.1:9222');
-const workerOptions = ref([]);
 const accountEditOpen = ref(false);
 const accountEditSaving = ref(false);
 const accountEditForm = ref({
@@ -111,17 +109,6 @@ const currentAccount = computed(() => {
     || null;
 });
 
-const selectedProviderWorkers = computed(() => {
-  const provider = selectedProvider.value;
-  if (!provider) return [];
-  const adapters = new Set(provider.adapters || []);
-  const matched = workerOptions.value.filter((worker) => {
-    if (adapters.has(worker.type)) return true;
-    return (worker.mergeTypes || []).some((type) => adapters.has(type));
-  });
-  return matched.length ? matched : workerOptions.value;
-});
-
 const connectionProfiles = computed(() => (
   Array.isArray(onboarding.value.connectionProfiles) ? onboarding.value.connectionProfiles : []
 ));
@@ -186,20 +173,18 @@ const imageRequestExample = computed(() => JSON.stringify({
 }, null, 2));
 
 const clientConfig = computed(() => [
-  '# OpenAI-compatible clients',
+  '# OpenAI-compatible',
   `base_url = ${gatewayBaseUrl.value}`,
   `api_key = ${gatewayToken.value || '<网关令牌>'}`,
   `model = ${selectedClientModel.value}`,
   '',
-  '# Claude Code / Anthropic-compatible clients',
+  '# Anthropic-compatible',
   `ANTHROPIC_BASE_URL=${gatewayBaseUrl.value}`,
   `ANTHROPIC_AUTH_TOKEN=${gatewayToken.value || '<网关令牌>'}`,
   `ANTHROPIC_DEFAULT_SONNET_MODEL=${selectedClientModel.value}`,
   `ANTHROPIC_DEFAULT_OPUS_MODEL=${selectedClientModel.value}`,
   '',
-  `# 当前平台：${selectedConnectionProfile.value?.providerName || selectedProvider.value?.name || 'Gateway 默认上游'}`,
-  `# 实际通路：${selectedConnectionProfile.value?.backendKind || 'gateway'}`,
-  '# 工具调用由 WebAI Gateway 转换为网页模型可理解的 prompt 协议',
+  `# 推荐平台：${selectedConnectionProfile.value?.providerName || selectedProvider.value?.name || 'Gateway 默认'}`,
 ].join('\n'));
 
 const modelColumns = [
@@ -212,24 +197,24 @@ const modelColumns = [
 
 const stepItems = computed(() => [
   { title: '选择平台', status: selectedProvider.value ? 'finish' : 'process' },
-  { title: '网页登录', status: isProviderReady(selectedProvider.value) ? 'finish' : actionLoading.value ? 'process' : 'wait' },
-  { title: '使用模型', status: filteredModels.value.length ? 'finish' : 'wait' },
+  { title: '完成授权', status: isProviderReady(selectedProvider.value) ? 'finish' : actionLoading.value ? 'process' : 'wait' },
+  { title: '复制接入', status: filteredModels.value.length ? 'finish' : 'wait' },
 ]);
 
-const progressTitle = computed(() => (actionKind.value === 'smoke' ? '工具调用检测' : '网页登录进度'));
+const progressTitle = computed(() => (actionKind.value === 'smoke' ? '接入检测' : '网页登录进度'));
 const selectedProviderNotice = computed(() => {
   const provider = selectedProvider.value;
   if (!provider) return null;
   if (provider.id === 'chatgpt') {
     return {
-      type: 'warning',
-      message: 'ChatGPT 通过网页文本通路接入，不支持原生工具调用。Gateway 会用工具桥把 Claude Code 的工具请求转成网页模型能理解的文本协议；请先用“切换并检测”确认当前 Plus 账号的模型可用。',
+      type: 'info',
+      message: 'ChatGPT 需要先完成网页登录授权。授权后点击“检测模型”，确认当前账号可用模型。',
     };
   }
   if (provider.supportsNativeTools === false && String(provider.toolBridge || '').toLowerCase() !== 'off') {
     return {
       type: 'info',
-      message: '该平台通过网页文本通路接入，不支持原生工具调用；工具请求会由 Gateway 工具桥做标准协议转换。',
+      message: '该平台通过网页登录接入；Gateway 会自动整理客户端请求格式。',
     };
   }
   return null;
@@ -241,22 +226,22 @@ const selectedProviderAccountStatus = computed(() => {
 
   if (provider.loginKind !== 'direct') {
     return {
-      tone: 'sidecar',
+      tone: 'web',
       title: '需要登录',
-      description: `${provider.name} 还没有检测到可用网页登录账号。点击“打开网页登录授权”后，在弹出的浏览器里完成登录，回到这里恢复 API 并刷新模型。`,
+      description: `${provider.name} 还没有检测到可用账号。点击“打开网页登录授权”，在弹出的窗口里完成登录，回到这里刷新模型即可。`,
       note: declaredModelCount
         ? `本地已有 ${declaredModelCount} 个候选模型配置；授权完成后会自动检测实际可用模型。`
         : '授权完成并刷新后，会显示实际可用账号和模型。',
-      action: '不需要手动配置 cookie、worker 或内部 runtime。',
+      action: '不需要手动复制 Cookie 或填写浏览器参数。',
     };
   }
 
   return {
     tone: 'direct',
-    title: '还没有检测到直连账号',
-    description: `${provider.name} 由 Gateway 直连登录态管理。点击“打开授权浏览器”完成登录后，Gateway 会保存非敏感 metadata 并刷新模型可用性。`,
+    title: '需要授权',
+    description: `点击“打开授权浏览器”完成 ${provider.name} 登录后，Gateway 会自动检测账号和模型。`,
     note: '如果刚完成登录，请先刷新模型；如果仍为空，再重新打开授权浏览器检测登录态。',
-    action: '直连账号只保存在 Gateway 的本地 profile，不会写入 WebAI2API 账号池。',
+    action: '登录信息只保存在本机。',
   };
 });
 const accountSectionHint = computed(() => {
@@ -265,12 +250,12 @@ const accountSectionHint = computed(() => {
 });
 const progressStepItems = computed(() => {
   if (actionKind.value === 'smoke') {
-    return [{ title: '发起检测' }, { title: '工具桥闭环' }, { title: '完成' }];
+    return [{ title: '发起检测' }, { title: '等待响应' }, { title: '完成' }];
   }
   return [
-    { title: '启动' },
-    { title: actionKind.value === 'direct' ? '检测登录' : '登录模式' },
-    { title: '完成' },
+    { title: '打开窗口' },
+    { title: '完成登录' },
+    { title: '刷新模型' },
   ];
 });
 const progressCurrent = computed(() => (actionLoading.value ? 1 : actionError.value ? 0 : 2));
@@ -324,12 +309,12 @@ function providerSubtitle(provider) {
     if (!accountCount && !modelCount) {
       const declaredModelCount = providerDeclaredModelCount(provider);
       return declaredModelCount
-        ? `需要登录 · ${declaredModelCount} 个候选模型`
-        : '需要登录 · 等待授权';
+        ? `需要登录 · ${declaredModelCount} 个模型待检测`
+        : '需要登录';
     }
-    return `${accountCount} 个账号 · ${modelCount} 个已验证模型 ID`;
+    return `${accountCount} 个账号 · ${modelCount} 个可用模型`;
   }
-  return `${accountCount} 个账号 · ${modelCount} 个可用模型 ID`;
+  return `${accountCount} 个账号 · ${modelCount} 个可用模型`;
 }
 
 function accountPlanLabel(planType) {
@@ -355,8 +340,8 @@ function accountPlanColor(planType) {
 }
 
 function accountSourceLabel(account) {
-  if (account?.source === 'direct-profile') return '网关直连';
-  return `${account?.instanceName || 'WebAI2API'} / ${account?.workerName || 'worker'}`;
+  if (account?.source === 'direct-profile') return '本机授权账号';
+  return '网页登录账号';
 }
 
 function modelAvailability(modelId) {
@@ -388,12 +373,6 @@ function capabilityLabels(provider) {
   if (caps.text) labels.push({ label: '文本', color: 'blue' });
   if (caps.image) labels.push({ label: '图片', color: 'green' });
   if (caps.video) labels.push({ label: '视频', color: 'orange' });
-  if (String(provider.toolBridge || '').toLowerCase() !== 'off') labels.push({ label: '网页文本通路', color: 'cyan' });
-  if (provider.supportsNativeTools) {
-    labels.push({ label: '原生工具', color: 'green' });
-  } else if (String(provider.toolBridge || '').toLowerCase() !== 'off') {
-    labels.push({ label: '工具桥', color: 'purple' });
-  }
   return labels;
 }
 
@@ -409,11 +388,6 @@ function modelCapabilityLabels(model) {
     labels.push({ label: '文本', color: 'blue' });
     if (imagePolicy === 'optional' || imagePolicy === 'required') {
       labels.push({ label: '可附图', color: 'green' });
-    }
-    if (caps.supports_native_tools) {
-      labels.push({ label: '原生工具', color: 'green' });
-    } else if (caps.tool_bridge) {
-      labels.push({ label: '工具桥', color: 'purple' });
     }
     return labels;
   }
@@ -449,35 +423,10 @@ async function loadOnboarding() {
     if (!selectedProviderId.value && providers.value.length) {
       selectedProviderId.value = providers.value[0].id;
     }
-    await loadWorkers();
   } catch (error) {
     loadError.value = error.message || String(error);
   } finally {
     loading.value = false;
-  }
-}
-
-async function loadWorkers() {
-  try {
-    const res = await fetch('/admin/config/instances', { headers: settingsStore.getHeaders() });
-    if (!res.ok) return;
-    const instances = await res.json();
-    const workers = [];
-    for (const instance of instances || []) {
-      for (const worker of instance.workers || []) {
-        workers.push({
-          label: `${worker.name} · ${worker.type}`,
-          value: worker.name,
-          name: worker.name,
-          type: worker.type,
-          mergeTypes: worker.mergeTypes || [],
-          instance: instance.name,
-        });
-      }
-    }
-    workerOptions.value = workers;
-  } catch {
-    workerOptions.value = [];
   }
 }
 
@@ -499,7 +448,7 @@ async function handleStartLogin(options = {}) {
   Modal.confirm({
     title: newAccount ? '添加授权账号？' : '打开网页登录授权？',
     content: newAccount
-      ? '这会为新账号创建独立浏览器 Profile，并打开网页登录窗口。完成登录后回到这里，点击“恢复 API 并刷新”。'
+      ? '这会为新账号打开独立的网页登录窗口。完成登录后回到这里，点击“恢复 API 并刷新”。'
       : '这会打开当前账号的网页登录窗口，用于修复登录态或更新账号权益。完成后回到这里，点击“恢复 API 并刷新”。',
     okText: newAccount ? '添加并授权' : '打开授权窗口',
     cancelText: '取消',
@@ -564,33 +513,23 @@ async function startWebAI2APILogin(provider, options = {}) {
   actionLoading.value = true;
   try {
     const newAccount = Boolean(options.newAccount);
-    const workerName = newAccount ? undefined : (selectedWorkerName.value || undefined);
-    appendLog(
-      workerName
-        ? `正在以登录模式重启 Worker：${workerName}`
-        : newAccount
-          ? '正在创建独立浏览器 Profile 并打开网页登录窗口'
-          : '正在准备网页登录授权窗口',
-    );
+    appendLog(newAccount ? '正在创建新的网页登录授权窗口' : '正在打开网页登录授权窗口');
     const res = await fetch(`/api/admin/onboarding/providers/${encodeURIComponent(provider.id)}/login`, {
       method: 'POST',
       headers: {
         ...settingsStore.getHeaders(),
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ providerId: provider.id, workerName, newAccount }),
+      body: JSON.stringify({ providerId: provider.id, newAccount }),
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok || data.success === false) {
       throw new Error(data.message || data.error?.message || `HTTP ${res.status}`);
     }
     if (data.sidecarStarted) {
-      appendLog(`内部网页登录 runtime 已启动${data.sidecarPid ? `，PID ${data.sidecarPid}` : ''}`);
+      appendLog('授权服务已准备好');
     }
     appendLog(data.message || '已进入网页登录授权模式');
-    if (data.instanceName || data.workerName) {
-      appendLog(`登录目标：${data.instanceName || '-'} / ${data.workerName || '-'}`);
-    }
     appendLog(`请在打开的窗口里完成 ${provider.name} 登录，然后回到这里点击“恢复 API 并刷新”`);
     message.success('网页登录窗口已准备好');
     window.open('/tools/display', '_blank', 'noopener,noreferrer');
@@ -683,7 +622,7 @@ async function runImageSmokeTest() {
     }
     message.success('图片生成链路可用');
   } catch (error) {
-    imageError.value = error.message || '图片生成失败，请先确认 ChatGPT / WebAI2API 授权账号可用';
+    imageError.value = error.message || '图片生成失败，请先确认 ChatGPT 授权账号可用';
   } finally {
     imageGenerating.value = false;
   }
@@ -861,7 +800,6 @@ function rotateToken() {
 }
 
 watch(selectedProviderId, () => {
-  selectedWorkerName.value = selectedProviderWorkers.value[0]?.value || '';
   modelScope.value = 'selected';
 });
 
@@ -872,9 +810,9 @@ onMounted(loadOnboarding);
   <div class="onboarding-shell">
     <section class="hero-panel">
       <div class="hero-copy">
-        <a-tag color="blue">WebAI Gateway</a-tag>
-        <h1>网页登录向导</h1>
-        <p>首页只展示当前已经实际验证过的网页模型通路；登录账号、检测可用模型后，复制模型 ID 给 Claude Code / KrisAI 等客户端使用。</p>
+        <a-tag color="blue">Local WebAI Access</a-tag>
+        <h1>把网页账号变成可调用 API</h1>
+        <p>登录网页账号，自动检测可用模型，然后把地址、Key 和模型填到 KrisAI、Claude Code 或其它客户端里。</p>
         <div class="hero-actions">
           <a-button type="primary" size="large" :loading="actionLoading" @click="handleStartLogin">
             <template #icon><LoginOutlined /></template>
@@ -891,7 +829,7 @@ onMounted(loadOnboarding);
         <a-steps size="small" :items="stepItems" />
         <div class="stat-grid">
           <div class="stat-item">
-            <span>平台</span>
+            <span>授权平台</span>
             <strong>{{ onboarding.summary.providers }}</strong>
           </div>
           <div class="stat-item">
@@ -899,7 +837,7 @@ onMounted(loadOnboarding);
             <strong>{{ onboarding.summary.models }}</strong>
           </div>
           <div class="stat-item">
-            <span>已授权</span>
+            <span>可用账号</span>
             <strong>{{ onboarding.summary.authorizedProviders ?? onboarding.summary.authorizedDirectProviders }}</strong>
           </div>
         </div>
@@ -919,8 +857,8 @@ onMounted(loadOnboarding);
         <section class="panel provider-panel">
           <div class="panel-heading">
             <div>
-              <h2>选择平台</h2>
-              <p>仅保留已跑通过的授权通路；其它候选平台先收进诊断入口。</p>
+              <h2>选择网页登录平台</h2>
+              <p>只保留当前验证过的可用入口，先完成一个平台授权即可开始调用。</p>
             </div>
             <AppstoreOutlined />
           </div>
@@ -941,7 +879,7 @@ onMounted(loadOnboarding);
               <span class="provider-tags">
                 <a-tag v-if="isProviderAuthorized(provider)" color="success">已授权</a-tag>
                 <a-tag v-else-if="provider.loginKind === 'direct'" color="warning">未授权</a-tag>
-                <a-tag v-else color="blue">WebAI2API</a-tag>
+                <a-tag v-else color="warning">需授权</a-tag>
               </span>
             </button>
           </div>
@@ -959,11 +897,11 @@ onMounted(loadOnboarding);
 
           <div v-if="selectedProvider" class="provider-detail">
             <div class="detail-row">
-              <span>登录方式</span>
-              <strong>{{ selectedProvider.loginKind === 'direct' ? '网关自动捕获' : '网页登录授权模式' }}</strong>
+              <span>授权方式</span>
+              <strong>{{ selectedProvider.loginKind === 'direct' ? '自动检测本机登录' : '网页登录授权' }}</strong>
             </div>
             <div class="detail-row">
-              <span>网页登录页</span>
+              <span>登录入口</span>
               <a-typography-link :href="selectedProvider.loginUrl" target="_blank">
                 {{ selectedProvider.loginUrl }}
               </a-typography-link>
@@ -1018,7 +956,7 @@ onMounted(loadOnboarding);
                   </div>
 
                   <div class="account-meta">
-                    <span>{{ account.availableModelCount || 0 }} 个模型未失败</span>
+                    <span>{{ account.availableModelCount || 0 }} 个模型可用</span>
                     <span>{{ accountValidationSummary(account) }}</span>
                     <span v-if="account.lastValidatedAt">最近验证 {{ new Date(account.lastValidatedAt).toLocaleString() }}</span>
                   </div>
@@ -1075,34 +1013,11 @@ onMounted(loadOnboarding);
               :message="selectedProvider.availabilityMessage"
             />
 
-            <template v-if="selectedProvider.loginKind === 'direct'">
-              <div class="field-block">
-                <label>授权浏览器调试地址</label>
-                <a-input v-model:value="cdpUrl" placeholder="http://127.0.0.1:9222" />
-              </div>
-              <a-alert
-                type="info"
-                show-icon
-                message="点击后会打开独立浏览器窗口。登录完成后，网关会自动检测并保存本机登录态。"
-              />
-            </template>
-
-            <template v-else>
-              <div class="field-block">
-                <label>登录 Worker</label>
-                <a-select
-                  v-model:value="selectedWorkerName"
-                  allow-clear
-                  placeholder="自动选择匹配 Worker"
-                  :options="selectedProviderWorkers"
-                />
-              </div>
-              <a-alert
-                type="info"
-                show-icon
-                message="Gateway 会打开网页登录窗口完成授权；授权结束后回到这里恢复 API，然后检测模型。"
-              />
-            </template>
+            <a-alert
+              type="info"
+              show-icon
+              message="点击后会打开网页登录窗口。完成登录后回到这里刷新模型，系统会自动同步账号状态。"
+            />
 
             <div class="action-row">
               <a-button type="primary" size="large" :loading="actionLoading" @click="handleStartLogin">
@@ -1130,27 +1045,27 @@ onMounted(loadOnboarding);
                 @click="runProviderSmoke"
               >
                 <template #icon><RocketOutlined /></template>
-                工具调用检测
+                验证接入
               </a-button>
             </div>
 
             <div class="shortcut-row">
               <a-button type="link" @click="diagnosticsOpen = !diagnosticsOpen">
                 <template #icon><ToolOutlined /></template>
-                {{ diagnosticsOpen ? '收起排障入口' : '排障入口' }}
+                {{ diagnosticsOpen ? '收起高级修复' : '高级修复' }}
               </a-button>
               <div v-if="diagnosticsOpen" class="diagnostic-links">
                 <a-button type="link" @click="openAdvanced('/tools/display')">
                   <template #icon><LinkOutlined /></template>
-                  内部浏览器画面
+                  授权窗口
                 </a-button>
                 <a-button type="link" @click="openAdvanced('/tools/cache')">
                   <template #icon><SettingOutlined /></template>
-                  运行缓存
+                  登录数据
                 </a-button>
                 <a-button type="link" @click="openAdvanced('/settings/workers')">
                   <template #icon><ToolOutlined /></template>
-                  网页登录工作池
+                  通道设置
                 </a-button>
               </div>
             </div>
@@ -1158,95 +1073,11 @@ onMounted(loadOnboarding);
         </section>
       </div>
 
-      <section class="panel architecture-panel">
-        <div class="panel-heading compact">
-          <div>
-            <h2>项目架构</h2>
-            <p>Gateway 只做协议适配和网页登录通路编排；工具执行、权限确认和本地副作用仍由下游客户端负责。</p>
-          </div>
-          <ApiOutlined />
-        </div>
-
-        <div class="architecture-map" aria-label="WebAI Gateway 架构图">
-          <article class="arch-stage">
-            <span class="arch-eyebrow">下游客户端</span>
-            <h3>统一接入层</h3>
-            <ul class="arch-list">
-              <li>
-                <strong>Claude Code</strong>
-                <small>Anthropic-compatible `/v1/messages`</small>
-              </li>
-              <li>
-                <strong>KrisAI / Hermes / OpenClaw</strong>
-                <small>OpenAI-compatible `/v1/chat/completions`、图片接口</small>
-              </li>
-            </ul>
-          </article>
-
-          <article class="arch-stage core">
-            <span class="arch-eyebrow">WebAI Gateway</span>
-            <h3>协议与能力编排</h3>
-            <ul class="arch-list">
-              <li>
-                <strong>Protocol Adapter</strong>
-                <small>OpenAI / Anthropic 请求、流式响应、模型目录</small>
-              </li>
-              <li>
-                <strong>ToolBridgeV2</strong>
-                <small>把标准工具调用转为网页模型可理解的文本协议</small>
-              </li>
-              <li>
-                <strong>Account / Model Registry</strong>
-                <small>只保存账号 metadata、可用性和 capability，不执行本地工具</small>
-              </li>
-            </ul>
-          </article>
-
-          <article class="arch-stage">
-            <span class="arch-eyebrow">Provider Runtime</span>
-            <h3>直连与内部 Runtime</h3>
-            <ul class="arch-list">
-              <li>
-                <strong>Direct Provider</strong>
-                <small>Qwen Web、DeepSeek Web，按 ds2api 行为对齐</small>
-              </li>
-              <li>
-                <strong>WebAI2API Runtime</strong>
-                <small>ChatGPT、Gemini、Sora、LMArena 等网页登录和网页调用能力</small>
-              </li>
-              <li>
-                <strong>ds2api Oracle</strong>
-                <small>作为 DeepSeek/Qwen 路线的协议和稳定性对照</small>
-              </li>
-            </ul>
-          </article>
-
-          <article class="arch-stage">
-            <span class="arch-eyebrow">网页登录上游</span>
-            <h3>真实网页模型</h3>
-            <ul class="arch-list">
-              <li>
-                <strong>ChatGPT / Gemini / Sora</strong>
-                <small>登录态由内部网页登录 runtime 的浏览器缓存保存</small>
-              </li>
-              <li>
-                <strong>Qwen / DeepSeek</strong>
-                <small>登录态由 Gateway direct profile 管理并做可用模型检测</small>
-              </li>
-            </ul>
-          </article>
-        </div>
-
-        <div class="architecture-note">
-          ChatGPT 之前授权过但这里显示为空，通常是内部网页登录 runtime 还在启动或没有完成 API 恢复。授权记录通常仍在本机浏览器缓存中；点击“打开网页登录授权”或“刷新模型”即可重新同步账号和模型。
-        </div>
-      </section>
-
       <section class="panel models-panel">
         <div class="panel-heading compact">
           <div>
             <h2>可用模型</h2>
-            <p>当前账号验证失败的模型会标红；复制已验证或待验证模型 ID 后即可接入客户端。</p>
+            <p>优先复制已验证可用的模型 ID，填到客户端后即可开始调用。</p>
           </div>
           <a-segmented
             v-model:value="modelScope"
@@ -1310,7 +1141,7 @@ onMounted(loadOnboarding);
         <div class="panel-heading compact">
           <div>
             <h2>图片生成测试</h2>
-            <p>使用 `gpt-image-2` 调用 `POST /v1/images/generations`，用于确认 ChatGPT / WebAI2API 生图链路是否可用。</p>
+            <p>使用 `gpt-image-2` 做一次小图测试，确认当前 ChatGPT 授权账号可以生成图片。</p>
           </div>
           <ExperimentOutlined />
         </div>
@@ -1356,7 +1187,7 @@ onMounted(loadOnboarding);
             <div v-else class="image-placeholder">
               <ExperimentOutlined />
               <span>生成后会在这里预览图片</span>
-              <small>该测试会走当前 Gateway 的 `/v1/images/generations`，不会绕过授权账号。</small>
+              <small>该测试使用当前授权账号，不需要额外配置。</small>
             </div>
           </div>
         </div>
@@ -1366,7 +1197,7 @@ onMounted(loadOnboarding);
         <div class="panel-heading compact">
           <div>
             <h2>接入客户端</h2>
-            <p>Claude Code 使用 Anthropic-compatible `/v1/messages`；KrisAI、OpenClaw、Hermes 使用 OpenAI-compatible `/v1/chat/completions`。</p>
+            <p>把下面三项复制到客户端：API 地址、API Key 和模型 ID。</p>
           </div>
           <ApiOutlined />
         </div>
@@ -1433,7 +1264,7 @@ onMounted(loadOnboarding);
         </div>
         <div class="field-block">
           <label>备注</label>
-          <a-textarea v-model:value="accountEditForm.note" :rows="3" placeholder="仅保存在 Gateway 本地 metadata，不保存凭证正文" />
+          <a-textarea v-model:value="accountEditForm.note" :rows="3" placeholder="仅保存在本机，不保存凭证正文" />
         </div>
       </a-space>
     </a-modal>
@@ -1478,34 +1309,55 @@ onMounted(loadOnboarding);
 
 <style scoped>
 .onboarding-shell {
-  color: #1f2937;
+  --brand: #0f766e;
+  --brand-strong: #115e59;
+  --accent: #2563eb;
+  --ink: #111827;
+  --muted: #667085;
+  --line: #dbe4ed;
+  --soft: #f4f8f7;
+  --warn-soft: #fff8eb;
+  color: var(--ink);
 }
 
 .hero-panel,
 .panel {
   background: #ffffff;
-  border: 1px solid #e5e7eb;
+  border: 1px solid var(--line);
   border-radius: 8px;
+  box-shadow: 0 18px 48px rgba(17, 24, 39, 0.06);
 }
 
 .hero-panel {
+  border-top: 3px solid var(--brand);
   display: grid;
   gap: 24px;
   grid-template-columns: minmax(0, 1.25fr) minmax(320px, 0.75fr);
-  margin-bottom: 16px;
-  padding: 28px;
+  margin-bottom: 18px;
+  padding: 32px;
 }
 
 .hero-copy h1 {
-  font-size: 32px;
+  color: var(--ink);
+  font-size: 36px;
+  font-weight: 700;
+  letter-spacing: 0;
   line-height: 1.18;
   margin: 12px 0 10px;
+  text-wrap: pretty;
 }
 
 .hero-copy p,
 .panel-heading p {
-  color: #64748b;
+  color: var(--muted);
+  line-height: 1.65;
   margin: 0;
+  text-wrap: pretty;
+}
+
+.hero-copy :deep(.ant-tag) {
+  border-color: #a7f3d0;
+  color: var(--brand-strong);
 }
 
 .hero-actions,
@@ -1533,8 +1385,8 @@ onMounted(loadOnboarding);
 }
 
 .stat-item {
-  background: #f8fafc;
-  border: 1px solid #eef2f7;
+  background: var(--soft);
+  border: 1px solid #d7ebe7;
   border-radius: 8px;
   padding: 12px;
 }
@@ -1543,7 +1395,7 @@ onMounted(loadOnboarding);
 .detail-row span,
 .config-item span,
 .field-block label {
-  color: #64748b;
+  color: var(--muted);
   display: block;
   font-size: 12px;
 }
@@ -1556,13 +1408,13 @@ onMounted(loadOnboarding);
 
 .workspace-grid {
   display: grid;
-  gap: 16px;
+  gap: 18px;
   grid-template-columns: minmax(280px, 0.9fr) minmax(0, 1.1fr);
-  margin-bottom: 16px;
+  margin-bottom: 18px;
 }
 
 .panel {
-  padding: 20px;
+  padding: 22px;
 }
 
 .panel-heading {
@@ -1583,13 +1435,13 @@ onMounted(loadOnboarding);
 }
 
 .panel-heading > .anticon {
-  color: #1677ff;
+  color: var(--brand);
   font-size: 22px;
   margin-top: 4px;
 }
 
 .ready-icon {
-  color: #0f766e !important;
+  color: var(--brand) !important;
 }
 
 .pending-icon {
@@ -1604,7 +1456,7 @@ onMounted(loadOnboarding);
 .provider-item {
   align-items: center;
   background: #ffffff;
-  border: 1px solid #e5e7eb;
+  border: 1px solid var(--line);
   border-radius: 8px;
   cursor: pointer;
   display: flex;
@@ -1612,14 +1464,15 @@ onMounted(loadOnboarding);
   justify-content: space-between;
   padding: 12px;
   text-align: left;
-  transition: border-color 160ms ease, background 160ms ease, transform 160ms ease;
+  transition: border-color 160ms ease, background 160ms ease, box-shadow 160ms ease, transform 160ms ease;
   width: 100%;
 }
 
 .provider-item:hover,
 .provider-item.active {
-  background: #f8fbff;
-  border-color: #1677ff;
+  background: #f5fbfa;
+  border-color: var(--brand);
+  box-shadow: 0 10px 28px rgba(15, 118, 110, 0.1);
   transform: translateY(-1px);
 }
 
@@ -1637,7 +1490,7 @@ onMounted(loadOnboarding);
 }
 
 .provider-main small {
-  color: #64748b;
+  color: var(--muted);
 }
 
 .provider-tags {
@@ -1650,7 +1503,8 @@ onMounted(loadOnboarding);
 }
 
 .detail-row {
-  background: #f8fafc;
+  background: var(--soft);
+  border: 1px solid #e2ece9;
   border-radius: 8px;
   padding: 10px 12px;
 }
@@ -1667,7 +1521,7 @@ onMounted(loadOnboarding);
 }
 
 .account-section {
-  border-top: 1px solid #eef2f7;
+  border-top: 1px solid #e7eef5;
   display: grid;
   gap: 12px;
   padding-top: 14px;
@@ -1686,7 +1540,7 @@ onMounted(loadOnboarding);
 }
 
 .section-title span {
-  color: #64748b;
+  color: var(--muted);
   font-size: 12px;
   margin-top: 2px;
 }
@@ -1699,7 +1553,7 @@ onMounted(loadOnboarding);
 
 .account-card {
   background: #ffffff;
-  border: 1px solid #e5e7eb;
+  border: 1px solid var(--line);
   border-radius: 8px;
   display: grid;
   gap: 12px;
@@ -1709,13 +1563,13 @@ onMounted(loadOnboarding);
 
 .account-card:hover,
 .account-card.current {
-  border-color: #1677ff;
-  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+  border-color: var(--brand);
+  box-shadow: 0 12px 30px rgba(17, 24, 39, 0.08);
   transform: translateY(-1px);
 }
 
 .account-card.current {
-  background: #f8fbff;
+  background: #f5fbfa;
 }
 
 .account-card-head {
@@ -1740,7 +1594,7 @@ onMounted(loadOnboarding);
 
 .account-name small,
 .account-meta {
-  color: #64748b;
+  color: var(--muted);
   font-size: 12px;
 }
 
@@ -1757,16 +1611,16 @@ onMounted(loadOnboarding);
 
 .empty-account-state {
   align-items: flex-start;
-  background: #f8fafc;
-  border: 1px solid #e5e7eb;
+  background: var(--soft);
+  border: 1px solid #d7ebe7;
   border-radius: 8px;
   display: flex;
   gap: 12px;
   padding: 14px;
 }
 
-.empty-account-state.tone-sidecar {
-  background: #fff7ed;
+.empty-account-state.tone-web {
+  background: var(--warn-soft);
   border-color: #fed7aa;
 }
 
@@ -1778,9 +1632,9 @@ onMounted(loadOnboarding);
 .empty-account-icon {
   align-items: center;
   background: #ffffff;
-  border: 1px solid #e5e7eb;
+  border: 1px solid var(--line);
   border-radius: 8px;
-  color: #1677ff;
+  color: var(--brand);
   display: inline-flex;
   flex: 0 0 40px;
   font-size: 18px;
@@ -1796,7 +1650,7 @@ onMounted(loadOnboarding);
 }
 
 .empty-account-copy strong {
-  color: #0f172a;
+  color: var(--ink);
 }
 
 .empty-account-copy p,
@@ -1813,92 +1667,14 @@ onMounted(loadOnboarding);
 }
 
 .shortcut-row {
-  border-top: 1px solid #eef2f7;
+  border-top: 1px solid #e7eef5;
   padding-top: 10px;
 }
 
 .models-panel,
-.architecture-panel,
 .media-panel,
 .config-panel {
-  margin-bottom: 16px;
-}
-
-.architecture-map {
-  display: grid;
-  gap: 12px;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-}
-
-.arch-stage {
-  background: #f8fafc;
-  border: 1px solid #e5e7eb;
-  border-radius: 8px;
-  display: grid;
-  gap: 10px;
-  min-width: 0;
-  padding: 14px;
-}
-
-.arch-stage.core {
-  background: #eff6ff;
-  border-color: #bfdbfe;
-}
-
-.arch-eyebrow {
-  color: #1677ff;
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.arch-stage h3 {
-  font-size: 15px;
-  margin: 0;
-}
-
-.arch-list {
-  display: grid;
-  gap: 8px;
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-
-.arch-list li {
-  background: #ffffff;
-  border: 1px solid #e5e7eb;
-  border-radius: 6px;
-  display: grid;
-  gap: 3px;
-  min-width: 0;
-  padding: 9px;
-}
-
-.arch-list strong,
-.arch-list small {
-  overflow-wrap: anywhere;
-}
-
-.arch-list strong {
-  color: #0f172a;
-  font-size: 13px;
-}
-
-.arch-list small {
-  color: #64748b;
-  line-height: 1.45;
-  text-wrap: pretty;
-}
-
-.architecture-note {
-  background: #fff7ed;
-  border: 1px solid #fed7aa;
-  border-radius: 8px;
-  color: #7c2d12;
-  line-height: 1.6;
-  margin-top: 12px;
-  padding: 12px 14px;
-  text-wrap: pretty;
+  margin-bottom: 18px;
 }
 
 .model-toolbar {
@@ -1919,7 +1695,7 @@ onMounted(loadOnboarding);
 }
 
 .field-label {
-  color: #334155;
+  color: #344054;
   font-size: 13px;
   font-weight: 600;
 }
@@ -1930,8 +1706,8 @@ onMounted(loadOnboarding);
 
 .image-preview-card {
   align-items: center;
-  background: #f8fafc;
-  border: 1px solid #e5e7eb;
+  background: var(--soft);
+  border: 1px solid #d7ebe7;
   border-radius: 8px;
   display: flex;
   justify-content: center;
@@ -1950,7 +1726,7 @@ onMounted(loadOnboarding);
 
 .image-placeholder {
   align-items: center;
-  color: #64748b;
+  color: var(--muted);
   display: grid;
   gap: 8px;
   justify-items: center;
@@ -1960,12 +1736,12 @@ onMounted(loadOnboarding);
 }
 
 .image-placeholder .anticon {
-  color: #1677ff;
+  color: var(--brand);
   font-size: 26px;
 }
 
 .availability-message {
-  color: #64748b;
+  color: var(--muted);
   display: block;
   max-width: 260px;
   overflow-wrap: anywhere;
@@ -1979,7 +1755,8 @@ onMounted(loadOnboarding);
 }
 
 .config-item {
-  background: #f8fafc;
+  background: var(--soft);
+  border: 1px solid #e2ece9;
   border-radius: 8px;
   min-width: 0;
   padding: 12px;
@@ -2006,7 +1783,7 @@ onMounted(loadOnboarding);
 
 .code-block,
 .log-box {
-  background: #0f172a;
+  background: #101828;
   border-radius: 8px;
   color: #e5e7eb;
   font-size: 12px;
@@ -2032,7 +1809,6 @@ onMounted(loadOnboarding);
 @media (max-width: 980px) {
   .hero-panel,
   .workspace-grid,
-  .architecture-map,
   .media-test-grid,
   .config-grid {
     grid-template-columns: 1fr;
