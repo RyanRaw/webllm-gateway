@@ -378,6 +378,16 @@ function accountValidationSummary(account) {
   return `${available} 个可用，${unavailable} 个失败`;
 }
 
+function accountValidationFailures(account) {
+  const validation = account?.validation || {};
+  return Object.entries(validation)
+    .filter(([, item]) => item?.status === 'unavailable')
+    .map(([modelId, item]) => ({
+      modelId,
+      message: item?.message || '模型验证失败，未返回具体原因',
+    }));
+}
+
 function capabilityLabels(provider) {
   if (!provider) return [];
   const caps = provider.capabilities || {};
@@ -742,9 +752,18 @@ async function validateAccount(account) {
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.detail || data.message || `HTTP ${res.status}`);
-    const values = Object.values(data.validation || {});
+    const validation = data.validation || {};
+    const values = Object.values(validation);
     const okCount = values.filter((item) => item?.status === 'available').length;
-    message.success(`模型验证完成：${okCount}/${values.length} 可用`);
+    const failed = Object.entries(validation).filter(([, item]) => item?.status === 'unavailable');
+    if (values.length > 0 && okCount === 0) {
+      const firstFailure = failed[0]?.[1];
+      message.error(`模型验证失败：${firstFailure?.message || '没有可用模型'}`);
+    } else if (failed.length > 0) {
+      message.warning(`模型验证完成：${okCount}/${values.length} 可用，${failed.length} 个失败`);
+    } else {
+      message.success(`模型验证完成：${okCount}/${values.length} 可用`);
+    }
     await loadOnboarding();
   } catch (error) {
     message.error(error.message || String(error));
@@ -948,6 +967,15 @@ onMounted(loadOnboarding);
                     <span>{{ account.availableModelCount || 0 }} 个模型可用</span>
                     <span>{{ accountValidationSummary(account) }}</span>
                     <span v-if="account.lastValidatedAt">最近验证 {{ new Date(account.lastValidatedAt).toLocaleString() }}</span>
+                    <div v-if="accountValidationFailures(account).length" class="account-validation-failures">
+                      <strong>模型不可用原因</strong>
+                      <span
+                        v-for="failure in accountValidationFailures(account)"
+                        :key="failure.modelId"
+                      >
+                        {{ failure.modelId }}：{{ failure.message }}
+                      </span>
+                    </div>
                   </div>
 
                   <div class="account-actions">
@@ -1575,6 +1603,22 @@ onMounted(loadOnboarding);
 .account-meta {
   display: grid;
   gap: 4px;
+}
+
+.account-validation-failures {
+  background: #fff7f7;
+  border: 1px solid #ffd6d6;
+  border-radius: 6px;
+  color: #9f1239;
+  display: grid;
+  gap: 4px;
+  margin-top: 4px;
+  padding: 8px;
+  overflow-wrap: anywhere;
+}
+
+.account-validation-failures strong {
+  color: #7f1d1d;
 }
 
 .account-actions {

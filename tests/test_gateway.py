@@ -11789,6 +11789,7 @@ def test_onboarding_returns_gateway_providers_and_models(tmp_path: Path) -> None
     client = TestClient(
         create_app(
             config=_config(),
+            config_path=tmp_path / "config.json",
             credential_store=store,
             http_client=httpx.Client(transport=httpx.MockTransport(handler)),
         )
@@ -12915,6 +12916,9 @@ def test_vendored_webai2api_frontend_has_gateway_bridge_page() -> None:
     assert "新增网页账号" not in bridge_source
     assert "添加授权账号" in bridge_source
     assert "切换并检测" in bridge_source
+    assert "模型不可用原因" in bridge_source
+    assert "accountValidationFailures" in bridge_source
+    assert "模型验证失败" in bridge_source
     assert "把网页账号变成可工具调用的 API，实现养虾养马自由！" in bridge_source
     assert "支持在 OpenClaw、Hermes、Claude Code、Codex 或其它兼容 OpenAI 和 Anthropic API 的客户端调用。" in bridge_source
     assert "Gateway 地址" not in bridge_source

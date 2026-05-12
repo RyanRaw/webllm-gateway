@@ -475,9 +475,14 @@ def create_app(
 
     def _should_add_provider_catalog_models(provider: dict[str, Any], webai2api_instances: list[Any]) -> bool:
         provider_id = str(provider.get("id") or "")
-        if provider_id != "chatgpt":
-            return False
-        return bool(_webai2api_provider_instances(provider, webai2api_instances))
+        if provider_id == "chatgpt":
+            return bool(_webai2api_provider_instances(provider, webai2api_instances))
+        credential = provider.get("credential") if isinstance(provider.get("credential"), dict) else {}
+        return (
+            provider.get("route") == "direct"
+            and bool(provider.get("advertiseModels"))
+            and bool(credential.get("authorized"))
+        )
 
     def _provider_catalog_model_ids_for_onboarding(provider: dict[str, Any], seen: set[Any]) -> list[str]:
         provider_id = str(provider.get("id") or "")
@@ -490,6 +495,8 @@ def create_app(
                 if isinstance(model_id, str) and model_id in {"gpt-instant", "gpt-thinking", "gpt-pro"}
                 and not any(f"{adapter}/{model_id}" in seen for adapter in adapter_ids)
             ]
+        if provider.get("route") == "direct":
+            return [model_id for model_id in declared_models if isinstance(model_id, str)]
         return []
 
     def _provider_catalog_model_payload(provider: dict[str, Any], model_id: str) -> dict[str, Any]:
