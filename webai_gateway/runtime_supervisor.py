@@ -11,6 +11,8 @@ import subprocess
 import sys
 import time
 from typing import Any, Sequence
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 from urllib.parse import urlsplit, urlunsplit
 
 from webai_gateway.config import GatewayConfig, load_config
@@ -47,6 +49,7 @@ def collect_supervisor_status(
             default_port=8500,
             state=state,
             probe_ports=probe_ports,
+            api_key=config.upstream.api_key,
         ),
         _service_status(
             "ds2api",
@@ -90,6 +93,7 @@ def _service_status(
     default_port: int,
     state: dict[str, Any],
     probe_ports: bool,
+    api_key: str | None = None,
 ) -> dict[str, Any]:
     parsed = _parse_service_url(base_url, default_port)
     saved = state.get("services", {}).get(service_id, {}) if isinstance(state.get("services"), dict) else {}
@@ -101,7 +105,7 @@ def _service_status(
             status = "stopped"
         elif status not in {"missing", "failed"}:
             status = "unknown" if not parsed["local"] else "stopped"
-    return {
+    result = {
         "id": service_id,
         "label": label,
         "role": role,
@@ -113,6 +117,61 @@ def _service_status(
         "pid": saved.get("pid"),
         "message": _safe_message(saved.get("message")),
     }
+    if service_id == "webai2api" and probe_ports and status == "running":
+        result.update(_probe_webai2api_api(base_url, api_key or ""))
+    return result
+
+
+def _probe_webai2api_api(base_url: str, api_key: str) -> dict[str, Any]:
+    models_url = _openai_models_url(base_url)
+    headers = {"Accept": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    request = Request(models_url, headers=headers, method="GET")
+    try:
+        with urlopen(request, timeout=1.5) as response:
+            if 200 <= int(response.status) < 300:
+                return {"status": "running", "apiReady": True, "message": "WebAI2API OpenAI API ready"}
+            return {
+                "status": "failed",
+                "apiReady": False,
+                "message": f"WebAI2API OpenAI API returned HTTP {int(response.status)}",
+            }
+    except HTTPError as exc:
+        preview = _safe_http_error_preview(exc)
+        return {
+            "status": "failed",
+            "apiReady": False,
+            "message": f"WebAI2API OpenAI API returned HTTP {exc.code}: {preview}".strip(),
+        }
+    except (TimeoutError, URLError, OSError) as exc:
+        return {
+            "status": "starting",
+            "apiReady": False,
+            "message": f"WebAI2API OpenAI API probe pending: {_safe_message(str(exc))}",
+        }
+
+
+def _openai_models_url(base_url: str) -> str:
+    parsed = urlsplit(base_url or "")
+    path = parsed.path or "/v1"
+    if path.endswith("/chat/completions"):
+        path = path[: -len("/chat/completions")]
+    if path.endswith("/images/generations"):
+        path = path[: -len("/images/generations")]
+    path = path.rstrip("/")
+    if not path.endswith("/models"):
+        path = f"{path}/models" if path else "/models"
+    return urlunsplit((parsed.scheme or "http", parsed.netloc, path, "", ""))
+
+
+def _safe_http_error_preview(exc: HTTPError) -> str:
+    try:
+        body = exc.read(512).decode("utf-8", errors="replace")
+    except Exception:
+        body = ""
+    body = re.sub(r"\s+", " ", body).strip()
+    return _safe_message(body or str(exc.reason or ""))
 
 
 def _ensure_webai2api(config: GatewayConfig, gateway_root: Path) -> dict[str, Any]:

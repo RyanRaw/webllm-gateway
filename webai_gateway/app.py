@@ -5093,6 +5093,46 @@ def _is_deepseek_ds2api_upstream_empty_output_rate_limit(exc: DeepSeekDs2apiErro
     return exc.status_code == 429 and ("upstream_empty_output" in text or "empty output" in text)
 
 
+def _provider_auth_required_detail(provider_label: str) -> str:
+    return (
+        f"{provider_label} 还没有可用的网页登录授权。"
+        "请打开 WebAI Gateway 首页，选择对应平台，点击“打开授权浏览器”完成网页登录；"
+        "登录完成后回到首页刷新模型，再重试 API 调用。"
+    )
+
+
+def _provider_auth_expired_detail(provider_label: str) -> str:
+    return (
+        f"{provider_label} 的网页登录授权已过期或失效。"
+        "请打开 WebAI Gateway 首页，选择对应平台，点击“打开授权浏览器”重新登录；"
+        "登录完成后点击“刷新模型”或“验证接入”，再重试 API 调用。"
+    )
+
+
+def _is_provider_auth_failure(status_code: int | None, text: Any) -> bool:
+    lowered = str(text or "").lower()
+    if status_code in {401, 403}:
+        return True
+    markers = (
+        "invalid token",
+        "authentication_failed",
+        "unauthorized",
+        "token has expired",
+        "token expired",
+        "session expired",
+        "login again",
+        "not logged in",
+        "please log in",
+        "account token is invalid",
+        "failed to get pow",
+        "登录已过期",
+        "登录过期",
+        "未登录",
+        "重新登录",
+    )
+    return any(marker in lowered for marker in markers)
+
+
 def _call_deepseek_ds2api_with_retry(
     app: FastAPI,
     web_client: Any,
@@ -5122,7 +5162,7 @@ def _call_deepseek_ds2api_with_retry(
 def _deepseek_web_chat(app: FastAPI, client: httpx.Client, body: dict[str, Any], config: GatewayConfig) -> Response:
     credential = app.state.credential_store.get("deepseek-web")
     if not is_credential_authorized("deepseek-web", credential):
-        raise HTTPException(status_code=424, detail="请先在控制台重新完成 DeepSeek 网页登录授权，确保已捕获 bearer token")
+        raise HTTPException(status_code=424, detail=_provider_auth_required_detail("DeepSeek Web"))
     payload, bridge, allowed_tools, bridge_context = _build_deepseek_direct_payload(body, config)
     model = str(payload.get("model") or DEEPSEEK_DEFAULT_MODEL)
     skill_preflight = _skill_loader_preflight_response(app, model, bridge_context, require_namespaced_slash=True)
@@ -5157,7 +5197,8 @@ def _deepseek_web_chat(app: FastAPI, client: httpx.Client, body: dict[str, Any],
             provider_diagnostic=getattr(web_client, "last_diagnostic", None),
             bridge_context=bridge_context,
         )
-        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+        detail = _provider_auth_expired_detail("DeepSeek Web") if _is_provider_auth_failure(exc.status_code, exc) else str(exc)
+        raise HTTPException(status_code=status_code, detail=detail) from exc
     except HTTPException:
         raise
     except Exception as exc:
@@ -5205,7 +5246,8 @@ def _deepseek_web_chat(app: FastAPI, client: httpx.Client, body: dict[str, Any],
             provider_diagnostic=getattr(web_client, "last_diagnostic", None),
             bridge_context=bridge_context,
         )
-        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+        detail = _provider_auth_expired_detail("DeepSeek Web") if _is_provider_auth_failure(exc.status_code, exc) else str(exc)
+        raise HTTPException(status_code=status_code, detail=detail) from exc
     except (TimeoutError, httpx.TimeoutException) as exc:
         provider_diagnostic = _merge_provider_diagnostics(
             getattr(web_client, "last_diagnostic", None), getattr(exc, "diagnostic", None)
@@ -5274,7 +5316,7 @@ def _deepseek_web_chat_payload(app: FastAPI, client: httpx.Client, body: dict[st
 def _qwen_web_chat(app: FastAPI, client: httpx.Client, body: dict[str, Any], config: GatewayConfig) -> Response:
     credential = app.state.credential_store.get("qwen")
     if not is_credential_authorized("qwen", credential):
-        raise HTTPException(status_code=424, detail="请先在控制台完成 Qwen 网页登录授权")
+        raise HTTPException(status_code=424, detail=_provider_auth_required_detail("Qwen Web"))
     payload, bridge, allowed_tools, bridge_context = _build_direct_payload(
         body,
         config,
@@ -5344,6 +5386,22 @@ def _qwen_web_chat(app: FastAPI, client: httpx.Client, body: dict[str, Any], con
             headers={"x-should-retry": "false"},
         ) from exc
     except Exception as exc:
+        if _is_provider_auth_failure(None, exc):
+            _record_completion_error_diagnostic(
+                app,
+                endpoint="/v1/chat/completions",
+                route="qwen-web",
+                model=model,
+                body=body,
+                stream=bool(body.get("stream")),
+                bridge=bridge,
+                status_code=424,
+                error_kind="provider_auth_expired",
+                error=RuntimeError(_provider_auth_expired_detail("Qwen Web")),
+                provider_diagnostic=getattr(web_client, "last_diagnostic", None),
+                bridge_context=bridge_context,
+            )
+            raise HTTPException(status_code=424, detail=_provider_auth_expired_detail("Qwen Web")) from exc
         raise HTTPException(status_code=502, detail=f"Qwen Web 调用失败：{exc}") from exc
     if not isinstance(data, dict):
         raise HTTPException(status_code=502, detail="Qwen Web 响应必须是 JSON 对象")
@@ -5450,7 +5508,7 @@ def _qwen_coder_chat_payload(app: FastAPI, client: httpx.Client, body: dict[str,
 def _qwen_coder_chat(app: FastAPI, client: httpx.Client, body: dict[str, Any], config: GatewayConfig) -> Response:
     credential = app.state.credential_store.get("qwen-coder")
     if not is_credential_authorized("qwen-coder", credential):
-        raise HTTPException(status_code=424, detail="请先在控制台完成 Qwen Coder 网页登录授权")
+        raise HTTPException(status_code=424, detail=_provider_auth_required_detail("Qwen Coder Web"))
     payload, bridge, allowed_tools, bridge_context = _build_direct_payload(
         body,
         config,
@@ -5520,6 +5578,22 @@ def _qwen_coder_chat(app: FastAPI, client: httpx.Client, body: dict[str, Any], c
             headers={"x-should-retry": "false"},
         ) from exc
     except Exception as exc:
+        if _is_provider_auth_failure(None, exc):
+            _record_completion_error_diagnostic(
+                app,
+                endpoint="/v1/chat/completions",
+                route="qwen-coder",
+                model=model,
+                body=body,
+                stream=bool(body.get("stream")),
+                bridge=bridge,
+                status_code=424,
+                error_kind="provider_auth_expired",
+                error=RuntimeError(_provider_auth_expired_detail("Qwen Coder Web")),
+                provider_diagnostic=getattr(web_client, "last_diagnostic", None),
+                bridge_context=bridge_context,
+            )
+            raise HTTPException(status_code=424, detail=_provider_auth_expired_detail("Qwen Coder Web")) from exc
         raise HTTPException(status_code=502, detail=f"Qwen Coder Web 调用失败：{exc}") from exc
     if not isinstance(data, dict):
         raise HTTPException(status_code=502, detail="Qwen Coder Web 响应必须是 JSON 对象")
@@ -5799,10 +5873,15 @@ def _raise_direct_provider_http_status_error(
     status_code = _provider_dependency_status_code(response.status_code)
     preview = _extract_upstream_error_preview(response) or response.reason_phrase or "empty response body"
     message = f"{provider_label} upstream returned HTTP {response.status_code}: {preview}"
-    sanitized = _preview_text(
-        _redact_known_sensitive_values(_redact_sensitive_text(message), sensitive_values),
-        max_chars=800,
-    )
+    if _is_provider_auth_failure(response.status_code, preview):
+        sanitized = _provider_auth_expired_detail(provider_label)
+        error_kind = "provider_auth_expired"
+    else:
+        sanitized = _preview_text(
+            _redact_known_sensitive_values(_redact_sensitive_text(message), sensitive_values),
+            max_chars=800,
+        )
+        error_kind = "provider_http_error"
     _record_completion_error_diagnostic(
         app,
         endpoint=endpoint,
@@ -5812,7 +5891,7 @@ def _raise_direct_provider_http_status_error(
         stream=stream,
         bridge=bridge,
         status_code=status_code,
-        error_kind="provider_http_error",
+        error_kind=error_kind,
         error=RuntimeError(sanitized),
         provider_diagnostic=provider_diagnostic,
         bridge_context=bridge_context,

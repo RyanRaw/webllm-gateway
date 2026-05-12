@@ -40,6 +40,7 @@ const imageError = ref('');
 const imageResultUrl = ref('');
 const tokenVisible = ref(false);
 const cdpUrl = ref('http://127.0.0.1:9222');
+const configProfile = ref('cc-switch');
 const accountEditOpen = ref(false);
 const accountEditSaving = ref(false);
 const accountEditForm = ref({
@@ -74,6 +75,7 @@ const onboarding = ref({
 });
 
 const gatewayBaseUrl = computed(() => `${window.location.origin}${onboarding.value.gateway?.baseUrl || '/v1'}`);
+const gatewayRootUrl = computed(() => gatewayBaseUrl.value.replace(/\/v1\/?$/, ''));
 const gatewayToken = computed(() => onboarding.value.gateway?.apiKey || '');
 const maskedToken = computed(() => {
   if (!gatewayToken.value) return '未配置';
@@ -172,20 +174,55 @@ const imageRequestExample = computed(() => JSON.stringify({
   response_format: 'b64_json',
 }, null, 2));
 
-const clientConfig = computed(() => [
+const ccSwitchClientConfig = computed(() => JSON.stringify({
+  env: {
+    ANTHROPIC_MODEL: selectedClientModel.value,
+    ANTHROPIC_BASE_URL: gatewayRootUrl.value,
+    ANTHROPIC_API_BASE_URL: gatewayRootUrl.value,
+    ANTHROPIC_AUTH_TOKEN: gatewayToken.value || '<网关令牌>',
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: selectedClientModel.value,
+    ANTHROPIC_DEFAULT_SONNET_MODEL: selectedClientModel.value,
+    ANTHROPIC_DEFAULT_OPUS_MODEL: selectedClientModel.value,
+  },
+}, null, 2));
+
+const openAIClientConfig = computed(() => [
   '# OpenAI-compatible',
   `base_url = ${gatewayBaseUrl.value}`,
   `api_key = ${gatewayToken.value || '<网关令牌>'}`,
   `model = ${selectedClientModel.value}`,
-  '',
+].join('\n'));
+
+const anthropicClientConfig = computed(() => [
   '# Anthropic-compatible',
-  `ANTHROPIC_BASE_URL=${gatewayBaseUrl.value}`,
+  `ANTHROPIC_BASE_URL=${gatewayRootUrl.value}`,
+  `ANTHROPIC_API_BASE_URL=${gatewayRootUrl.value}`,
   `ANTHROPIC_AUTH_TOKEN=${gatewayToken.value || '<网关令牌>'}`,
+  `ANTHROPIC_MODEL=${selectedClientModel.value}`,
+  `ANTHROPIC_DEFAULT_HAIKU_MODEL=${selectedClientModel.value}`,
   `ANTHROPIC_DEFAULT_SONNET_MODEL=${selectedClientModel.value}`,
   `ANTHROPIC_DEFAULT_OPUS_MODEL=${selectedClientModel.value}`,
   '',
   `# 推荐平台：${selectedConnectionProfile.value?.providerName || selectedProvider.value?.name || 'Gateway 默认'}`,
 ].join('\n'));
+
+const clientConfigOptions = [
+  { label: 'cc-switch', value: 'cc-switch' },
+  { label: 'OpenAI', value: 'openai' },
+  { label: 'Anthropic', value: 'anthropic' },
+];
+
+const clientConfigTitle = computed(() => {
+  if (configProfile.value === 'openai') return 'OpenAI 兼容配置';
+  if (configProfile.value === 'anthropic') return 'Anthropic 环境变量';
+  return 'cc-switch 专用配置';
+});
+
+const clientConfig = computed(() => {
+  if (configProfile.value === 'openai') return openAIClientConfig.value;
+  if (configProfile.value === 'anthropic') return anthropicClientConfig.value;
+  return ccSwitchClientConfig.value;
+});
 
 const modelColumns = [
   { title: '模型 ID', dataIndex: 'id', key: 'id' },
@@ -202,23 +239,6 @@ const stepItems = computed(() => [
 ]);
 
 const progressTitle = computed(() => (actionKind.value === 'smoke' ? '接入检测' : '网页登录进度'));
-const selectedProviderNotice = computed(() => {
-  const provider = selectedProvider.value;
-  if (!provider) return null;
-  if (provider.id === 'chatgpt') {
-    return {
-      type: 'info',
-      message: 'ChatGPT 需要先完成网页登录授权。授权后点击“检测模型”，确认当前账号可用模型。',
-    };
-  }
-  if (provider.supportsNativeTools === false && String(provider.toolBridge || '').toLowerCase() !== 'off') {
-    return {
-      type: 'info',
-      message: '该平台通过网页登录接入；Gateway 会自动整理客户端请求格式。',
-    };
-  }
-  return null;
-});
 const selectedProviderAccountStatus = computed(() => {
   const provider = selectedProvider.value;
   if (!provider || selectedProviderAccounts.value.length) return null;
@@ -889,7 +909,6 @@ onMounted(loadOnboarding);
           <div class="panel-heading">
             <div>
               <h2>{{ selectedProvider?.name || '未选择平台' }}</h2>
-              <p>{{ selectedProvider?.description || '请选择一个网页模型平台。' }}</p>
             </div>
             <CheckCircleOutlined v-if="isProviderReady(selectedProvider)" class="ready-icon" />
             <ClockCircleOutlined v-else class="pending-icon" />
@@ -911,13 +930,6 @@ onMounted(loadOnboarding);
                 {{ cap.label }}
               </a-tag>
             </div>
-            <a-alert
-              v-if="selectedProviderNotice"
-              :type="selectedProviderNotice.type"
-              show-icon
-              :message="selectedProviderNotice.message"
-            />
-
             <div class="account-section">
               <div class="section-title">
                 <div>
@@ -925,13 +937,14 @@ onMounted(loadOnboarding);
                   <span>{{ accountSectionHint }}</span>
                 </div>
                 <a-button
+                  class="validate-current-button"
                   size="small"
                   :disabled="!currentAccount"
                   :loading="accountActionId === `${currentAccount?.id}:validate`"
                   @click="validateAccount(currentAccount)"
                 >
                   <template #icon><ExperimentOutlined /></template>
-                  检测当前账号模型
+                  检测模型
                 </a-button>
               </div>
 
@@ -1005,19 +1018,6 @@ onMounted(loadOnboarding);
                 </div>
               </div>
             </div>
-
-            <a-alert
-              v-if="selectedProvider.availabilityMessage"
-              type="warning"
-              show-icon
-              :message="selectedProvider.availabilityMessage"
-            />
-
-            <a-alert
-              type="info"
-              show-icon
-              message="点击后会打开网页登录窗口。完成登录后回到这里刷新模型，系统会自动同步账号状态。"
-            />
 
             <div class="action-row">
               <a-button type="primary" size="large" :loading="actionLoading" @click="handleStartLogin">
@@ -1226,8 +1226,16 @@ onMounted(loadOnboarding);
         </div>
 
         <div class="code-header">
-          <span>客户端配置</span>
-          <a-button size="small" @click="copyText(clientConfig, '客户端配置已复制')">
+          <div class="code-title-stack">
+            <span>{{ clientConfigTitle }}</span>
+            <small v-if="configProfile === 'cc-switch'">默认展示 cc-switch 的 Claude Provider 配置，复制后粘贴到对应 Provider 的 settings_config。</small>
+          </div>
+          <a-segmented
+            v-model:value="configProfile"
+            :options="clientConfigOptions"
+            size="small"
+          />
+          <a-button size="small" @click="copyText(clientConfig, `${clientConfigTitle}已复制`)">
             <template #icon><CopyOutlined /></template>
             复制
           </a-button>
@@ -1534,6 +1542,20 @@ onMounted(loadOnboarding);
   justify-content: space-between;
 }
 
+.validate-current-button {
+  align-items: center;
+  display: inline-flex;
+  justify-content: center;
+  min-width: 86px;
+  white-space: nowrap;
+}
+
+.validate-current-button :deep(.ant-btn-icon) {
+  align-items: center;
+  display: inline-flex;
+  line-height: 0;
+}
+
 .section-title strong,
 .section-title span {
   display: block;
@@ -1777,8 +1799,21 @@ onMounted(loadOnboarding);
 .code-header {
   align-items: center;
   display: flex;
+  gap: 10px;
   justify-content: space-between;
   margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
+.code-title-stack {
+  display: grid;
+  gap: 2px;
+  min-width: 220px;
+}
+
+.code-title-stack small {
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .code-block,

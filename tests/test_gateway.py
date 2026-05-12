@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+import io
 import json
 import sys
 import threading
@@ -12921,6 +12922,12 @@ def test_vendored_webai2api_frontend_has_gateway_bridge_page() -> None:
     assert "账号池暂不可读" not in bridge_source
     assert "需要登录" in bridge_source
     assert "打开网页登录授权" in bridge_source
+    assert "该平台通过网页登录接入；Gateway 会自动整理客户端请求格式。" not in bridge_source
+    assert "点击后会打开网页登录窗口。完成登录后回到这里刷新模型" not in bridge_source
+    assert "selectedProvider?.description" not in bridge_source
+    assert "selectedProvider.availabilityMessage" not in bridge_source
+    assert "检测当前账号模型" not in bridge_source
+    assert "validate-current-button" in bridge_source
     assert "可用模型" in bridge_source
     assert "图片生成测试" in bridge_source
     assert "/v1/images/generations" in bridge_source
@@ -12928,6 +12935,10 @@ def test_vendored_webai2api_frontend_has_gateway_bridge_page() -> None:
     assert "response_format" in bridge_source
     assert "http://127.0.0.1:8610/v1" in bridge_source
     assert "Claude Code" in bridge_source
+    assert "const configProfile = ref('cc-switch');" in bridge_source
+    assert "cc-switch 专用配置" in bridge_source
+    assert "ANTHROPIC_API_BASE_URL" in bridge_source
+    assert "settings_config" in bridge_source
     assert "/health" in app_source
 
 
@@ -13283,6 +13294,49 @@ def test_health_reports_runtime_source_freshness(tmp_path: Path) -> None:
     assert services["ds2api"]["internal"] is True
     assert services["ds2api"]["role"] == "deepseek-web-runtime"
     assert "path" not in services["ds2api"]
+
+
+def test_supervisor_marks_webai2api_safe_mode_as_failed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from webai_gateway import runtime_supervisor
+
+    state_path = tmp_path / ".webai-gateway" / "runtime" / "managed-runtimes.json"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(
+        json.dumps(
+            {
+                "updatedAt": "2026-05-12T00:00:00Z",
+                "services": {"webai2api": {"status": "started", "pid": 1234}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = GatewayConfig(
+        upstream=UpstreamConfig(base_url="http://127.0.0.1:8500/v1", api_key="secret-test-key"),
+        provider_runtime=ProviderRuntimeConfig(deepseek_ds2api_base_url="http://127.0.0.1:9331/v1"),
+    )
+    monkeypatch.setattr(runtime_supervisor, "_port_is_listening", lambda host, port: True)
+
+    def fake_urlopen(request: Any, timeout: float) -> Any:
+        assert request.full_url == "http://127.0.0.1:8500/v1/models"
+        assert request.headers["Authorization"] == "Bearer secret-test-key"
+        raise runtime_supervisor.HTTPError(
+            request.full_url,
+            503,
+            "Service Unavailable",
+            {},
+            io.BytesIO(b'{"error":{"message":"safe mode"}}'),
+        )
+
+    monkeypatch.setattr(runtime_supervisor, "urlopen", fake_urlopen)
+
+    status = runtime_supervisor.collect_supervisor_status(config, tmp_path)
+
+    services = {item["id"]: item for item in status["services"]}
+    assert services["webai2api"]["status"] == "failed"
+    assert services["webai2api"]["apiReady"] is False
+    assert "HTTP 503" in services["webai2api"]["message"]
+    assert [item["id"] for item in status["failedServices"]] == ["webai2api"]
+    assert "secret-test-key" not in json.dumps(status)
 
 
 def test_health_redacts_internal_runtime_paths(tmp_path: Path) -> None:
@@ -14506,6 +14560,52 @@ def test_deepseek_web_chat_propagates_ds2api_rate_limit_and_records_diagnostic(t
     assert error_event["route"] == "deepseek-web"
     assert error_event["statusCode"] == 429
     assert error_event["errorKind"] == "ds2api_http_error"
+
+
+def test_deepseek_web_chat_maps_expired_ds2api_auth_to_relogin_hint(tmp_path: Path) -> None:
+    class ExpiredDeepSeekClient:
+        last_diagnostic = {"model": "deepseek-v4-pro", "ds2api_base_url": "http://127.0.0.1:9331/v1"}
+
+        def __init__(self, credential: dict[str, Any], **_: Any) -> None:
+            self.credential = credential
+
+        def chat_completions(self, payload: dict[str, Any]) -> dict[str, Any]:
+            raise DeepSeekDs2apiError(
+                401,
+                "ds2api DeepSeek 调用失败：HTTP 401 Invalid token. If this should be a DS2API key, add it to config.keys first.",
+            )
+
+    store = CredentialStore(tmp_path / "credentials")
+    store.save(
+        "deepseek-web",
+        {
+            "cookie": "ds_session_id=session-secret",
+            "bearer": "expired-bearer",
+            "userAgent": "Chrome Test",
+        },
+    )
+    client = TestClient(
+        create_app(
+            config=_config(),
+            credential_store=store,
+            deepseek_client_factory=ExpiredDeepSeekClient,
+            http_client=_not_found_client(),
+        )
+    )
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers=_headers(),
+        json={"model": "deepseek-v4-pro", "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    assert response.status_code == 424
+    detail = response.json()["detail"]
+    assert "DeepSeek Web 的网页登录授权已过期或失效" in detail
+    assert "打开授权浏览器" in detail
+    assert "刷新模型" in detail
+    assert "Invalid token" not in detail
+    assert "config.keys" not in detail
 
 
 def test_deepseek_gateway_retries_transient_ds2api_rate_limit(tmp_path: Path) -> None:
@@ -25145,7 +25245,7 @@ def test_deepseek_web_chat_requires_browser_login(tmp_path: Path) -> None:
 
     assert response.status_code == 424
     assert "DeepSeek" in response.json()["detail"]
-    assert "bearer token" in response.json()["detail"]
+    assert "打开授权浏览器" in response.json()["detail"]
 
 
 def test_deepseek_web_chat_rejects_cookie_only_saved_credential(tmp_path: Path) -> None:
@@ -25199,7 +25299,41 @@ def test_qwen_web_chat_requires_browser_login(tmp_path: Path) -> None:
     )
 
     assert response.status_code == 424
-    assert "请先在控制台完成 Qwen 网页登录授权" in response.json()["detail"]
+    assert "Qwen Web 还没有可用的网页登录授权" in response.json()["detail"]
+    assert "打开授权浏览器" in response.json()["detail"]
+
+
+def test_qwen_coder_expired_token_error_points_to_relogin_flow(tmp_path: Path) -> None:
+    class ExpiredQwenCoderClient:
+        last_diagnostic = {"model": "qwen-coder/qwen-coder-plus"}
+
+        def __init__(self, credential: dict[str, Any], **_: Any) -> None:
+            self.credential = credential
+
+        def chat_completions(self, payload: dict[str, Any]) -> dict[str, Any]:
+            raise RuntimeError("Qwen Coder API error: unauthorized - Token has expired, please log in again.")
+
+    client = TestClient(
+        create_app(
+            config=_config(),
+            credential_store=_qwen_coder_credential_store(tmp_path),
+            qwen_coder_client_factory=ExpiredQwenCoderClient,
+            http_client=_not_found_client(),
+        )
+    )
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers=_headers(),
+        json={"model": "qwen-coder/qwen-coder-plus", "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    assert response.status_code == 424
+    detail = response.json()["detail"]
+    assert "Qwen Coder Web 的网页登录授权已过期或失效" in detail
+    assert "打开授权浏览器" in detail
+    assert "刷新模型" in detail
+    assert "Token has expired" not in detail
 
 
 def test_qwen_web_chat_rejects_cookie_only_credentials(tmp_path: Path) -> None:
@@ -25238,4 +25372,5 @@ def test_qwen_web_chat_rejects_cookie_only_credentials(tmp_path: Path) -> None:
     )
 
     assert response.status_code == 424
-    assert "请先在控制台完成 Qwen 网页登录授权" in response.json()["detail"]
+    assert "Qwen Web 还没有可用的网页登录授权" in response.json()["detail"]
+    assert "打开授权浏览器" in response.json()["detail"]
