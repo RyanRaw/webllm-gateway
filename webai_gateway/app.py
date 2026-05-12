@@ -913,7 +913,7 @@ def create_app(
                 if cached is not None:
                     validation[model_id] = _public_account_validation({model_id: cached})[model_id]
                     continue
-            result = await run_in_threadpool(_validate_account_model, cfg, model_id)
+            result = await run_in_threadpool(_validate_account_model, cfg, provider_id, model_id)
             saved = app.state.account_registry.save_validation(account_id, model_id, result)
             validation[model_id] = _public_account_validation({model_id: saved})[model_id]
         return {
@@ -1254,13 +1254,20 @@ def create_app(
             return None
         return {**worker, "type": remaining_merge[0], "mergeTypes": remaining_merge[1:]}
 
-    def _validate_account_model(cfg: GatewayConfig, model_id: str) -> dict[str, Any]:
+    def _validate_account_model(cfg: GatewayConfig, provider_id: str, model_id: str) -> dict[str, Any]:
         payload = {
             "model": model_id,
             "messages": [{"role": "user", "content": "请只回复 OK。"}],
             "stream": False,
             "max_tokens": 8,
         }
+        direct_validator = {
+            "deepseek-web": _deepseek_web_chat,
+            "qwen": _qwen_web_chat,
+            "qwen-coder": _qwen_coder_chat,
+        }.get(provider_id)
+        if direct_validator is not None:
+            return _validate_direct_account_model(direct_validator, cfg, provider_id, model_id, payload)
         try:
             response = client.post(
                 cfg.upstream.base_url.rstrip("/") + "/chat/completions",
@@ -1269,13 +1276,66 @@ def create_app(
                 timeout=max(30, int(cfg.provider_runtime.request_timeout_seconds or 300)),
             )
         except Exception as exc:
-            return {"status": "unavailable", "message": _preview_text(_redact_sensitive_text(str(exc)), max_chars=500)}
+            return _unavailable_account_model_result(provider_id, model_id, str(exc))
         if response.status_code < 400:
             return {"status": "available", "message": "验证通过"}
+        return _unavailable_account_model_result(provider_id, model_id, _upstream_http_error_message(response))
+
+    def _validate_direct_account_model(
+        validator: Any,
+        cfg: GatewayConfig,
+        provider_id: str,
+        model_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        try:
+            response = validator(app, client, payload, cfg)
+        except HTTPException as exc:
+            return _unavailable_account_model_result(provider_id, model_id, str(exc.detail or exc))
+        except Exception as exc:
+            return _unavailable_account_model_result(provider_id, model_id, str(exc))
+        status_code = getattr(response, "status_code", 200)
+        if status_code < 400:
+            return {"status": "available", "message": "验证通过"}
+        body = getattr(response, "body", b"")
+        if isinstance(body, bytes):
+            body = body.decode("utf-8", errors="replace")
+        return _unavailable_account_model_result(provider_id, model_id, str(body or status_code))
+
+    def _unavailable_account_model_result(provider_id: str, model_id: str, message: str) -> dict[str, Any]:
+        safe_message = _preview_text(_redact_sensitive_text(str(message or "")), max_chars=500)
         return {
             "status": "unavailable",
-            "message": _preview_text(_redact_sensitive_text(_upstream_http_error_message(response)), max_chars=500),
+            "message": _friendly_account_model_validation_message(provider_id, model_id, safe_message),
         }
+
+    def _friendly_account_model_validation_message(provider_id: str, model_id: str, message: str) -> str:
+        lower = message.lower()
+        if provider_id == "deepseek-web" and (
+            "invalid token" in lower
+            or "http 401" in lower
+            or "unauthorized" in lower
+            or "config.keys" in lower
+            or "网页登录授权已过期" in message
+        ):
+            return (
+                "DeepSeek Web 的网页登录授权已过期或失效。请点击“打开授权浏览器”重新登录 DeepSeek，"
+                "完成后回到这里点“刷新模型”，再点“检测模型”。"
+            )
+        if (
+            "model invalid" in lower
+            or "模型无效" in message
+            or "backend pool" in lower
+            or "后端 pool" in message
+            or "不支持" in message
+        ):
+            provider_hint = "DeepSeek/ds2api 通道" if provider_id == "deepseek-web" else "对应通道"
+            return (
+                f"当前通道没有启用 {model_id}，检测请求没有找到可用后端。"
+                f"请先点击“刷新模型”；如果仍失败，进入“通道设置”确认{provider_hint}已启动、账号可用，"
+                "并且后端池支持这个模型。重新网页登录不一定能解决。"
+            )
+        return message or "模型检测失败，请刷新模型后重试。"
 
 
     @app.post("/api/admin/provider-smoke/{provider_id}")

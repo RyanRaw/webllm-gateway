@@ -12807,6 +12807,116 @@ def test_account_model_validation_caches_results_and_redacts_errors(tmp_path: Pa
     assert "[redacted]" in second.text
 
 
+def test_account_model_validation_maps_webai2api_pool_error_to_beginner_hint(tmp_path: Path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/models":
+            return httpx.Response(
+                200,
+                json={
+                    "object": "list",
+                    "data": [
+                        {
+                            "id": "chatgpt_text/gpt-missing",
+                            "object": "model",
+                            "owned_by": "chatgpt_text",
+                            "type": "text",
+                        }
+                    ],
+                },
+                request=request,
+            )
+        if request.url.path == "/admin/config/instances":
+            return httpx.Response(
+                200,
+                json=[{"name": "plus_profile", "workers": [{"name": "plus", "type": "chatgpt_text", "mergeTypes": []}]}],
+                request=request,
+            )
+        if request.url.path == "/v1/cookies":
+            return httpx.Response(200, json={"cookies": [{"name": "__Secure-next-auth.session-token", "value": "ok"}]}, request=request)
+        if request.url.path == "/v1/chat/completions":
+            return httpx.Response(
+                400,
+                json={"error": {"message": "model invalid/backend pool does not support: chatgpt_text/gpt-missing"}},
+                request=request,
+            )
+        return httpx.Response(404, json={"error": "unexpected"}, request=request)
+
+    client = TestClient(
+        create_app(
+            config=replace(_config(), upstream=UpstreamConfig(base_url="http://127.0.0.1:8500/v1", model="gpt-instant")),
+            config_path=tmp_path / "config.json",
+            credential_store=CredentialStore(tmp_path / "credentials"),
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+    )
+    account_id = client.get("/api/admin/accounts", params={"providerId": "chatgpt"}).json()["accounts"][0]["id"]
+
+    response = client.post(
+        "/api/admin/accounts/validate",
+        json={"providerId": "chatgpt", "accountId": account_id, "modelIds": ["chatgpt_text/gpt-missing"], "force": True},
+    )
+
+    assert response.status_code == 200
+    item = response.json()["validation"]["chatgpt_text/gpt-missing"]
+    assert item["status"] == "unavailable"
+    assert "当前通道没有启用 chatgpt_text/gpt-missing" in item["message"]
+    assert "通道设置" in item["message"]
+    assert "重新网页登录不一定能解决" in item["message"]
+    assert "backend pool does not support" not in item["message"]
+
+
+def test_direct_deepseek_account_validation_uses_relogin_hint_on_expired_auth(tmp_path: Path) -> None:
+    class ExpiredDeepSeekClient:
+        last_diagnostic = {"model": "deepseek-v4-pro", "ds2api_base_url": "http://127.0.0.1:9331/v1"}
+
+        def __init__(self, credential: dict[str, Any], **_: Any) -> None:
+            self.credential = credential
+
+        def chat_completions(self, payload: dict[str, Any]) -> dict[str, Any]:
+            raise DeepSeekDs2apiError(
+                401,
+                "ds2api DeepSeek 调用失败：HTTP 401 Invalid token. If this should be a DS2API key, add it to config.keys first.",
+            )
+
+    store = CredentialStore(tmp_path / "credentials")
+    store.save(
+        "deepseek-web",
+        {
+            "cookie": "ds_session_id=session-secret",
+            "bearer": "expired-bearer",
+            "userAgent": "Chrome Test",
+        },
+    )
+    client = TestClient(
+        create_app(
+            config=_config(),
+            config_path=tmp_path / "config.json",
+            credential_store=store,
+            deepseek_client_factory=ExpiredDeepSeekClient,
+            http_client=_not_found_client(),
+        )
+    )
+
+    response = client.post(
+        "/api/admin/accounts/validate",
+        json={
+            "providerId": "deepseek-web",
+            "accountId": "direct:deepseek-web:default",
+            "modelIds": ["deepseek-v4-pro"],
+            "force": True,
+        },
+    )
+
+    assert response.status_code == 200
+    item = response.json()["validation"]["deepseek-v4-pro"]
+    assert item["status"] == "unavailable"
+    assert "DeepSeek Web 的网页登录授权已过期或失效" in item["message"]
+    assert "打开授权浏览器" in item["message"]
+    assert "刷新模型" in item["message"]
+    assert "Invalid token" not in item["message"]
+    assert "config.keys" not in item["message"]
+
+
 def test_account_model_validation_selects_requested_webai2api_account_before_probe(tmp_path: Path) -> None:
     posted_instances: list[Any] = []
     restart_payloads: list[Any] = []
