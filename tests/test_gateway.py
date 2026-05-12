@@ -11662,6 +11662,54 @@ def test_images_generation_defaults_to_gpt_image_2(tmp_path: Path) -> None:
     assert seen["body"]["model"] == "gpt-image-2"
 
 
+def test_images_generation_passes_reference_images_to_webai2api(tmp_path: Path) -> None:
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(
+            200,
+            json=_openai_response("data:image/png;base64,aGVsbG8="),
+            request=request,
+        )
+
+    client = TestClient(
+        create_app(
+            config=_config(),
+            credential_store=CredentialStore(tmp_path / "credentials"),
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+    )
+
+    response = client.post(
+        "/v1/images/generations",
+        headers=_headers(),
+        json={
+            "model": "google_flow/gemini-3-pro-image-preview",
+            "prompt": "make a clean storyboard frame",
+            "response_format": "b64_json",
+            "input_image": [
+                "data:image/png;base64,aGVsbG8=",
+                {"url": "data:image/jpeg;base64,AAECAw=="},
+                "https://example.com/not-forwarded.png",
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert seen["body"]["model"] == "google_flow/gemini-3-pro-image-preview"
+    assert seen["body"]["messages"] == [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "make a clean storyboard frame"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,aGVsbG8="}},
+                {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,AAECAw=="}},
+            ],
+        }
+    ]
+
+
 def test_images_generation_surfaces_webai2api_sse_errors(tmp_path: Path) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -11743,6 +11791,8 @@ def test_media_models_are_advertised_with_image_and_video_capabilities(tmp_path:
                     {"id": "gpt-image-2", "object": "model", "owned_by": "chatgpt", "type": "image"},
                     {"id": "gpt-image-1.5", "object": "model", "owned_by": "chatgpt", "type": "image"},
                     {"id": "sora-2", "object": "model", "owned_by": "sora", "type": "image"},
+                    {"id": "google_flow/gemini-3-pro-image-preview", "object": "model", "owned_by": "google_flow"},
+                    {"id": "gemini/veo-3.1-generate-preview", "object": "model", "owned_by": "gemini"},
                 ],
             },
             request=request,
@@ -11766,6 +11816,10 @@ def test_media_models_are_advertised_with_image_and_video_capabilities(tmp_path:
     assert models["gpt-image-1.5"]["capabilities"]["video"] is False
     assert models["sora-2"]["type"] == "video"
     assert models["sora-2"]["capabilities"]["video"] is True
+    assert models["google_flow/gemini-3-pro-image-preview"]["type"] == "image"
+    assert models["google_flow/gemini-3-pro-image-preview"]["capabilities"]["image"] is True
+    assert models["gemini/veo-3.1-generate-preview"]["type"] == "video"
+    assert models["gemini/veo-3.1-generate-preview"]["capabilities"]["video"] is True
 
 
 def test_onboarding_returns_gateway_providers_and_models(tmp_path: Path) -> None:

@@ -1169,7 +1169,7 @@ onMounted(loadOnboarding);
         <div class="panel-heading compact">
           <div>
             <h2>图片生成测试</h2>
-            <p>使用 `gpt-image-2` 做一次小图测试，确认当前 ChatGPT 授权账号可以生成图片。</p>
+            <p>选择任一已授权的图片模型做一次小图测试，确认 WebAI2API 媒体链路可以生成图片。</p>
           </div>
           <ExperimentOutlined />
         </div>

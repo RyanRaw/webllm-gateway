@@ -22,6 +22,11 @@ gpt-image-2
 gpt-image-1.5
 chatgpt/gpt-image-2
 chatgpt/gpt-image-1.5
+google_flow/gemini-3-pro-image-preview
+google_flow/gemini-2.5-flash-image-preview
+google_flow/imagen-4
+google_flow/*-landspace
+google_flow/*-portrait
 ```
 
 限制：
@@ -29,7 +34,9 @@ chatgpt/gpt-image-1.5
 - 当前只支持 `n=1`。
 - `response_format` 支持 `url` 和 `b64_json`。
 - `url` 返回的是 data URI，不是公网文件地址。
-- 需要 ChatGPT/WebAI2API 登录态可用。
+- 需要对应 WebAI2API adapter 的网页登录态可用，例如 ChatGPT 或 Google Flow。
+- 图生图 / 参考图可传 `input_image`、`image`、`reference_image` 或 `input_reference`，值可以是单个 `data:image/...`，也可以是数组；Gateway 会把它们转成 WebAI2API 所需的 OpenAI 多模态 `image_url` 消息。
+- 最新 WebAI2API upstream 中 Google Flow adapter 支持图片生成；视频仍应使用 Sora 或 Gemini/Veo adapter。
 
 PowerShell 示例：
 
@@ -66,6 +73,13 @@ GET /v1/videos/{video_id}/content
 
 ```text
 sora-2
+```
+
+兼容模型：
+
+```text
+gemini/veo-3.1-generate-preview
+gemini_biz/veo-3.1-generate-preview
 ```
 
 视频内容会短期保存在 Gateway 内存缓存中；重启服务后缓存会丢失。需要长期保存时，下游客户端应在生成后立即下载 `/content`。

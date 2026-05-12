@@ -136,9 +136,9 @@ GET /v1/videos/{video_id}
 GET /v1/videos/{video_id}/content
 ```
 
-图片生成建议优先使用 `gpt-image-2`，兼容 `gpt-image-1.5`。这条链路通过内部 WebAI2API / ChatGPT 网页授权账号调用；首页“图片生成测试”可以直接执行一次 smoke test，并预览返回图片。
+图片生成建议优先使用 `gpt-image-2`，兼容 `gpt-image-1.5` 和 WebAI2API 暴露的 `google_flow/*` 模型。Gateway 会把参考图参数转成 WebAI2API 多模态消息，因此 Google Flow 图生图/参考图链路可以复用同一个 `/v1/images/generations` 包装；首页“图片生成测试”可以直接执行一次 smoke test，并预览返回图片。
 
-视频生成使用 `sora-2` 等 WebAI2API 暴露的 Sora 模型，结果由 Gateway 做短期缓存并通过 `/v1/videos/{video_id}/content` 取回。完整请求示例和注意事项见 [docs/media-generation.md](docs/media-generation.md)。
+视频生成使用 `sora-2`、`gemini/veo-3.1-generate-preview` 等 WebAI2API 暴露的视频模型，结果由 Gateway 做短期缓存并通过 `/v1/videos/{video_id}/content` 取回。当前最新 WebAI2API upstream 的 Google Flow adapter 标注为图片生成，视频请走 Sora 或 Gemini/Veo。完整请求示例和注意事项见 [docs/media-generation.md](docs/media-generation.md)。
 
 ## 模型目录
 

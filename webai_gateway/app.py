@@ -3780,7 +3780,15 @@ def _create_image_generation_response(
     if response_format not in {"url", "b64_json"}:
         raise HTTPException(status_code=400, detail="response_format must be url or b64_json")
     model = normalize_model_id(body.get("model"), DEFAULT_IMAGE_GENERATION_MODEL)
-    data_uri = _run_webai2api_media_generation(client, cfg, model=model, prompt=prompt, kind="image")
+    input_images = _media_input_images_from_body(body)
+    data_uri = _run_webai2api_media_generation(
+        client,
+        cfg,
+        model=model,
+        prompt=prompt,
+        kind="image",
+        input_images=input_images,
+    )
     decoded = _decode_data_uri(data_uri, expected_kind="image")
     if decoded is None:
         raise HTTPException(status_code=502, detail="Upstream image response did not contain valid image data")
