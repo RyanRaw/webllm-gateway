@@ -11856,14 +11856,22 @@ def test_onboarding_returns_gateway_providers_and_models(tmp_path: Path) -> None
     assert body["gateway"]["baseUrl"] == "/v1"
     assert body["gateway"]["apiKey"] == "local-dev-key"
     assert body["gateway"]["defaultModel"] == "web-model"
-    assert body["summary"]["providers"] == 4
+    assert body["summary"]["providers"] == 7
     assert body["summary"]["candidateProviders"] >= 10
     assert body["summary"]["models"] >= 7
     assert body["summary"]["candidateModels"] >= 3
     assert body["summary"]["authorizedProviders"] == 1
     assert body["summary"]["authorizedDirectProviders"] == 1
-    assert body["summary"]["webAI2APIProviders"] == 1
-    assert {item["id"] for item in body["providers"]} == {"deepseek-web", "qwen", "qwen-coder", "chatgpt"}
+    assert body["summary"]["webAI2APIProviders"] == 4
+    assert {item["id"] for item in body["providers"]} == {
+        "deepseek-web",
+        "qwen",
+        "qwen-coder",
+        "chatgpt",
+        "google-flow",
+        "sora",
+        "gemini",
+    }
     assert {item["id"] for item in body["models"]} >= {
         "deepseek-v4-pro",
         "qwen-web/qwen3.6-plus",
@@ -11892,6 +11900,58 @@ def test_onboarding_returns_gateway_providers_and_models(tmp_path: Path) -> None
     assert "ds2api" in deepseek["availabilityMessage"]
     assert "session-secret" not in candidate_response.text
     assert "bearer-secret" not in candidate_response.text
+
+
+def test_onboarding_exposes_media_webai2api_providers_before_authorization(tmp_path: Path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/models":
+            return httpx.Response(
+                200,
+                json={
+                    "object": "list",
+                    "data": [
+                        {"id": "gpt-instant", "object": "model", "owned_by": "internal_server", "type": "text"},
+                        {"id": "chatgpt/gpt-image-2", "object": "model", "owned_by": "chatgpt", "type": "image"},
+                    ],
+                },
+                request=request,
+            )
+        if request.url.path == "/admin/config/instances":
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "name": "browser_default",
+                        "workers": [{"name": "default", "type": "chatgpt_text", "mergeTypes": ["chatgpt"]}],
+                    }
+                ],
+                request=request,
+            )
+        if request.url.path == "/v1/cookies":
+            return httpx.Response(200, json={"cookies": []}, request=request)
+        return httpx.Response(404, json={"error": "unexpected"}, request=request)
+
+    client = TestClient(
+        create_app(
+            config=_config(),
+            config_path=tmp_path / "config.json",
+            credential_store=CredentialStore(tmp_path / "credentials"),
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+    )
+
+    response = client.get("/api/admin/onboarding")
+
+    assert response.status_code == 200
+    providers = {item["id"]: item for item in response.json()["providers"]}
+    assert {"google-flow", "sora", "gemini"} <= set(providers)
+    assert providers["google-flow"]["credential"]["authorized"] is False
+    assert providers["google-flow"]["accounts"] == []
+    assert providers["google-flow"]["availableModels"] == []
+    assert "imagen-4" in providers["google-flow"]["models"]
+    assert providers["google-flow"]["capabilities"]["image"] is True
+    assert providers["sora"]["capabilities"]["video"] is True
+    assert providers["gemini"]["capabilities"]["video"] is True
 
 
 def test_onboarding_groups_webai2api_adapter_aliases_with_provider(tmp_path: Path) -> None:
@@ -12526,6 +12586,53 @@ def test_webai2api_login_start_creates_isolated_profile_without_touching_existin
     assert restart_payloads == [{"loginMode": True, "workerName": body["workerName"]}]
     assert "session-token" not in response.text
     assert "cookie" not in response.text.lower()
+
+
+def test_webai2api_login_start_auto_creates_media_worker_when_provider_worker_is_missing(tmp_path: Path) -> None:
+    posted_instances: list[Any] = []
+    restart_payloads: list[Any] = []
+    original_instances = [
+        {
+            "name": "browser_default",
+            "userDataMark": None,
+            "proxy": None,
+            "workers": [{"name": "default", "type": "chatgpt_text", "mergeTypes": ["chatgpt"]}],
+        }
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/admin/config/instances" and request.method == "GET":
+            return httpx.Response(200, json=original_instances, request=request)
+        if request.url.path == "/admin/config/instances" and request.method == "POST":
+            posted_instances.append(json.loads(request.content.decode("utf-8")))
+            return httpx.Response(200, json={"success": True}, request=request)
+        if request.url.path == "/admin/restart" and request.method == "POST":
+            restart_payloads.append(json.loads(request.content.decode("utf-8") or "{}"))
+            return httpx.Response(200, json={"success": True}, request=request)
+        return httpx.Response(404, json={"error": "unexpected"}, request=request)
+
+    client = TestClient(
+        create_app(
+            config=_config(),
+            config_path=tmp_path / "config.json",
+            credential_store=CredentialStore(tmp_path / "credentials"),
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+    )
+
+    response = client.post("/api/admin/onboarding/providers/google-flow/login", json={"newAccount": False})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["success"] is True
+    assert body["providerId"] == "google-flow"
+    assert body["newAccount"] is True
+    assert posted_instances
+    saved_instances = posted_instances[-1]
+    assert saved_instances[0] == original_instances[0]
+    worker = saved_instances[-1]["workers"][0]
+    assert worker["type"] == "google_flow"
+    assert restart_payloads == [{"loginMode": True, "workerName": body["workerName"]}]
 
 
 def test_webai2api_login_start_autostarts_sidecar_for_existing_worker_repair(tmp_path: Path) -> None:

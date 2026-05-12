@@ -75,7 +75,7 @@ const gatewayBaseUrl = computed(() => `${window.location.origin}${onboarding.val
 const gatewayRootUrl = computed(() => gatewayBaseUrl.value.replace(/\/v1\/?$/, ''));
 const gatewayToken = computed(() => onboarding.value.gateway?.apiKey || '');
 
-const providerPriority = ['deepseek-web', 'qwen', 'qwen-coder', 'chatgpt'];
+const providerPriority = ['deepseek-web', 'qwen', 'qwen-coder', 'chatgpt', 'google-flow', 'sora', 'gemini'];
 const providers = computed(() => {
   const list = onboarding.value.providers || [];
   return [...list].sort((a, b) => {

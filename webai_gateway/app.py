@@ -106,7 +106,15 @@ WEBAI2API_AUTH_COOKIE_HINTS: dict[str, tuple[str, ...]] = {
         "__secure-oai-is",
     ),
 }
-HOMEPAGE_SUPPORTED_PROVIDER_IDS = {"deepseek-web", "qwen", "qwen-coder", "chatgpt"}
+HOMEPAGE_SUPPORTED_PROVIDER_IDS = {
+    "deepseek-web",
+    "qwen",
+    "qwen-coder",
+    "chatgpt",
+    "google-flow",
+    "sora",
+    "gemini",
+}
 TOOL_BRIDGE_EVENT_LIMIT = 200
 MEDIA_GENERATION_CACHE_LIMIT = 100
 MEDIA_GENERATION_TTL_SECONDS = 60 * 60
@@ -948,7 +956,10 @@ def create_app(
         if not instances:
             raise HTTPException(status_code=502, detail="WebAI2API 工作池为空或不可读取，无法启动登录模式")
         requested_worker = str(body.get("workerName") or body.get("worker_name") or "").strip()
-        create_account = bool(body.get("newAccount", body.get("new_account", not requested_worker)))
+        create_account_raw = body.get("newAccount", body.get("new_account", None))
+        create_account = bool(create_account_raw) if create_account_raw is not None else not requested_worker
+        if not create_account and not requested_worker and not _first_webai2api_worker_for_provider(provider, instances):
+            create_account = True
         if create_account:
             instances, instance_name, worker_name = _webai2api_instances_with_new_login_account(provider, instances)
             response = client.post(

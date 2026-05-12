@@ -32,7 +32,7 @@ stop_webai_gateway.bat
 
 - 首页默认只展示当前已经实际验证可用的网页登录通路，避免把未验证站点当成可用产品能力。
 - DeepSeek Web、Qwen / 通义千问国际版、Qwen Coder：点击“打开授权浏览器”，在弹出的浏览器里登录。网关检测到真实登录态后才会显示已授权。
-- ChatGPT：通过内部托管的 WebAI2API 登录授权能力接入；点击“登录或修复账号”后完成网页授权，再回到 Gateway 检测模型。
+- ChatGPT、Google Flow、Sora、Gemini：通过内部托管的 WebAI2API 登录授权能力接入；点击“登录或修复账号”后 Gateway 会自动准备隔离的 WebAI2API worker，完成网页登录授权并恢复 API 后即可检测和调用模型，不需要手动进入 WebAI2API 后台配置工作池。
 - 授权完成后，在“可用模型”里复制模型 ID，填到 KrisAI、OpenClaw、Hermes 或 Claude Code。
 - “接入客户端”区域可以复制 OpenAI / Anthropic 兼容地址和 API Key，也可以重新生成本地网关令牌。
 
@@ -137,6 +137,8 @@ GET /v1/videos/{video_id}/content
 ```
 
 图片生成建议优先使用 `gpt-image-2`，兼容 `gpt-image-1.5` 和 WebAI2API 暴露的 `google_flow/*` 模型。Gateway 会把参考图参数转成 WebAI2API 多模态消息，因此 Google Flow 图生图/参考图链路可以复用同一个 `/v1/images/generations` 包装；首页“图片生成测试”可以直接执行一次 smoke test，并预览返回图片。
+
+首页默认展示 Google Flow、Sora 和 Gemini 媒体入口；第一次授权时 Gateway 会自动为对应站点创建独立 WebAI2API 登录 profile/worker，用户只需要完成网页登录并点击“恢复 API 并刷新”。
 
 视频生成使用 `sora-2`、`gemini/veo-3.1-generate-preview` 等 WebAI2API 暴露的视频模型，结果由 Gateway 做短期缓存并通过 `/v1/videos/{video_id}/content` 取回。当前最新 WebAI2API upstream 的 Google Flow adapter 标注为图片生成，视频请走 Sora 或 Gemini/Veo。完整请求示例和注意事项见 [docs/media-generation.md](docs/media-generation.md)。
 

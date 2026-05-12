@@ -35,6 +35,7 @@ google_flow/*-portrait
 - `response_format` 支持 `url` 和 `b64_json`。
 - `url` 返回的是 data URI，不是公网文件地址。
 - 需要对应 WebAI2API adapter 的网页登录态可用，例如 ChatGPT 或 Google Flow。
+- 首页授权入口会在缺少对应 worker 时自动创建隔离 WebAI2API profile/worker；用户只需要完成网页登录授权，然后点击“恢复 API 并刷新”。
 - 图生图 / 参考图可传 `input_image`、`image`、`reference_image` 或 `input_reference`，值可以是单个 `data:image/...`，也可以是数组；Gateway 会把它们转成 WebAI2API 所需的 OpenAI 多模态 `image_url` 消息。
 - 最新 WebAI2API upstream 中 Google Flow adapter 支持图片生成；视频仍应使用 Sora 或 Gemini/Veo adapter。
 
