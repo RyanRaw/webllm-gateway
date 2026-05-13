@@ -13182,6 +13182,10 @@ def test_vendored_webai2api_frontend_has_gateway_bridge_page() -> None:
     assert "/api/admin/onboarding" in bridge_source
     assert "/api/admin/onboarding/providers/" in bridge_source
     assert "/api/admin/onboarding/login/finish" in bridge_source
+    assert "pendingWebAI2APILogin" in bridge_source
+    assert "data.accountId || ''" in bridge_source
+    assert "async function autoValidateWebAI2APILogin()" in bridge_source
+    assert "autoValidateWebAI2APILogin();" in bridge_source
     assert "const newAccount = Boolean(options.newAccount);" in bridge_source
     assert "options.newAccount || !workerName" not in bridge_source
     assert "新增网页账号" not in bridge_source

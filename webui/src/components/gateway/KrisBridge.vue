@@ -30,6 +30,7 @@ const actionError = ref('');
 const actionLogs = ref([]);
 const actionKind = ref('');
 const accountActionId = ref('');
+const pendingWebAI2APILogin = ref(null);
 const selectedProviderId = ref('');
 const modelSearch = ref('');
 const modelScope = ref('selected');
@@ -556,6 +557,11 @@ async function pollAuthJob(jobId) {
 
 async function startWebAI2APILogin(provider, options = {}) {
   resetActionState('webai2api');
+  pendingWebAI2APILogin.value = {
+    providerId: provider.id,
+    accountId: '',
+    workerName: '',
+  };
   actionLoading.value = true;
   try {
     const newAccount = Boolean(options.newAccount);
@@ -575,11 +581,17 @@ async function startWebAI2APILogin(provider, options = {}) {
     if (data.sidecarStarted) {
       appendLog('授权服务已准备好');
     }
+    pendingWebAI2APILogin.value = {
+      providerId: data.providerId || provider.id,
+      accountId: data.accountId || '',
+      workerName: data.workerName || '',
+    };
     appendLog(data.message || '已进入网页登录授权模式');
     appendLog(`请在打开的窗口里完成 ${provider.name} 登录，然后回到这里点击“恢复 API 并刷新”`);
     message.success('网页登录窗口已准备好');
     window.open('/tools/display', '_blank', 'noopener,noreferrer');
   } catch (error) {
+    pendingWebAI2APILogin.value = null;
     actionError.value = error.message || String(error);
     appendLog(`登录模式启动失败：${actionError.value}`);
     message.error(actionError.value);
@@ -605,8 +617,8 @@ async function finishWebAI2APILogin({ close = false } = {}) {
       throw new Error(data.message || data.detail || data.error?.message || `HTTP ${res.status}`);
     }
     appendLog(data.message || 'Gateway API 已恢复可调用模式');
-    await loadOnboarding();
-    message.success('已恢复 API 并刷新模型');
+    const autoValidated = await autoValidateWebAI2APILogin();
+    message.success(autoValidated ? '已恢复 API 并自动检测模型' : '已恢复 API，模型状态已刷新');
     if (close) progressVisible.value = false;
   } catch (error) {
     actionError.value = error.message || String(error);
@@ -614,6 +626,67 @@ async function finishWebAI2APILogin({ close = false } = {}) {
     message.error(actionError.value);
   } finally {
     actionLoading.value = false;
+  }
+}
+
+async function autoValidateWebAI2APILogin() {
+  await loadOnboarding();
+  const login = pendingWebAI2APILogin.value || {};
+  const providerId = login.providerId || selectedProvider.value?.id;
+  const provider = providers.value.find((item) => item.id === providerId);
+  if (!provider) {
+    appendLog('已恢复 API，但没有找到刚授权的平台，已刷新当前模型状态');
+    pendingWebAI2APILogin.value = null;
+    return false;
+  }
+
+  selectedProviderId.value = provider.id;
+  const accounts = Array.isArray(provider.accounts) ? provider.accounts : [];
+  const account = accounts.find((item) => item.id === login.accountId)
+    || accounts.find((item) => item.id === provider.currentAccountId)
+    || accounts.find((item) => item.current)
+    || accounts[0];
+  if (!account) {
+    appendLog(`${provider.name} 尚未检测到授权账号，模型状态保持待检测`);
+    pendingWebAI2APILogin.value = null;
+    return false;
+  }
+
+  accountActionId.value = `${account.id}:validate`;
+  try {
+    appendLog(`正在自动检测 ${provider.name} 的模型可用性`);
+    const res = await fetch('/api/admin/accounts/validate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        providerId: provider.id,
+        accountId: account.id,
+        modelIds: providerVisibleModelIds(provider),
+        force: true,
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || data.message || `HTTP ${res.status}`);
+    const validation = data.validation || {};
+    const values = Object.values(validation);
+    const okCount = values.filter((item) => item?.status === 'available').length;
+    const failed = values.filter((item) => item?.status === 'unavailable').length;
+    if (values.length) {
+      appendLog(`模型自动检测完成：${okCount}/${values.length} 可用${failed ? `，${failed} 个不可用` : ''}`);
+    } else {
+      appendLog('模型自动检测完成：当前没有返回可检测模型');
+    }
+    await loadOnboarding();
+    return true;
+  } catch (error) {
+    const errorMessage = error.message || String(error);
+    appendLog(`模型自动检测失败：${errorMessage}`);
+    message.warning(errorMessage);
+    await loadOnboarding();
+    return false;
+  } finally {
+    accountActionId.value = '';
+    pendingWebAI2APILogin.value = null;
   }
 }
 
