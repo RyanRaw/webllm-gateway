@@ -958,7 +958,12 @@ def create_app(
         requested_worker = str(body.get("workerName") or body.get("worker_name") or "").strip()
         create_account_raw = body.get("newAccount", body.get("new_account", None))
         create_account = bool(create_account_raw) if create_account_raw is not None else not requested_worker
-        if not create_account and not requested_worker and not _first_webai2api_worker_for_provider(provider, instances):
+        existing_worker = "" if requested_worker else _first_webai2api_worker_for_provider(
+            provider,
+            instances,
+            require_dedicated_profile=True,
+        )
+        if not create_account and not requested_worker and not existing_worker:
             create_account = True
         if create_account:
             instances, instance_name, worker_name = _webai2api_instances_with_new_login_account(provider, instances)
@@ -979,7 +984,7 @@ def create_app(
                 },
             )
         else:
-            worker_name = requested_worker or _first_webai2api_worker_for_provider(provider, instances)
+            worker_name = requested_worker or existing_worker
             if not worker_name:
                 raise HTTPException(status_code=400, detail="未找到可用于该 Provider 的 WebAI2API Worker")
             instance_name = _instance_name_for_worker(instances, worker_name)
@@ -1103,10 +1108,17 @@ def create_app(
         }
         return [*instances, new_instance], instance_name, worker_name
 
-    def _first_webai2api_worker_for_provider(provider: Any, instances: list[Any]) -> str:
+    def _first_webai2api_worker_for_provider(
+        provider: Any,
+        instances: list[Any],
+        *,
+        require_dedicated_profile: bool = False,
+    ) -> str:
         provider_dict = {"adapters": list(getattr(provider, "adapters", ()))}
         for instance in instances:
             if not isinstance(instance, dict):
+                continue
+            if require_dedicated_profile and not _instance_dedicated_to_provider(instance, provider_dict):
                 continue
             workers = instance.get("workers") if isinstance(instance.get("workers"), list) else []
             for worker in workers:
@@ -1115,6 +1127,22 @@ def create_app(
                     if worker_name:
                         return worker_name
         return ""
+
+    def _instance_dedicated_to_provider(instance: dict[str, Any], provider: dict[str, Any]) -> bool:
+        provider_adapters = {str(adapter) for adapter in provider.get("adapters", []) if isinstance(adapter, str)}
+        workers = instance.get("workers") if isinstance(instance.get("workers"), list) else []
+        dict_workers = [worker for worker in workers if isinstance(worker, dict)]
+        if not dict_workers:
+            return False
+        worker_adapter_sets = [_worker_adapter_ids(worker) for worker in dict_workers]
+        return all(adapter_ids and adapter_ids.issubset(provider_adapters) for adapter_ids in worker_adapter_sets)
+
+    def _worker_adapter_ids(worker: dict[str, Any]) -> set[str]:
+        worker_type = str(worker.get("type") or "")
+        merge_types = {str(item) for item in worker.get("mergeTypes", []) if isinstance(item, str)}
+        if worker_type == "merge":
+            return merge_types
+        return {worker_type, *merge_types} if worker_type else merge_types
 
     def _instance_name_for_worker(instances: list[Any], worker_name: str) -> str:
         for instance in instances:

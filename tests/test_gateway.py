@@ -12638,6 +12638,58 @@ def test_webai2api_login_start_auto_creates_media_worker_when_provider_worker_is
     assert restart_payloads == [{"loginMode": True, "workerName": body["workerName"]}]
 
 
+def test_webai2api_login_start_creates_flow_profile_when_existing_worker_shares_gpt_instance(tmp_path: Path) -> None:
+    posted_instances: list[Any] = []
+    restart_payloads: list[Any] = []
+    original_instances = [
+        {
+            "name": "gpt_profile",
+            "userDataMark": "gpt_authorized",
+            "workers": [
+                {"name": "gpt", "type": "chatgpt_text", "mergeTypes": []},
+                {"name": "flow_shared", "type": "google_flow", "mergeTypes": []},
+            ],
+        }
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/admin/config/instances" and request.method == "GET":
+            return httpx.Response(200, json=original_instances, request=request)
+        if request.url.path == "/admin/config/instances" and request.method == "POST":
+            posted_instances.append(json.loads(request.content.decode("utf-8")))
+            return httpx.Response(200, json={"success": True}, request=request)
+        if request.url.path == "/admin/restart" and request.method == "POST":
+            restart_payloads.append(json.loads(request.content.decode("utf-8") or "{}"))
+            return httpx.Response(200, json={"success": True}, request=request)
+        return httpx.Response(404, json={"error": "unexpected"}, request=request)
+
+    client = TestClient(
+        create_app(
+            config=_config(),
+            config_path=tmp_path / "config.json",
+            credential_store=CredentialStore(tmp_path / "credentials"),
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+    )
+
+    response = client.post("/api/admin/onboarding/providers/google-flow/login", json={"newAccount": False})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["providerId"] == "google-flow"
+    assert body["newAccount"] is True
+    assert body["workerName"] != "flow_shared"
+    assert body["instanceName"].startswith("gateway_google-flow_")
+    assert posted_instances
+    saved_instances = posted_instances[-1]
+    assert saved_instances[0] == original_instances[0]
+    new_instance = saved_instances[-1]
+    assert new_instance["name"] == body["instanceName"]
+    assert new_instance["userDataMark"] == body["workerName"]
+    assert new_instance["workers"] == [{"name": body["workerName"], "type": "google_flow"}]
+    assert restart_payloads == [{"loginMode": True, "workerName": body["workerName"]}]
+
+
 def test_webai2api_login_start_autostarts_sidecar_for_existing_worker_repair(tmp_path: Path) -> None:
     sidecar_ready = False
     starter_calls: list[Path] = []
