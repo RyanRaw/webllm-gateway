@@ -12127,6 +12127,71 @@ def test_onboarding_marks_webai2api_chatgpt_authorized_from_worker_cookies(tmp_p
     assert "visitor-cookie" not in response.text
 
 
+def test_onboarding_marks_google_flow_authorized_from_google_account_cookies_and_validates_catalog_models(
+    tmp_path: Path,
+) -> None:
+    cookie_domains: list[str] = []
+    chat_calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/models":
+            return httpx.Response(200, json={"object": "list", "data": []}, request=request)
+        if request.url.path == "/admin/config/instances":
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "name": "flow_profile",
+                        "workers": [{"name": "flow", "type": "google_flow", "mergeTypes": []}],
+                    }
+                ],
+                request=request,
+            )
+        if request.url.path == "/v1/cookies":
+            domain = str(request.url.params.get("domain") or "")
+            cookie_domains.append(domain)
+            cookies = [{"name": "__Secure-1PSID", "value": "google-session-secret"}] if domain == "accounts.google.com" else []
+            return httpx.Response(200, json={"cookies": cookies}, request=request)
+        if request.url.path == "/v1/chat/completions":
+            chat_calls.append(json.loads(request.content.decode("utf-8"))["model"])
+            return httpx.Response(500, json={"error": {"message": "media probe should not use chat"}}, request=request)
+        return httpx.Response(404, json={"error": "unexpected"}, request=request)
+
+    client = TestClient(
+        create_app(
+            config=replace(_config(), upstream=UpstreamConfig(base_url="http://127.0.0.1:8500/v1", model="gpt-instant")),
+            config_path=tmp_path / "config.json",
+            credential_store=CredentialStore(tmp_path / "credentials"),
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+    )
+
+    onboarding_response = client.get("/api/admin/onboarding")
+
+    assert onboarding_response.status_code == 200
+    flow = next(item for item in onboarding_response.json()["providers"] if item["id"] == "google-flow")
+    assert flow["credential"]["authorized"] is True
+    assert flow["webAI2APIAuth"]["authorized"] is True
+    assert flow["accounts"][0]["authorized"] is True
+    assert "accounts.google.com" in cookie_domains
+    assert "gemini-3-pro-image-preview" in flow["availableModels"]
+    assert "google-session-secret" not in onboarding_response.text
+
+    validation_response = client.post(
+        "/api/admin/accounts/validate",
+        json={
+            "providerId": "google-flow",
+            "accountId": flow["currentAccountId"],
+            "modelIds": ["gemini-3-pro-image-preview"],
+            "force": True,
+        },
+    )
+
+    assert validation_response.status_code == 200
+    assert validation_response.json()["validation"]["gemini-3-pro-image-preview"]["status"] == "available"
+    assert chat_calls == []
+
+
 def test_onboarding_returns_claude_code_connection_profiles_for_web_providers(tmp_path: Path) -> None:
     store = CredentialStore(tmp_path / "credentials")
     store.save(

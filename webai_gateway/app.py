@@ -99,12 +99,34 @@ from webai_gateway.web_auth import (
 
 
 LOCAL_ADMIN_HOSTS = {"127.0.0.1", "::1", "localhost", "testclient"}
+CHATGPT_AUTH_COOKIE_HINTS = (
+    "__secure-next-auth.session-token",
+    "oai-client-auth-info",
+    "__secure-oai-is",
+)
+GOOGLE_AUTH_COOKIE_HINTS = (
+    "__secure-1psid",
+    "__secure-3psid",
+    "sid",
+    "hsid",
+    "ssid",
+    "apisid",
+    "sapisid",
+    "lsid",
+    "osid",
+)
 WEBAI2API_AUTH_COOKIE_HINTS: dict[str, tuple[str, ...]] = {
-    "chatgpt": (
-        "__secure-next-auth.session-token",
-        "oai-client-auth-info",
-        "__secure-oai-is",
-    ),
+    "chatgpt": CHATGPT_AUTH_COOKIE_HINTS,
+    "sora": CHATGPT_AUTH_COOKIE_HINTS,
+    "gemini": GOOGLE_AUTH_COOKIE_HINTS,
+    "gemini-biz": GOOGLE_AUTH_COOKIE_HINTS,
+    "google-flow": GOOGLE_AUTH_COOKIE_HINTS,
+}
+WEBAI2API_AUTH_DOMAIN_HINTS: dict[str, tuple[str, ...]] = {
+    "sora": ("sora.chatgpt.com", "chatgpt.com"),
+    "gemini": ("gemini.google.com", "accounts.google.com", "google.com"),
+    "gemini-biz": ("gemini.google.com", "accounts.google.com", "google.com"),
+    "google-flow": ("labs.google", "accounts.google.com", "google.com"),
 }
 HOMEPAGE_SUPPORTED_PROVIDER_IDS = {
     "deepseek-web",
@@ -485,6 +507,8 @@ def create_app(
         provider_id = str(provider.get("id") or "")
         if provider_id == "chatgpt":
             return bool(_webai2api_provider_instances(provider, webai2api_instances))
+        if provider.get("route") != "direct":
+            return bool(provider.get("advertiseModels")) and bool(_webai2api_provider_instances(provider, webai2api_instances))
         credential = provider.get("credential") if isinstance(provider.get("credential"), dict) else {}
         return (
             provider.get("route") == "direct"
@@ -503,24 +527,37 @@ def create_app(
                 if isinstance(model_id, str) and model_id in {"gpt-instant", "gpt-thinking", "gpt-pro"}
                 and not any(f"{adapter}/{model_id}" in seen for adapter in adapter_ids)
             ]
+        if provider.get("route") != "direct":
+            adapter_ids = [str(adapter) for adapter in provider.get("adapters", []) if isinstance(adapter, str)]
+            return [
+                model_id
+                for model_id in declared_models
+                if isinstance(model_id, str) and not any(f"{adapter}/{model_id}" in seen for adapter in adapter_ids)
+            ]
         if provider.get("route") == "direct":
             return [model_id for model_id in declared_models if isinstance(model_id, str)]
         return []
 
     def _provider_catalog_model_payload(provider: dict[str, Any], model_id: str) -> dict[str, Any]:
         provider_id = str(provider.get("id") or "")
-        return {
+        model_type = _infer_model_type(model_id, provider_id, None)
+        is_media_model = model_type in {"image", "video"}
+        payload = {
             "id": model_id,
             "object": "model",
             "owned_by": provider_id,
-            "type": "text",
             "capabilities": {
-                "tool_bridge": str(provider.get("toolBridge") or "strict").strip().lower() != "off",
-                "supports_native_tools": bool(provider.get("supportsNativeTools")),
+                "tool_bridge": False
+                if is_media_model
+                else str(provider.get("toolBridge") or "strict").strip().lower() != "off",
+                "supports_native_tools": False if is_media_model else bool(provider.get("supportsNativeTools")),
                 "preferred_protocol": str(provider.get("preferredProtocol") or "openai"),
             },
             "availability_source": "provider_catalog",
         }
+        if model_type:
+            payload["type"] = model_type
+        return _enrich_model_payload(payload)
 
     def _available_models_for_provider(
         provider: dict[str, Any],
@@ -601,6 +638,8 @@ def create_app(
                     cookie_count += len(cookie_names)
                     if _webai2api_cookies_authorized(provider_id, cookie_names):
                         authorized = True
+            if not authorized and cookie_count > 0 and provider_id not in WEBAI2API_AUTH_COOKIE_HINTS:
+                authorized = True
             states[provider_id] = {
                 "checked": True,
                 "authorized": authorized,
@@ -630,10 +669,13 @@ def create_app(
         return list(dict.fromkeys(matching))
 
     def _webai2api_auth_domains(provider: dict[str, Any]) -> list[str]:
+        provider_id = str(provider.get("id") or "")
         login_url = str(provider.get("loginUrl") or "")
         parsed = urlsplit(login_url)
         host = parsed.netloc or parsed.path
-        return [host.split("@")[-1].split(":")[0]] if host else []
+        domains = [host.split("@")[-1].split(":")[0]] if host else []
+        domains.extend(WEBAI2API_AUTH_DOMAIN_HINTS.get(provider_id, ()))
+        return [domain for domain in dict.fromkeys(domains) if domain]
 
     def _load_webai2api_cookie_names(
         http_client: httpx.Client,
@@ -921,7 +963,7 @@ def create_app(
                 if cached is not None:
                     validation[model_id] = _public_account_validation({model_id: cached})[model_id]
                     continue
-            result = await run_in_threadpool(_validate_account_model, cfg, provider_id, model_id)
+            result = await run_in_threadpool(_validate_account_model, cfg, provider_id, model_id, provider_dict, parsed)
             saved = app.state.account_registry.save_validation(account_id, model_id, result)
             validation[model_id] = _public_account_validation({model_id: saved})[model_id]
         return {
@@ -1296,7 +1338,13 @@ def create_app(
             return None
         return {**worker, "type": remaining_merge[0], "mergeTypes": remaining_merge[1:]}
 
-    def _validate_account_model(cfg: GatewayConfig, provider_id: str, model_id: str) -> dict[str, Any]:
+    def _validate_account_model(
+        cfg: GatewayConfig,
+        provider_id: str,
+        model_id: str,
+        provider: dict[str, Any] | None = None,
+        parsed_account: Any | None = None,
+    ) -> dict[str, Any]:
         payload = {
             "model": model_id,
             "messages": [{"role": "user", "content": "请只回复 OK。"}],
@@ -1310,6 +1358,19 @@ def create_app(
         }.get(provider_id)
         if direct_validator is not None:
             return _validate_direct_account_model(direct_validator, cfg, provider_id, model_id, payload)
+        if provider is not None and _is_webai2api_media_validation_model(provider, model_id):
+            if (
+                parsed_account is not None
+                and getattr(parsed_account, "source", "") == "webai2api"
+                and getattr(parsed_account, "instance_name", None)
+                and _webai2api_instance_authorized(provider, str(getattr(parsed_account, "instance_name")))
+            ):
+                return {"status": "available", "message": "网页登录态已检测，媒体模型由 WebAI2API 原生适配器调用"}
+            return _unavailable_account_model_result(
+                provider_id,
+                model_id,
+                "未检测到有效网页登录态，请重新打开授权窗口登录后再检测模型。",
+            )
         try:
             response = client.post(
                 cfg.upstream.base_url.rstrip("/") + "/chat/completions",
@@ -1322,6 +1383,16 @@ def create_app(
         if response.status_code < 400:
             return {"status": "available", "message": "验证通过"}
         return _unavailable_account_model_result(provider_id, model_id, _upstream_http_error_message(response))
+
+    def _is_webai2api_media_validation_model(provider: dict[str, Any], model_id: str) -> bool:
+        if provider.get("route") == "direct":
+            return False
+        capabilities = provider.get("capabilities") if isinstance(provider.get("capabilities"), dict) else {}
+        owner = str(provider.get("id") or "")
+        model_type = _infer_model_type(model_id, owner, None)
+        if model_type in {"image", "video"}:
+            return True
+        return bool(capabilities.get("image") or capabilities.get("video")) and not bool(capabilities.get("text"))
 
     def _validate_direct_account_model(
         validator: Any,
