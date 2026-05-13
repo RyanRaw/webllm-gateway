@@ -12194,6 +12194,7 @@ def test_onboarding_marks_google_flow_authorized_from_google_account_cookies_and
 
 def test_account_model_validation_restarts_when_selected_webai2api_worker_is_not_loaded(tmp_path: Path) -> None:
     runtime_worker_ready = False
+    post_restart_cookie_calls = 0
     posted_instances: list[Any] = []
     restart_payloads: list[Any] = []
     chat_calls: list[str] = []
@@ -12205,7 +12206,7 @@ def test_account_model_validation_restarts_when_selected_webai2api_worker_is_not
     ]
 
     def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal runtime_worker_ready
+        nonlocal post_restart_cookie_calls, runtime_worker_ready
         if request.url.path == "/v1/models":
             return httpx.Response(200, json={"object": "list", "data": []}, request=request)
         if request.url.path == "/admin/config/instances" and request.method == "GET":
@@ -12222,6 +12223,13 @@ def test_account_model_validation_restarts_when_selected_webai2api_worker_is_not
                 return httpx.Response(
                     500,
                     json={"error": {"message": "浏览器实例不存在: flow_profile"}},
+                    request=request,
+                )
+            post_restart_cookie_calls += 1
+            if post_restart_cookie_calls <= 3:
+                return httpx.Response(
+                    500,
+                    json={"error": {"message": "WebAI2API is still restarting"}},
                     request=request,
                 )
             return httpx.Response(200, json={"cookies": [{"name": "__Secure-1PSID", "value": "ok"}]}, request=request)

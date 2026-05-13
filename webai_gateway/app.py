@@ -1227,6 +1227,13 @@ def create_app(
         cookie_names = _load_webai2api_cookie_names(client, current_config(), instance_name, domains[0])
         return cookie_names is not None
 
+    def _webai2api_wait_for_runtime_instance(provider: dict[str, Any], instance_name: str) -> bool:
+        for _ in range(20):
+            if _webai2api_runtime_instance_loaded(provider, instance_name):
+                return True
+            time.sleep(0.5)
+        return False
+
     def _sync_webai2api_selected_account(provider: Any, parsed_account: Any) -> None:
         if not parsed_account.instance_name or not parsed_account.worker_name:
             raise HTTPException(status_code=400, detail="WebAI2API 账号缺少 instance/worker")
@@ -1376,6 +1383,7 @@ def create_app(
                 parsed_account is not None
                 and getattr(parsed_account, "source", "") == "webai2api"
                 and getattr(parsed_account, "instance_name", None)
+                and _webai2api_wait_for_runtime_instance(provider, str(getattr(parsed_account, "instance_name")))
                 and _webai2api_instance_authorized(provider, str(getattr(parsed_account, "instance_name")))
             ):
                 return {"status": "available", "message": "网页登录态已检测，媒体模型由 WebAI2API 原生适配器调用"}
