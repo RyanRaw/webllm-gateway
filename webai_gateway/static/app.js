@@ -157,6 +157,29 @@ async function refreshStatus() {
 
 function renderToolBridgeSummary(event) {
   const parts = [];
+  if (event.errorKind) {
+    parts.push(`错误：${event.errorKind}${event.statusCode ? ` / HTTP ${event.statusCode}` : ""}`);
+  }
+  if (event.responseWarning) {
+    parts.push(`响应警告：${event.responseWarning}`);
+  }
+  if (event.requestLatestUserPreview) {
+    parts.push(`用户请求：${event.requestLatestUserPreview}`);
+  }
+  if (event.requestToolResultCount) {
+    parts.push(`工具结果：${event.requestToolResultCount} 条`);
+  }
+  if (event.requestToolErrorCount) {
+    parts.push(`工具错误：${event.requestToolErrorCount} 条${event.requestLatestToolErrorPreview ? ` / ${event.requestLatestToolErrorPreview}` : ""}`);
+  }
+  if (event.requestToolSchemas?.length) {
+    const schemaText = event.requestToolSchemas.slice(0, 3).map((tool) => {
+      const required = tool.required?.length ? ` required=${tool.required.join("/")}` : "";
+      const props = tool.properties?.length ? ` props=${tool.properties.slice(0, 4).join("/")}` : "";
+      return `${tool.name}${required}${props}`;
+    }).join("；");
+    parts.push(`工具 schema：${schemaText}`);
+  }
   if (event.toolBridgeError) {
     const repairText = event.toolBridgeRepairable ? "可修复" : "硬拒绝";
     parts.push(`ToolBridge 错误：${event.toolBridgeError}（${repairText}）`);
@@ -183,8 +206,14 @@ function renderToolBridgeSummary(event) {
   if (event.providerPromptCompacted === true) {
     parts.push(`Provider Prompt 已压缩：${event.providerPromptChars || 0}/${event.providerPromptMaxChars || 0}`);
   }
+  if (event.providerOutputPreview) {
+    parts.push(`Provider 输出：${event.providerOutputPreview}`);
+  }
   if (event.providerMetadataOnlyResponse === true) {
     parts.push("Provider 返回 metadata-only，已触发恢复路径");
+  }
+  if (event.responseEmpty === true) {
+    parts.push("响应为空");
   }
   if (event.responseContentPreview) {
     parts.push(`响应摘要：${event.responseContentPreview}`);
@@ -205,13 +234,15 @@ function renderRequestDiagnostics(events) {
   const recent = state.requestDiagnostics.slice(-8).reverse();
   for (const event of recent) {
     const item = document.createElement("article");
-    item.className = event.toolBridgeError ? "diagnostic-item is-error" : "diagnostic-item";
+    item.className = (event.toolBridgeError || event.errorKind || event.responseWarning) ? "diagnostic-item is-error" : "diagnostic-item";
     const title = document.createElement("div");
     title.className = "diagnostic-title";
     title.textContent = `${event.endpoint || "请求"} · ${event.route || "unknown"} · ${event.model || "model"}`;
     const meta = document.createElement("div");
     meta.className = "diagnostic-meta";
-    meta.textContent = `${event.at ? new Date(event.at).toLocaleString() : "未知时间"} · ${event.responseKind || "响应"} · bridge=${event.bridge === true ? "是" : "否"}`;
+    const stage = event.kind === "completion_request_started" ? "开始" : (event.responseKind || event.kind || "响应");
+    const idText = event.requestFingerprint ? ` · id=${event.requestFingerprint}` : "";
+    meta.textContent = `${event.at ? new Date(event.at).toLocaleString() : "未知时间"} · #${event.diagnosticSeq || "-"} · ${stage} · bridge=${event.bridge === true ? "是" : "否"}${idText}`;
     const summary = document.createElement("p");
     summary.textContent = renderToolBridgeSummary(event);
     item.append(title, meta, summary);

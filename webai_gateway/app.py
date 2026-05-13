@@ -245,6 +245,8 @@ def create_app(
     app.state.web_auth_jobs = {}
     app.state.tool_bridge_events = deque(maxlen=TOOL_BRIDGE_EVENT_LIMIT)
     app.state.request_diagnostics = deque(maxlen=REQUEST_DIAGNOSTIC_LIMIT)
+    app.state.request_diagnostic_sequence = 0
+    app.state.request_diagnostic_lock = threading.Lock()
     app.state.tool_call_registry = OrderedDict()
     app.state.media_generations = OrderedDict()
     app.state.auto_research_fixture_dir = Path(auto_research_fixture_dir) if auto_research_fixture_dir is not None else _default_auto_research_fixture_dir()
@@ -1803,6 +1805,7 @@ def create_app(
                     bridge=bridge,
                     sse_body=sse_body,
                     bridge_result=bridge_result,
+                    bridge_context=bridge_context,
                 )
             stream_error = _upstream_sse_error_message(response.text)
             if stream_error:
@@ -2924,7 +2927,16 @@ def _record_request_diagnostic(app: FastAPI, kind: str, **fields: Any) -> None:
     events = getattr(app.state, "request_diagnostics", None)
     if events is None:
         return
-    event = {"at": utc_now(), "kind": kind}
+    sequence = 0
+    lock = getattr(app.state, "request_diagnostic_lock", None)
+    if lock is not None:
+        with lock:
+            sequence = int(getattr(app.state, "request_diagnostic_sequence", 0) or 0) + 1
+            app.state.request_diagnostic_sequence = sequence
+    else:
+        sequence = int(getattr(app.state, "request_diagnostic_sequence", 0) or 0) + 1
+        app.state.request_diagnostic_sequence = sequence
+    event = {"at": utc_now(), "kind": kind, "diagnosticSeq": sequence}
     for key, value in fields.items():
         if value in (None, "", [], {}):
             continue
@@ -3017,6 +3029,14 @@ def _record_completion_diagnostic(
         model=model,
         stream=stream,
         bridge=bridge,
+        requestFingerprint=_completion_request_fingerprint(
+            endpoint=endpoint,
+            route=route,
+            model=model,
+            body=body,
+            stream=stream,
+            bridge=bridge,
+        ),
         **_request_body_diagnostic_fields(body),
         **response_fields,
     )
@@ -3041,6 +3061,14 @@ def _record_completion_started_diagnostic(
         model=model,
         stream=stream,
         bridge=bridge,
+        requestFingerprint=_completion_request_fingerprint(
+            endpoint=endpoint,
+            route=route,
+            model=model,
+            body=body,
+            stream=stream,
+            bridge=bridge,
+        ),
         **_request_body_diagnostic_fields(body),
         **_tool_bridge_context_diagnostic_fields(bridge_context),
     )
@@ -3069,6 +3097,14 @@ def _record_completion_error_diagnostic(
         model=model,
         stream=stream,
         bridge=bridge,
+        requestFingerprint=_completion_request_fingerprint(
+            endpoint=endpoint,
+            route=route,
+            model=model,
+            body=body,
+            stream=stream,
+            bridge=bridge,
+        ),
         statusCode=status_code,
         errorKind=error_kind,
         errorPreview=_preview_text(_redact_sensitive_text(str(error)), max_chars=500),
@@ -3334,6 +3370,7 @@ def _openai_stream_response(
     sse_body: str,
     provider_diagnostic: Any = None,
     bridge_result: Any = None,
+    bridge_context: Any | None = None,
     content_type: str = "text/event-stream",
 ) -> Response:
     _record_completion_diagnostic(
@@ -3347,6 +3384,7 @@ def _openai_stream_response(
         **_openai_sse_response_fields(sse_body),
         **_provider_diagnostic_fields(provider_diagnostic),
         **_tool_bridge_completion_fields(bridge_result),
+        **_tool_bridge_context_diagnostic_fields(bridge_context),
     )
     return Response(sse_body, media_type=content_type or "text/event-stream", headers=bridge_error_headers(bridge_result))
 
@@ -3378,6 +3416,8 @@ def _provider_diagnostic_fields(diagnostic: Any) -> dict[str, Any]:
         "metadata_only_response": "providerMetadataOnlyResponse",
         "metadata_retry_count": "providerMetadataRetryCount",
         "metadata_retry_succeeded": "providerMetadataRetrySucceeded",
+        "model": "providerModel",
+        "ds2api_base_url": "providerBaseUrl",
     }
     fields: dict[str, Any] = {}
     for source_key, target_key in mapping.items():
@@ -3386,7 +3426,30 @@ def _provider_diagnostic_fields(diagnostic: Any) -> dict[str, Any]:
         value = diagnostic[source_key]
         if isinstance(value, (bool, int, float, str)):
             fields[target_key] = value
+    output_preview = diagnostic.get("output_preview") or diagnostic.get("response_preview")
+    if isinstance(output_preview, str) and output_preview.strip():
+        fields["providerOutputPreview"] = _preview_text(_redact_sensitive_text(output_preview), max_chars=220)
     return fields
+
+
+def _completion_request_fingerprint(
+    *,
+    endpoint: str,
+    route: str,
+    model: str,
+    body: dict[str, Any],
+    stream: bool,
+    bridge: bool,
+) -> str:
+    material = {
+        "endpoint": endpoint,
+        "route": route,
+        "model": model,
+        "stream": bool(stream),
+        "bridge": bool(bridge),
+        "request": _request_body_diagnostic_fields(body),
+    }
+    return stable_json_hash(material)[:16]
 
 
 def _tool_bridge_completion_fields(bridge_result: Any) -> dict[str, Any]:
@@ -3439,6 +3502,25 @@ def _request_body_diagnostic_fields(body: dict[str, Any]) -> dict[str, Any]:
         shapes = _request_message_shapes(messages)
         if shapes:
             fields["requestMessageShapes"] = shapes
+        tool_result_count = _request_tool_result_count(messages)
+        if tool_result_count:
+            fields["requestToolResultCount"] = tool_result_count
+        tool_error_count, tool_error_preview = _request_tool_result_error_summary(messages)
+        if tool_error_count:
+            fields["requestToolErrorCount"] = tool_error_count
+            fields["requestLatestToolErrorPreview"] = _preview_text(
+                _redact_sensitive_text(tool_error_preview),
+                max_chars=220,
+            )
+        latest_role, latest_text = _latest_message_text(messages)
+        if latest_text:
+            fields["requestLatestRole"] = latest_role
+            fields["requestLatestTextChars"] = len(latest_text)
+            fields["requestLatestTextPreview"] = _preview_text(_redact_sensitive_text(latest_text), max_chars=220)
+        latest_user_text = _latest_user_message_text(messages)
+        if latest_user_text:
+            fields["requestLatestUserChars"] = len(latest_user_text)
+            fields["requestLatestUserPreview"] = _preview_text(_redact_sensitive_text(latest_user_text), max_chars=220)
     tools = body.get("tools")
     if isinstance(tools, list):
         fields["requestToolCount"] = len(tools)
@@ -3447,6 +3529,9 @@ def _request_body_diagnostic_fields(body: dict[str, Any]) -> dict[str, Any]:
             fields["requestToolNames"] = names[:16]
             if len(names) > 16:
                 fields["requestToolNamesTruncated"] = len(names) - 16
+        schema_summaries = _openai_tool_schema_summaries(tools)
+        if schema_summaries:
+            fields["requestToolSchemas"] = schema_summaries[:16]
     tool_choice = body.get("tool_choice")
     if isinstance(tool_choice, str):
         fields["requestToolChoice"] = tool_choice
@@ -3456,6 +3541,89 @@ def _request_body_diagnostic_fields(body: dict[str, Any]) -> dict[str, Any]:
     if isinstance(max_tokens, int):
         fields["requestMaxTokens"] = max_tokens
     return fields
+
+
+def _latest_message_text(messages: list[Any]) -> tuple[str, str]:
+    for message in reversed(messages):
+        if not isinstance(message, dict):
+            continue
+        text = _diagnostic_text(message.get("content")).strip()
+        if text:
+            return str(message.get("role") or ""), text
+    return "", ""
+
+
+def _latest_user_message_text(messages: list[Any]) -> str:
+    for message in reversed(messages):
+        if not isinstance(message, dict) or str(message.get("role") or "") != "user":
+            continue
+        text = _diagnostic_text(message.get("content")).strip()
+        if text:
+            return text
+    return ""
+
+
+def _request_tool_result_count(messages: list[Any]) -> int:
+    count = 0
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        if str(message.get("role") or "") == "tool":
+            count += 1
+            continue
+        content = message.get("content")
+        if isinstance(content, list) and any(
+            isinstance(block, dict) and block.get("type") == "tool_result" for block in content
+        ):
+            count += 1
+    return count
+
+
+def _request_tool_result_error_summary(messages: list[Any]) -> tuple[int, str]:
+    count = 0
+    latest = ""
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        if str(message.get("role") or "") == "tool":
+            content = _diagnostic_text(message.get("content"))
+            is_error = bool(message.get("is_error")) or _looks_like_tool_result_error(content)
+            if is_error:
+                count += 1
+                latest = content or latest
+            continue
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "tool_result":
+                continue
+            block_text = _diagnostic_text(block.get("content"))
+            is_error = bool(block.get("is_error")) or _looks_like_tool_result_error(block_text)
+            if is_error:
+                count += 1
+                latest = block_text or latest
+    return count, latest
+
+
+def _looks_like_tool_result_error(text: str) -> bool:
+    lowered = (text or "").lower()
+    if not lowered:
+        return False
+    markers = (
+        "invalid tool parameters",
+        "tool error",
+        "is_error: true",
+        "validationerror",
+        "validation error",
+        "missing required",
+        "missing required parameter",
+        "参数无效",
+        "工具参数",
+        "缺少必需参数",
+        "校验失败",
+    )
+    return any(marker in lowered for marker in markers)
 
 
 def _tool_bridge_context_diagnostic_fields(bridge_context: Any | None) -> dict[str, Any]:
@@ -3530,6 +3698,7 @@ def _request_message_shapes(messages: list[Any]) -> list[dict[str, Any]]:
                     names.append(name)
             if names:
                 shape["toolCallNames"] = names
+        tool_call_id = None
         if str(message.get("role") or "") == "tool":
             name = message.get("name")
             if isinstance(name, str) and name:
@@ -3537,6 +3706,13 @@ def _request_message_shapes(messages: list[Any]) -> list[dict[str, Any]]:
             tool_call_id = message.get("tool_call_id")
             if isinstance(tool_call_id, str) and tool_call_id:
                 shape["hasToolCallId"] = True
+            if message.get("is_error") is True:
+                shape["isError"] = True
+        if isinstance(content, list) and any(
+            isinstance(block, dict) and block.get("type") == "tool_result" and block.get("is_error") is True
+            for block in content
+        ):
+            shape["hasToolError"] = True
         shapes.append(shape)
     return shapes
 
@@ -3551,6 +3727,38 @@ def _openai_tool_names(tools: list[Any]) -> list[str]:
         if isinstance(name, str) and name:
             names.append(name)
     return names
+
+
+def _openai_tool_schema_summaries(tools: list[Any]) -> list[dict[str, Any]]:
+    summaries: list[dict[str, Any]] = []
+    for tool in tools[:16]:
+        if not isinstance(tool, dict):
+            continue
+        function = tool.get("function") if isinstance(tool.get("function"), dict) else {}
+        name = function.get("name") or tool.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        schema = (
+            function.get("parameters")
+            if isinstance(function.get("parameters"), dict)
+            else tool.get("input_schema")
+            if isinstance(tool.get("input_schema"), dict)
+            else {}
+        )
+        summary: dict[str, Any] = {"name": name}
+        if isinstance(schema, dict):
+            required = schema.get("required")
+            if isinstance(required, list):
+                required_names = [str(item) for item in required if isinstance(item, str)]
+                if required_names:
+                    summary["required"] = required_names[:12]
+            properties = schema.get("properties")
+            if isinstance(properties, dict):
+                summary["properties"] = [str(key) for key in list(properties)[:16]]
+            if schema.get("additionalProperties") is False:
+                summary["additionalProperties"] = False
+        summaries.append(summary)
+    return summaries
 
 
 def _openai_message_response_fields(data: dict[str, Any], *, response_kind: str) -> dict[str, Any]:
@@ -3572,6 +3780,9 @@ def _openai_message_response_fields(data: dict[str, Any], *, response_kind: str)
         fields["responseContentPreview"] = _preview_text(_redact_sensitive_text(content), max_chars=220)
     if tool_calls:
         fields["responseToolNames"] = _tool_call_names(tool_calls)
+    if not content and not tool_calls:
+        fields["responseEmpty"] = True
+        fields["responseWarning"] = "empty_assistant_response"
     return fields
 
 
@@ -3579,6 +3790,7 @@ def _openai_sse_response_fields(text: str) -> dict[str, Any]:
     payload_count = 0
     content_parts: list[str] = []
     tool_call_chunks = 0
+    tool_call_names: list[str] = []
     finish_reason = ""
     done = False
     for block in (text or "").split("\n\n"):
@@ -3605,6 +3817,14 @@ def _openai_sse_response_fields(text: str) -> dict[str, Any]:
                 content_parts.append(content)
             tool_calls = delta.get("tool_calls") if isinstance(delta.get("tool_calls"), list) else []
             tool_call_chunks += len(tool_calls)
+            if tool_calls:
+                for call in tool_calls:
+                    if not isinstance(call, dict):
+                        continue
+                    function = call.get("function") if isinstance(call.get("function"), dict) else {}
+                    name = function.get("name")
+                    if isinstance(name, str) and name:
+                        tool_call_names.append(name)
     content_text = "".join(content_parts)
     fields: dict[str, Any] = {
         "responseKind": "sse",
@@ -3617,6 +3837,11 @@ def _openai_sse_response_fields(text: str) -> dict[str, Any]:
         fields["finishReason"] = finish_reason
     if content_text:
         fields["responseContentPreview"] = _preview_text(_redact_sensitive_text(content_text), max_chars=220)
+    if tool_call_names:
+        fields["responseToolNames"] = tool_call_names[:16]
+    if not content_text and tool_call_chunks == 0:
+        fields["responseEmpty"] = True
+        fields["responseWarning"] = "empty_stream_response"
     return fields
 
 
@@ -5387,6 +5612,7 @@ def _deepseek_web_chat(app: FastAPI, client: httpx.Client, body: dict[str, Any],
         bridge=bridge,
         bridge_context=bridge_context,
     )
+    web_client = None
     try:
         web_client = _build_deepseek_web_client(app.state.deepseek_client_factory, credential, client, config)
         data = _call_deepseek_ds2api_with_retry(app, web_client, payload, config)
@@ -5411,6 +5637,20 @@ def _deepseek_web_chat(app: FastAPI, client: httpx.Client, body: dict[str, Any],
     except HTTPException:
         raise
     except Exception as exc:
+        _record_completion_error_diagnostic(
+            app,
+            endpoint="/v1/chat/completions",
+            route="deepseek-web",
+            model=model,
+            body=body,
+            stream=bool(body.get("stream")),
+            bridge=bridge,
+            status_code=502,
+            error_kind="provider_call_failed",
+            error=exc,
+            provider_diagnostic=getattr(web_client, "last_diagnostic", None),
+            bridge_context=bridge_context,
+        )
         raise HTTPException(status_code=502, detail=f"DeepSeek Web 调用失败：{exc}") from exc
     if not isinstance(data, dict):
         raise HTTPException(status_code=502, detail="DeepSeek Web 响应必须是 JSON 对象")
@@ -5423,6 +5663,7 @@ def _deepseek_web_chat(app: FastAPI, client: httpx.Client, body: dict[str, Any],
             bridge=bridge,
             sse_body=str(data.get("_webai_sse_body") or ""),
             provider_diagnostic=getattr(web_client, "last_diagnostic", None),
+            bridge_context=bridge_context,
             content_type=str(data.get("_webai_content_type") or "text/event-stream"),
         )
     try:
@@ -5495,6 +5736,7 @@ def _deepseek_web_chat(app: FastAPI, client: httpx.Client, body: dict[str, Any],
                     bridge=bridge,
                     sse_body=build_openai_tool_calls_sse(msg["tool_calls"], model=model),
                     provider_diagnostic=getattr(web_client, "last_diagnostic", None),
+                    bridge_context=bridge_context,
                 )
             content = str(msg.get("content") or "")
         return _openai_stream_response(
@@ -5504,6 +5746,8 @@ def _deepseek_web_chat(app: FastAPI, client: httpx.Client, body: dict[str, Any],
             model=model,
             bridge=bridge,
             sse_body=build_tool_call_sse(content, allowed_tools=allowed_tools, model=model, bridge_context=bridge_context),
+            provider_diagnostic=getattr(web_client, "last_diagnostic", None),
+            bridge_context=bridge_context,
         )
     return _openai_json_response(
         app,
@@ -5611,6 +5855,20 @@ def _qwen_web_chat(app: FastAPI, client: httpx.Client, body: dict[str, Any], con
                 bridge_context=bridge_context,
             )
             raise HTTPException(status_code=424, detail=_provider_auth_expired_detail("Qwen Web")) from exc
+        _record_completion_error_diagnostic(
+            app,
+            endpoint="/v1/chat/completions",
+            route="qwen-web",
+            model=model,
+            body=body,
+            stream=bool(body.get("stream")),
+            bridge=bridge,
+            status_code=502,
+            error_kind="provider_call_failed",
+            error=exc,
+            provider_diagnostic=getattr(web_client, "last_diagnostic", None),
+            bridge_context=bridge_context,
+        )
         raise HTTPException(status_code=502, detail=f"Qwen Web 调用失败：{exc}") from exc
     if not isinstance(data, dict):
         raise HTTPException(status_code=502, detail="Qwen Web 响应必须是 JSON 对象")
@@ -5680,6 +5938,8 @@ def _qwen_web_chat(app: FastAPI, client: httpx.Client, body: dict[str, Any], con
                     model=model,
                     bridge=bridge,
                     sse_body=build_openai_tool_calls_sse(msg["tool_calls"], model=model),
+                    provider_diagnostic=getattr(web_client, "last_diagnostic", None),
+                    bridge_context=bridge_context,
                 )
             content = str(msg.get("content") or "")
         return _openai_stream_response(
@@ -5690,6 +5950,7 @@ def _qwen_web_chat(app: FastAPI, client: httpx.Client, body: dict[str, Any], con
             bridge=bridge,
             sse_body=build_tool_call_sse(content, allowed_tools=allowed_tools, model=model, bridge_context=bridge_context),
             provider_diagnostic=getattr(web_client, "last_diagnostic", None),
+            bridge_context=bridge_context,
         )
     return _openai_json_response(
         app,
@@ -5803,6 +6064,20 @@ def _qwen_coder_chat(app: FastAPI, client: httpx.Client, body: dict[str, Any], c
                 bridge_context=bridge_context,
             )
             raise HTTPException(status_code=424, detail=_provider_auth_expired_detail("Qwen Coder Web")) from exc
+        _record_completion_error_diagnostic(
+            app,
+            endpoint="/v1/chat/completions",
+            route="qwen-coder",
+            model=model,
+            body=body,
+            stream=bool(body.get("stream")),
+            bridge=bridge,
+            status_code=502,
+            error_kind="provider_call_failed",
+            error=exc,
+            provider_diagnostic=getattr(web_client, "last_diagnostic", None),
+            bridge_context=bridge_context,
+        )
         raise HTTPException(status_code=502, detail=f"Qwen Coder Web 调用失败：{exc}") from exc
     if not isinstance(data, dict):
         raise HTTPException(status_code=502, detail="Qwen Coder Web 响应必须是 JSON 对象")
@@ -5873,6 +6148,7 @@ def _qwen_coder_chat(app: FastAPI, client: httpx.Client, body: dict[str, Any], c
                     bridge=bridge,
                     sse_body=build_openai_tool_calls_sse(msg["tool_calls"], model=model),
                     provider_diagnostic=getattr(web_client, "last_diagnostic", None),
+                    bridge_context=bridge_context,
                 )
             content = str(msg.get("content") or "")
         return _openai_stream_response(
@@ -5883,6 +6159,7 @@ def _qwen_coder_chat(app: FastAPI, client: httpx.Client, body: dict[str, Any], c
             bridge=bridge,
             sse_body=build_tool_call_sse(content, allowed_tools=allowed_tools, model=model, bridge_context=bridge_context),
             provider_diagnostic=getattr(web_client, "last_diagnostic", None),
+            bridge_context=bridge_context,
         )
     return _openai_json_response(
         app,

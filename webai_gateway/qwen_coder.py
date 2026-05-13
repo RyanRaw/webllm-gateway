@@ -142,6 +142,8 @@ class QwenCoderClient:
                 content = ""
             elif metadata_retry_count:
                 self.last_diagnostic["metadata_retry_succeeded"] = True
+            self.last_diagnostic["output_chars"] = len(content)
+            self.last_diagnostic["output_preview"] = content[:500]
         except TimeoutError as exc:
             stream_diagnostic = getattr(exc, "diagnostic", {})
             if isinstance(stream_diagnostic, dict):

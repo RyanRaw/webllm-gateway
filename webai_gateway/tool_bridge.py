@@ -5934,9 +5934,23 @@ def _looks_like_complete_final_answer(text: str, context: ToolBridgeContext) -> 
 
 def _looks_like_substantive_chinese_improvement_plan(text: str) -> bool:
     raw = text or ""
-    return "\u8be6\u7ec6\u6539\u8fdb\u8ba1\u5212" in raw or "\u7487\ufe3e\u7c8f\u93c0\u7845\u7e58\u7481\u2033\u579d" in raw or (
-        "\u6539\u8fdb\u8ba1\u5212" in raw
-        and any(marker in raw for marker in ("\u57fa\u4e8e\u5df2\u6709", "\u57fa\u4e8e\u5df2\u8bfb", "\u5efa\u8bae"))
+    return bool(
+        re.search(r"\u8be6\u7ec6.{0,12}\u6539\u8fdb\u8ba1\u5212", raw)
+        or "\u7487\ufe3e\u7c8f\u93c0\u7845\u7e58\u7481\u2033\u579d" in raw
+        or (
+            "\u6539\u8fdb\u8ba1\u5212" in raw
+            and any(
+                marker in raw
+                for marker in (
+                    "\u57fa\u4e8e\u5df2\u6709",
+                    "\u57fa\u4e8e\u5df2\u8bfb",
+                    "\u57fa\u4e8e\u5bf9",
+                    "\u603b\u4f53\u6539\u8fdb\u8def\u7ebf\u56fe",
+                    "\u5173\u952e\u52a8\u4f5c",
+                    "\u5efa\u8bae",
+                )
+            )
+        )
     )
 
 
@@ -6192,7 +6206,21 @@ def _extract_fenced_shell_command_lines(text: str) -> list[str]:
 def _is_prose_shell_command_intent_without_call(text: str, context: ToolBridgeContext) -> bool:
     if not (context.has_tool_loop or _looks_like_local_agent_task(context.task_text)):
         return False
+    if _allows_plain_review_or_plan_text(context) and _looks_like_substantive_review_plan_text(text):
+        return False
     return bool(_PROSE_SHELL_COMMAND_INTENT_RE.search(text or ""))
+
+
+def _looks_like_substantive_review_plan_text(text: str) -> bool:
+    raw = (text or "").strip()
+    if len(raw) < 160:
+        return False
+    if _looks_like_substantive_chinese_improvement_plan(raw):
+        return True
+    lowered = raw.lower()
+    if not any(marker in lowered for marker in ("improvement plan", "review plan", "recommendations", "roadmap")):
+        return False
+    return bool(re.search(r"(?m)^\s*(?:#{1,4}\s+|[-*]\s+|\d+[.)]\s+|\|.+\|)", raw))
 
 
 def _has_read_like_tool(context: ToolBridgeContext) -> bool:

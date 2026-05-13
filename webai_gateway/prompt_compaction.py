@@ -568,6 +568,8 @@ def _looks_like_current_request_control_text(text: str) -> bool:
     compact = re.sub(r"\s+", " ", str(text or "").strip()).lower()
     if not compact:
         return True
+    if compact in {"(no content)", "no content", "[no content]", "(empty)", "empty"}:
+        return True
     if (
         "<system-reminder" in compact
         or "</system-reminder" in compact

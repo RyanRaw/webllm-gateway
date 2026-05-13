@@ -7638,6 +7638,52 @@ def test_tool_bridge_review_plan_text_is_not_repaired_into_tool_call() -> None:
     assert "改进计划" in result.content
 
 
+def test_tool_bridge_review_plan_with_shell_suggestions_is_not_repaired_after_no_content_tail() -> None:
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": f"{name} tool",
+                "parameters": {"type": "object"},
+            },
+        }
+        for name in ["Read", "Glob", "Bash", "TaskCreate", "Write"]
+    ]
+    context = build_context(tools, ToolBridgeConfig(exposure_policy="all"))
+    original_task = "熟悉下当前项目的代码并给出详细的改进计划"
+    context = prefer_local_tools_for_local_agent_task(
+        context,
+        [
+            {"role": "user", "content": original_task},
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": "call_read", "name": "Read", "input": {"file_path": "README.md"}}
+                ],
+            },
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_read", "content": "Project overview"}]},
+            {"role": "user", "content": "(no content)"},
+        ],
+    )
+
+    result = parse_tool_response(
+        "基于对当前项目代码结构和核心文件的分析，我制定了详细的 Mindcraft 项目改进计划。\n\n"
+        "### 总体改进路线图\n"
+        "| 阶段 | 重点目标 | 关键动作 |\n"
+        "| P0 | 稳定性与错误处理 | 统一日志、异常捕获、状态持久化优化 |\n"
+        "| P1 | 架构重构 | 提取公共库、标准化数据模型、移除硬编码 |\n"
+        "| P2 | 工程化 | 建议后续运行 pytest --collect-only 了解测试覆盖，再补充最小回归测试 |\n\n"
+        "这是一份计划，不会声称已经执行命令或修改文件。",
+        context,
+    )
+
+    assert context.task_text == original_task
+    assert result.tool_calls == []
+    assert result.error is None
+    assert "详细的 Mindcraft 项目改进计划" in result.content
+
+
 @pytest.mark.parametrize(
     "command",
     [
@@ -16828,6 +16874,35 @@ def test_qwen_messages_compaction_uses_gateway_task_anchor_over_guard_user_tail(
     assert "Tool loop guard" not in current_block
 
 
+def test_qwen_messages_compaction_ignores_no_content_task_anchor_override() -> None:
+    huge_system_prefix = "system bootstrap\n" + ("skill listing entry\n" * 500)
+    tool_protocol = (
+        "You are using WebAI Gateway's strict tool bridge.\n"
+        "Available tools: Read, Glob, TaskCreate.\n"
+        "Required tool-call format:\n<|DSML|tool_calls>\n</|DSML|tool_calls>"
+    )
+    original_task = "熟悉下当前项目的代码并给出详细的改进计划"
+
+    prompt, files = qwen_messages_to_prompt_and_files(
+        [
+            {"role": "system", "content": huge_system_prefix + "\n\n" + tool_protocol},
+            {"role": "user", "content": original_task},
+            {"role": "assistant", "content": "Assistant requested tool calls:\nRead({\"file_path\":\"README.md\"})"},
+            {"role": "tool", "content": "README content"},
+            {"role": "user", "content": "(no content)"},
+        ],
+        max_prompt_chars=2200,
+        current_task_text="(no content)",
+    )
+
+    assert files == []
+    marker = "=== CURRENT USER REQUEST (highest priority) ==="
+    assert marker in prompt
+    current_block = prompt[prompt.rfind(marker) :]
+    assert original_task in current_block
+    assert "(no content)" not in current_block
+
+
 def test_qwen_messages_compaction_preserves_task_state_snapshot() -> None:
     huge_system_prefix = "system bootstrap\n" + ("skill listing entry\n" * 600)
     tool_protocol = (
@@ -24961,6 +25036,161 @@ def test_request_diagnostics_records_request_start_with_tool_context() -> None:
         {"role": "user", "contentType": "text", "contentChars": 30}
     ]
     assert diagnostics[-1]["kind"] == "completion_response"
+
+
+def test_request_diagnostics_correlates_started_and_empty_response() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            text="data: [DONE]\n\n",
+            headers={"content-type": "text/event-stream"},
+            request=request,
+        )
+
+    config = GatewayConfig(
+        server=ServerConfig(api_key="local-dev-key"),
+        upstream=UpstreamConfig(base_url="http://upstream.test/v1", model="web-model"),
+    )
+    client = TestClient(create_app(config=config, http_client=httpx.Client(transport=httpx.MockTransport(handler))))
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers=_headers(),
+        json={
+            "model": "web-model",
+            "stream": True,
+            "messages": [{"role": "user", "content": "请只回复 OK"}],
+            "max_tokens": 16,
+        },
+    )
+    diagnostics = client.get("/api/admin/request-diagnostics").json()["events"]
+
+    assert response.status_code == 200
+    started = next(event for event in diagnostics if event["kind"] == "completion_request_started")
+    completed = diagnostics[-1]
+    assert completed["kind"] == "completion_response"
+    assert started["requestFingerprint"] == completed["requestFingerprint"]
+    assert started["diagnosticSeq"] < completed["diagnosticSeq"]
+    assert started["requestLatestUserPreview"] == "请只回复 OK"
+    assert completed["requestLatestUserPreview"] == "请只回复 OK"
+    assert completed["responseEmpty"] is True
+    assert completed["responseWarning"] == "empty_stream_response"
+
+
+def test_qwen_web_generic_exception_records_completion_error_diagnostic(tmp_path: Path) -> None:
+    class FailingQwenClient:
+        def __init__(self, credential: dict[str, Any], http_client: httpx.Client | None = None) -> None:
+            self.credential = credential
+            self.last_diagnostic = {
+                "prompt_chars": 88,
+                "prompt_max_chars": 48000,
+                "message_count": 1,
+                "output_preview": "partial provider output before failure",
+            }
+
+        def chat_completions(self, payload: dict[str, Any]) -> dict[str, Any]:
+            raise RuntimeError("provider exploded token=session-secret")
+
+    client = TestClient(
+        create_app(
+            config=_config(),
+            credential_store=_credential_store(tmp_path),
+            qwen_client_factory=FailingQwenClient,
+            http_client=_not_found_client(),
+        )
+    )
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers=_headers(),
+        json={
+            "model": "qwen-web/qwen3.6-max-preview",
+            "messages": [{"role": "user", "content": "检查当前项目"}],
+        },
+    )
+    diagnostics = client.get("/api/admin/request-diagnostics").json()["events"]
+
+    assert response.status_code == 502
+    event = diagnostics[-1]
+    assert event["kind"] == "completion_error"
+    assert event["route"] == "qwen-web"
+    assert event["errorKind"] == "provider_call_failed"
+    assert event["statusCode"] == 502
+    assert "session-secret" not in event["errorPreview"]
+    assert event["providerPromptChars"] == 88
+    assert event["providerOutputPreview"] == "partial provider output before failure"
+
+
+def test_request_diagnostics_records_tool_result_errors_and_schema_summary() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_openai_response("ok"), request=request)
+
+    config = GatewayConfig(
+        server=ServerConfig(api_key="local-dev-key"),
+        upstream=UpstreamConfig(base_url="http://upstream.test/v1", model="web-model"),
+    )
+    client = TestClient(create_app(config=config, http_client=httpx.Client(transport=httpx.MockTransport(handler))))
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers=_headers(),
+        json={
+            "model": "web-model",
+            "messages": [
+                {"role": "user", "content": "熟悉当前项目并制定改进计划"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_task",
+                            "type": "function",
+                            "function": {"name": "TaskCreate", "arguments": "{\"title\":\"Bad\"}"},
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_task",
+                    "name": "TaskCreate",
+                    "is_error": True,
+                    "content": "Invalid tool parameters: missing required field tasks token=session-secret",
+                },
+            ],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "TaskCreate",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"tasks": {"type": "array"}},
+                            "required": ["tasks"],
+                            "additionalProperties": False,
+                        },
+                    },
+                }
+            ],
+        },
+    )
+    diagnostics = client.get("/api/admin/request-diagnostics").json()["events"]
+
+    assert response.status_code == 200
+    started = next(event for event in diagnostics if event["kind"] == "completion_request_started")
+    assert started["requestToolErrorCount"] == 1
+    assert "Invalid tool parameters" in started["requestLatestToolErrorPreview"]
+    assert "session-secret" not in started["requestLatestToolErrorPreview"]
+    assert started["requestToolSchemas"] == [
+        {
+            "name": "TaskCreate",
+            "required": ["tasks"],
+            "properties": ["tasks"],
+            "additionalProperties": False,
+        }
+    ]
+    tool_shape = started["requestMessageShapes"][-1]
+    assert tool_shape["toolName"] == "TaskCreate"
+    assert tool_shape["isError"] is True
 
 
 def test_openai_upstream_http_error_returns_sanitized_openai_error() -> None:
