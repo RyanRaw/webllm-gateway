@@ -12627,6 +12627,9 @@ def test_webai2api_login_start_auto_creates_media_worker_when_provider_worker_is
     assert body["success"] is True
     assert body["providerId"] == "google-flow"
     assert body["newAccount"] is True
+    assert body["openMode"] == "runtime_browser"
+    assert body["browserLabel"] == "Camoufox"
+    assert body["displayUrl"] is None
     assert posted_instances
     saved_instances = posted_instances[-1]
     assert saved_instances[0] == original_instances[0]
@@ -13186,6 +13189,11 @@ def test_vendored_webai2api_frontend_has_gateway_bridge_page() -> None:
     assert "data.accountId || ''" in bridge_source
     assert "async function autoValidateWebAI2APILogin()" in bridge_source
     assert "autoValidateWebAI2APILogin();" in bridge_source
+    start_login_source = bridge_source.split("async function startWebAI2APILogin", 1)[1].split(
+        "async function finishWebAI2APILogin", 1
+    )[0]
+    assert "openWebAI2APILoginTarget(data, provider)" in start_login_source
+    assert "window.open('/tools/display'" not in start_login_source
     assert "const newAccount = Boolean(options.newAccount);" in bridge_source
     assert "options.newAccount || !workerName" not in bridge_source
     assert "新增网页账号" not in bridge_source

@@ -588,8 +588,8 @@ async function startWebAI2APILogin(provider, options = {}) {
     };
     appendLog(data.message || '已进入网页登录授权模式');
     appendLog(`请在打开的窗口里完成 ${provider.name} 登录，然后回到这里点击“恢复 API 并刷新”`);
-    message.success('网页登录窗口已准备好');
-    window.open('/tools/display', '_blank', 'noopener,noreferrer');
+    const openedTarget = openWebAI2APILoginTarget(data, provider);
+    message.success(openedTarget ? '网页登录窗口已打开' : `${data.browserLabel || 'Camoufox'} 登录窗口已打开`);
   } catch (error) {
     pendingWebAI2APILogin.value = null;
     actionError.value = error.message || String(error);
@@ -598,6 +598,17 @@ async function startWebAI2APILogin(provider, options = {}) {
   } finally {
     actionLoading.value = false;
   }
+}
+
+function openWebAI2APILoginTarget(data, provider) {
+  const targetUrl = data.openUrl || data.loginUrl || data.displayUrl || '';
+  if (targetUrl) {
+    window.open(targetUrl, '_blank', 'noopener,noreferrer');
+    return true;
+  }
+  const browserLabel = data.browserLabel || 'Camoufox';
+  appendLog(`${provider.name} 登录窗口已由 ${browserLabel} 打开，请直接在该浏览器窗口完成登录`);
+  return false;
 }
 
 async function finishWebAI2APILogin({ close = false } = {}) {

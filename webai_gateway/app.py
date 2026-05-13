@@ -1003,6 +1003,9 @@ def create_app(
             "sidecarStarted": bool(sidecar_ready.get("started")),
             "sidecarPid": sidecar_ready.get("pid"),
             "loginKind": "webai2api",
+            "openMode": "runtime_browser",
+            "browserLabel": "Camoufox",
+            "displayUrl": None,
             "actionLabel": "打开网页登录授权",
             "message": (
                 f"已为 {provider.name} 创建独立浏览器 Profile 并进入登录模式"
