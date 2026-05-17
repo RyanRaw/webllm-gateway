@@ -12682,6 +12682,7 @@ def test_onboarding_marks_google_flow_authorized_from_google_account_cookies_and
     assert flow["accounts"][0]["authorized"] is True
     assert "accounts.google.com" in cookie_domains
     assert "gemini-3-pro-image-preview" in flow["availableModels"]
+    assert "gemini-3.1-flash-image-landscape" in flow["availableModels"]
     assert "google-session-secret" not in onboarding_response.text
 
     validation_response = client.post(
@@ -12689,13 +12690,14 @@ def test_onboarding_marks_google_flow_authorized_from_google_account_cookies_and
         json={
             "providerId": "google-flow",
             "accountId": flow["currentAccountId"],
-            "modelIds": ["gemini-3-pro-image-preview"],
+            "modelIds": ["gemini-3-pro-image-preview", "gemini-3.1-flash-image-landscape"],
             "force": True,
         },
     )
 
     assert validation_response.status_code == 200
     assert validation_response.json()["validation"]["gemini-3-pro-image-preview"]["status"] == "available"
+    assert validation_response.json()["validation"]["gemini-3.1-flash-image-landscape"]["status"] == "available"
     assert chat_calls == []
 
 
@@ -14207,7 +14209,7 @@ def test_deepseek_ds2api_sidecar_config_uses_provider_runtime_concurrency() -> N
     assert sidecar["accounts"] == []
     assert sidecar["runtime"]["account_max_inflight"] == 3
     assert sidecar["runtime"]["global_max_inflight"] == 6
-    assert sidecar["current_input_file"] == {"enabled": False, "min_chars": 0}
+    assert sidecar["current_input_file"] == {"enabled": True, "min_chars": 0}
 
 
 def test_deepseek_ds2api_sidecar_config_can_enable_current_input_file() -> None:
@@ -17079,6 +17081,40 @@ def test_qwen_messages_tool_observation_does_not_replace_current_request() -> No
     assert "audit current project code and list improvements" in current_block
     assert "Tool result for Glob" not in current_block
     assert "Use this tool result to continue the task" not in current_block
+
+
+def test_qwen_messages_compaction_promotes_tool_protocol_to_ds2api_tools_context() -> None:
+    huge_system_prefix = "system bootstrap\n" + ("skill listing entry\n" * 600)
+    tool_protocol = (
+        "You are using WebAI Gateway's strict tool bridge.\n"
+        "Available tools: Read, Grep, Edit.\n"
+        "Required tool-call format:\n"
+        "<|DSML|tool_calls>\n"
+        '  <|DSML|invoke name="Read">\n'
+        '    <|DSML|parameter name="file_path"><![CDATA[README.md]]></|DSML|parameter>\n'
+        "  </|DSML|invoke>\n"
+        "</|DSML|tool_calls>"
+    )
+
+    prompt, files = qwen_messages_to_prompt_and_files(
+        [
+            {"role": "system", "content": huge_system_prefix + "\n\n" + tool_protocol},
+            {"role": "user", "content": "Inspect the project and continue with tools."},
+            {"role": "assistant", "content": "Assistant requested tool calls: Read(file_path=README.md)"},
+            {"role": "tool", "content": "README content"},
+            {"role": "user", "content": "Continue the implementation. TOOL_CONTEXT_SENTINEL"},
+        ],
+        max_prompt_chars=1800,
+    )
+
+    assert files == []
+    assert len(prompt) <= 1800
+    assert "# DS2API_HISTORY.txt" in prompt
+    assert "# DS2API_TOOLS.txt" in prompt
+    assert "Available tool descriptions and parameter schemas." in prompt
+    assert "Available tools: Read, Grep, Edit." in prompt
+    assert "<|DSML|tool_calls>" in prompt
+    assert "TOOL_CONTEXT_SENTINEL" in prompt
 
 
 def test_qwen_messages_compaction_ignores_error_recovery_final_as_current_request() -> None:

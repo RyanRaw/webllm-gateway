@@ -11,6 +11,8 @@ _DEFAULT_PROTOCOL_MARKER = "You are using WebAI Gateway's strict tool bridge."
 _REQUIRED_TOOL_FORMAT_MARKER = "Required tool-call format:"
 _DS2API_HISTORY_TITLE = "# DS2API_HISTORY.txt"
 _DS2API_HISTORY_SUMMARY = "Prior conversation history and tool progress."
+_DS2API_TOOLS_TITLE = "# DS2API_TOOLS.txt"
+_DS2API_TOOLS_SUMMARY = "Available tool descriptions and parameter schemas."
 PRESERVED_TASK_STATE_MARKER = "# WebAI Gateway preserved task state"
 LAYERED_HISTORY_MARKER = "[Layered history compaction]"
 _LAYERED_HISTORY_STRATEGY = "ds2api_layered_history"
@@ -227,7 +229,7 @@ def _compact_role_messages_layered(
         blocks.append(snapshot.rstrip())
     blocks.append("\n".join(header_lines).rstrip())
     if protocol_excerpt:
-        blocks.append("=== PRESERVED SYSTEM AND TOOL PROTOCOL ===\n" + protocol_excerpt.strip())
+        blocks.append(_ds2api_tools_context_from_protocol(protocol_excerpt))
 
     fixed = "\n\n".join(blocks + ["=== LATEST CONVERSATION TAIL ===", continuation])
     if len(fixed) >= limit:
@@ -681,6 +683,20 @@ def _protocol_excerpt_from_entries(
     if marker_index >= 0:
         source = source[marker_index:]
     return _protocol_excerpt(source, budget=max(200, budget))
+
+
+def _ds2api_tools_context_from_protocol(protocol_excerpt: str) -> str:
+    body = (protocol_excerpt or "").strip()
+    if not body:
+        return ""
+    return "\n".join(
+        [
+            _DS2API_TOOLS_TITLE,
+            _DS2API_TOOLS_SUMMARY,
+            "",
+            body,
+        ]
+    ).rstrip()
 
 
 def _fit_history_entries(entries: list[tuple[int, str, str]], *, max_chars: int) -> str:
