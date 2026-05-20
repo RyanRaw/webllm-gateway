@@ -2,7 +2,8 @@
 
 WebAI Gateway is released under the MIT License. It does not vendor the source
 code of WebAI2API or ds2api in the public project tree; those projects are
-treated as optional local runtimes started or contacted by the Gateway.
+treated as optional adapter runtimes started or contacted by the Gateway only
+when the matching provider is used.
 
 ## Runtime dependencies
 

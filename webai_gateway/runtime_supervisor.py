@@ -43,25 +43,33 @@ def collect_supervisor_status(
         },
         _service_status(
             "webai2api",
-            "WebAI2API browser runtime",
+            "Web login adapter runtime",
             "web-login-runtime",
             config.upstream.base_url,
             default_port=8500,
             state=state,
             probe_ports=probe_ports,
             api_key=config.upstream.api_key,
+            optional=True,
         ),
         _service_status(
             "ds2api",
-            "DeepSeek ds2api runtime",
+            "DeepSeek compatibility runtime",
             "deepseek-web-runtime",
             config.provider_runtime.deepseek_ds2api_base_url,
             default_port=9331,
             state=state,
             probe_ports=probe_ports,
+            optional=True,
         ),
     ]
-    failed = [item for item in services if item.get("internal") and item.get("status") in {"failed", "missing", "stopped"}]
+    failed = [
+        item
+        for item in services
+        if item.get("internal")
+        and item.get("status") in {"failed", "missing", "stopped"}
+        and not (item.get("optional") and item.get("status") in {"missing", "stopped"})
+    ]
     return {
         "mode": "single-entry",
         "singleEntry": True,
@@ -94,6 +102,7 @@ def _service_status(
     state: dict[str, Any],
     probe_ports: bool,
     api_key: str | None = None,
+    optional: bool = False,
 ) -> dict[str, Any]:
     parsed = _parse_service_url(base_url, default_port)
     saved = state.get("services", {}).get(service_id, {}) if isinstance(state.get("services"), dict) else {}
@@ -110,6 +119,7 @@ def _service_status(
         "label": label,
         "role": role,
         "internal": True,
+        "optional": optional,
         "baseUrl": base_url,
         "host": parsed["host"],
         "port": parsed["port"],

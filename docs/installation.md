@@ -8,11 +8,16 @@
 - Python 3.12+。
 - Node.js 22+，并启用 Corepack。
 - Git。
-- Go 工具链，用于运行 ds2api parity/oracle 测试。
-- WebAI2API sidecar，本地默认目录：`../WebAI2API-sidecar`。
-- ds2api runtime，本地默认可执行文件：`.tmp/ds2api/.tmp-bin/ds2api.exe`。
 
-WebAI Gateway 不会把 WebAI2API 或 ds2api 源码作为本仓库的一部分发布。开源使用者需要自行准备这两个 runtime，或者按自己的发布方式提供下载脚本。
+仅使用 Qwen direct、本地 OpenAI / Anthropic 兼容协议和 ToolBridge 时，不需要安装 WebAI2API 或 ds2api。
+
+可选 adapter：
+
+- WebAI2API sidecar：用于 ChatGPT、Gemini、Sora、Google Flow、LMArena 等网页登录站点。本地默认目录：`../WebAI2API-sidecar`。
+- ds2api runtime：用于 DeepSeek Web 兼容链路和 ds2api parity/oracle 测试。本地默认可执行文件：`.tmp/ds2api/.tmp-bin/ds2api.exe`。
+- Go 工具链：仅在运行 ds2api parity/oracle 测试时需要。
+
+WebAI Gateway 不会把 WebAI2API 或 ds2api 源码作为本仓库的一部分发布。开源使用者可以只运行 Gateway 核心能力；需要对应站点时再自行准备可选 runtime，或者按自己的发布方式提供下载脚本。
 
 ## Setup
 
@@ -34,9 +39,9 @@ cd ..
 Copy-Item config.example.json config.json
 ```
 
-## Runtime layout
+## Optional Runtime Layout
 
-默认布局：
+如果启用 WebAI2API adapter，推荐布局：
 
 ```text
 ProjectX/
@@ -50,7 +55,7 @@ ProjectX/
 $env:WEBAI2API_SIDECAR_DIR="D:\path\to\WebAI2API-sidecar"
 ```
 
-如果 ds2api 可执行文件不在默认位置，可设置：
+如果启用 DeepSeek adapter 且 ds2api 可执行文件不在默认位置，可设置：
 
 ```powershell
 $env:WEBAI_DEEPSEEK_DS2API_EXE="D:\path\to\ds2api.exe"
@@ -89,8 +94,9 @@ Invoke-RestMethod http://127.0.0.1:8610/health
 - `runtime.sourceFresh=true`
 - `runtime.sourceStale=false`
 - `runtime.supervisor.singleEntry=true`
-- WebAI2API runtime `running`
-- ds2api runtime `running`
+- Gateway service `running`
+- 未安装的 WebAI2API / ds2api adapter 可以显示为 `missing` 或 `stopped`，但应带 `optional=true`，不会阻止 Gateway 核心能力启动。
+- 如果已经启用对应 adapter，则对应 runtime 应显示 `running`。
 
 ## Login
 

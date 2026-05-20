@@ -1,8 +1,10 @@
 # WebAI Gateway
 
-WebAI Gateway 是一个独立的网页登录模型 API 网关。它把 Qwen Web、DeepSeek Web、WebAI2API 等网页登录模型包装成稳定的 OpenAI 兼容接口，并提供严格工具调用适配层，方便 KrisAI、OpenClaw、Hermes、Claude Code 等客户端接入。
+WebAI Gateway 是一个独立的网页登录模型 API 网关。它把 Qwen Web、DeepSeek Web、ChatGPT / Gemini / Sora 等网页登录模型包装成稳定的 OpenAI / Anthropic 兼容接口，并提供严格工具调用适配层，方便 OpenClaw、Hermes、Claude Code、Codex 等客户端接入。
 
 网关只做协议适配和格式修复，不执行本地文件、终端、浏览器或 MCP 工具。工具和 MCP 仍由客户端自己的权限系统执行。
+
+项目本体是 Gateway：API、ToolBridge、网页登录授权、模型目录、Qwen direct 和客户端接入配置。WebAI2API 与 ds2api 不作为源码混入本仓库，只作为按需启用的外部 adapter runtime；未安装它们时，Gateway 核心服务仍可启动。
 
 ## 启动
 
@@ -32,17 +34,17 @@ stop_webai_gateway.bat
 
 - 首页默认只展示当前已经实际验证可用的网页登录通路，避免把未验证站点当成可用产品能力。
 - DeepSeek Web、Qwen / 通义千问国际版、Qwen Coder：点击“打开授权浏览器”，在弹出的浏览器里登录。网关检测到真实登录态后才会显示已授权。
-- ChatGPT、Google Flow、Sora、Gemini：通过内部托管的 WebAI2API 登录授权能力接入；点击“登录或修复账号”后 Gateway 会自动准备隔离的 WebAI2API worker，完成网页登录授权并恢复 API 后即可检测和调用模型，不需要手动进入 WebAI2API 后台配置工作池。
+- ChatGPT、Google Flow、Sora、Gemini：通过可选 WebAI2API adapter runtime 接入；点击“登录或修复账号”后 Gateway 会自动准备隔离 worker，完成网页登录授权并恢复 API 后即可检测和调用模型，不需要手动进入外部后台配置工作池。
 - 授权完成后，在“可用模型”里复制模型 ID，填到 KrisAI、OpenClaw、Hermes 或 Claude Code。
 - “接入客户端”区域可以复制 OpenAI / Anthropic 兼容地址和 API Key，也可以重新生成本地网关令牌。
 
-Gateway 首页优先展示统一接入、状态、授权和复制配置。WebAI2API 原来的状态概览、工作池、适配器、浏览器、虚拟显示器、缓存、日志、请求历史和接口测试页面保留在控制台的“WebAI2API 原生管理台”高级入口中。
+Gateway 首页优先展示统一接入、状态、授权和复制配置。外部 adapter runtime 的状态概览、工作池、浏览器、缓存、日志、请求历史和接口测试页面只保留为高级诊断入口，不作为主产品界面。
 
 ## 文档索引
 
 - 安装和单入口启动：[docs/installation.md](docs/installation.md)
 - 图片和视频生成：[docs/media-generation.md](docs/media-generation.md)
-- WebAI2API / ds2api 第三方 runtime 说明：[docs/third-party-runtime.md](docs/third-party-runtime.md)
+- 可选 adapter runtime 说明：[docs/third-party-runtime.md](docs/third-party-runtime.md)
 - 架构和边界：[docs/architecture.md](docs/architecture.md)
 - 贡献规范：[CONTRIBUTING.md](CONTRIBUTING.md)
 - 安全策略：[SECURITY.md](SECURITY.md)

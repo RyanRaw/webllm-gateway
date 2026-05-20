@@ -6,7 +6,7 @@
 
 - 核心边界清晰：Gateway 只做协议适配、工具桥和网页登录 provider 交互，不执行本地工具。
 - 后端已有较厚测试覆盖：OpenAI、Anthropic、ToolBridge、provider、ds2api parity、replay fixtures。
-- 运行体验已收敛为单入口：`start_webai_gateway.bat` 通过 Gateway runtime supervisor 托管 WebAI2API / ds2api 内部 runtime，前端默认只暴露网页登录向导、模型可用性和接入信息。
+- 运行体验已收敛为单入口：`start_webai_gateway.bat` 启动 Gateway 本体，并由 runtime supervisor 管理可选 adapter runtime；前端默认只暴露网页登录向导、模型可用性和接入信息。
 - 本地运行态已在 `.gitignore` 中排除：`config.json`、`data/`、`credentials/`、`.webai-gateway/`、日志和 `.codex-logs/`。
 - README 已补齐安装、登录、客户端配置、媒体接口、第三方 runtime、贡献和安全入口。
 - 已补齐 `LICENSE`、`NOTICE.md`、`CONTRIBUTING.md`、`SECURITY.md`、`.github/workflows/ci.yml`。
@@ -16,10 +16,10 @@
 
 - 已选择并添加 MIT `LICENSE`；第三方 runtime 授权差异记录在 `NOTICE.md` 和 [third-party-runtime.md](third-party-runtime.md)。
 - 决定 `webui/dist/` 是否继续跟踪。如果希望开箱即用，可保留构建产物；如果希望源码发布更干净，应从仓库移除并在 README 中要求 `pnpm build`。
-- 清理或归档 `docs/superpowers/plans/` 中的内部开发计划。它们对开发有价值，但包含大量本地路径、历史决策和临时语境；公开仓库建议迁移到 `docs/dev-history/` 或删减。
+- 已从公开树移除 `docs/superpowers/plans/` 内部开发计划，避免本机路径、历史过程和临时语境进入正式开源文档。
 - 将示例路径从 `E:/ProjectX/...`、`C:\Users\...` 泛化为 fixture 路径，至少避免在 README 和正式文档中出现个人机器路径。测试 fixture 中的路径可保留为协议样本，但应说明是匿名化测试数据。
-- 已明确 WebAI2API sidecar 依赖方式：作为外部 prerequisite 或本地 sidecar 目录，详见 [installation.md](installation.md) 和 [third-party-runtime.md](third-party-runtime.md)。
-- 已给 ds2api oracle 增加公开可复现说明：如何拉取 `.tmp/ds2api`、如何更新 oracle commit、如何运行 parity 测试，详见 [third-party-runtime.md](third-party-runtime.md)。
+- 已明确 WebAI2API sidecar 依赖方式：作为可选 adapter runtime 或本地 sidecar 目录，详见 [installation.md](installation.md) 和 [third-party-runtime.md](third-party-runtime.md)。
+- 已给 ds2api oracle 增加公开可复现说明：如何拉取 `.tmp/ds2api`、如何更新 oracle commit、如何运行 parity 测试，详见 [third-party-runtime.md](third-party-runtime.md)。不要把 ds2api 二进制或源码混入 Gateway release，除非同时处理 AGPL 义务。
 - 已增加贡献指南 `CONTRIBUTING.md`：编码规范、测试命令、敏感信息规则、ds2api parity 要求、provider 改动要求。
 - 已增加安全说明 `SECURITY.md`：凭证存储位置、日志脱敏、漏洞报告方式、网页登录账号风险。
 - 已增加 `.env.example`，说明真实 cookie/bearer/API key 不应写入仓库。
@@ -48,9 +48,10 @@ Invoke-RestMethod http://127.0.0.1:8610/health
 
 网页登录 E2E：
 
-- `http://127.0.0.1:8610/health` 显示 `runtime.supervisor.singleEntry=true`，并能看到 WebAI2API / ds2api 内部 runtime 状态。
-- WebAI2API 内部 runtime 已启动且只存在一个监听 `8500` 的进程树。
-- DeepSeek ds2api 内部 runtime 已启动且监听 `9331`。
+- `http://127.0.0.1:8610/health` 显示 `runtime.supervisor.singleEntry=true`，并能看到 Gateway service 状态。
+- 未安装 WebAI2API / ds2api 时，对应 service 可显示 `optional=true` 且 `missing` 或 `stopped`，不应阻止 Gateway 核心能力启动。
+- 如果启用了 WebAI2API adapter，它应启动且只存在一个监听 `8500` 的进程树。
+- 如果启用了 DeepSeek adapter，ds2api runtime 应启动且监听 `9331`。
 - `/v1/models` 能看到已授权 provider 的模型。
 - `POST /v1/chat/completions` 普通文本请求成功。
 - 带工具的 OpenAI 请求返回标准 `message.tool_calls`。

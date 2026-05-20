@@ -14352,11 +14352,48 @@ def test_health_reports_runtime_source_freshness(tmp_path: Path) -> None:
     assert services["gateway"]["internal"] is False
     assert services["gateway"]["status"] == "running"
     assert services["webai2api"]["internal"] is True
+    assert services["webai2api"]["optional"] is True
     assert services["webai2api"]["role"] == "web-login-runtime"
     assert "path" not in services["webai2api"]
     assert services["ds2api"]["internal"] is True
+    assert services["ds2api"]["optional"] is True
     assert services["ds2api"]["role"] == "deepseek-web-runtime"
     assert "path" not in services["ds2api"]
+
+
+def test_supervisor_treats_missing_external_runtimes_as_optional_adapters(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from webai_gateway import runtime_supervisor
+
+    state_path = tmp_path / ".webai-gateway" / "runtime" / "managed-runtimes.json"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(
+        json.dumps(
+            {
+                "updatedAt": "2026-05-20T00:00:00Z",
+                "services": {
+                    "webai2api": {"status": "missing", "message": r"未找到 WebAI2API runtime：D:\missing"},
+                    "ds2api": {"status": "missing", "message": r"未找到 ds2api runtime：D:\missing"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(runtime_supervisor, "_port_is_listening", lambda host, port: False)
+    config = GatewayConfig(
+        upstream=UpstreamConfig(base_url="http://127.0.0.1:8500/v1"),
+        provider_runtime=ProviderRuntimeConfig(deepseek_ds2api_base_url="http://127.0.0.1:9331/v1"),
+    )
+
+    status = runtime_supervisor.collect_supervisor_status(config, tmp_path)
+
+    services = {item["id"]: item for item in status["services"]}
+    assert services["webai2api"]["optional"] is True
+    assert services["webai2api"]["status"] == "missing"
+    assert services["ds2api"]["optional"] is True
+    assert services["ds2api"]["status"] == "missing"
+    assert status["failedServices"] == []
 
 
 def test_supervisor_marks_webai2api_safe_mode_as_failed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
