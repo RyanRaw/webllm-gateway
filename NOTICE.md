@@ -21,6 +21,22 @@ provide the corresponding source as required by that license. If you
 redistribute a bundled WebAI2API runtime, include its upstream license and
 notices.
 
+## Usage disclaimer
+
+WebLLM Gateway is provided for learning, research, and local interoperability
+testing only. It is not an official project of OpenAI, Anthropic, Qwen,
+DeepSeek, ChatGPT, WebAI2API, or ds2api, and it does not provide any official
+model service, account service, or guarantee for bypassing platform limits.
+
+Users are responsible for complying with the terms of service, account rules,
+access restrictions, and applicable laws for any website, model provider, or
+third-party runtime they connect. Do not use this project to bypass paid access,
+evade risk controls, mass-register or abuse accounts, collect data without
+authorization, run unauthorized security testing, or perform any unlawful
+activity. Any account risk, service restriction, data-compliance issue, or legal
+liability arising from use, deployment, redistribution, or modification is the
+user's own responsibility.
+
 ## Frontend and runtime dependencies
 
 The web UI and Python service use third-party open-source dependencies such as
