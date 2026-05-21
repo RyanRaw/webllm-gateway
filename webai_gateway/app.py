@@ -1154,7 +1154,7 @@ def create_app(
         if _is_publicly_disabled_provider_id(provider_id):
             raise HTTPException(
                 status_code=400,
-                detail="该网页登录平台暂未开放：当前版本先隐藏 Gemini、Google Flow 和 Sora，等真实验证通过后再启用。",
+                detail="该网页登录平台暂未开放：当前版本先隐藏未验证链路，等真实验证通过后再启用。",
             )
         if provider.route == "direct":
             raise HTTPException(status_code=400, detail="该 Provider 使用 Gateway 直连授权，不需要 WebAI2API 登录模式")
@@ -1649,7 +1649,7 @@ def create_app(
         if _is_publicly_disabled_provider_id(provider_id):
             raise HTTPException(
                 status_code=400,
-                detail="该 provider 暂未开放自测：Gemini、Google Flow 和 Sora 尚未通过真实链路验证。",
+                detail="该 provider 暂未开放自测：对应链路尚未通过真实验证。",
             )
         cfg = current_config()
         return await run_in_threadpool(_run_provider_smoke_test, app, client, cfg, provider_id)
@@ -4626,7 +4626,7 @@ def _raise_publicly_disabled_model(model_id: Any) -> None:
     raise HTTPException(
         status_code=400,
         detail=(
-            f"{model} 暂未开放：Gemini、Google Flow 和 Sora 链路还没有通过真实工具调用/媒体生成验证，"
+            f"{model} 暂未开放：该链路还没有通过真实工具调用/媒体生成验证，"
             "当前版本先从用户入口关闭。请改用已验证的 Qwen、Qwen Coder、DeepSeek 或 ChatGPT 图片模型。"
         ),
     )
