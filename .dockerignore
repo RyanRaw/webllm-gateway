@@ -1,0 +1,34 @@
+# Git and local editor metadata
+.git
+.gitignore
+.vscode
+.idea
+
+# Python caches and virtual environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Node dependencies and generated frontend output
+node_modules/
+webui/node_modules/
+webui/.pnpm-store/
+webui/dist/
+
+# Local runtime state, credentials, and browser profiles
+config.json
+data/
+credentials/
+.webai-gateway/
+browser-profile/
+cookies/
+*.pem
+*.key
+
+# Logs and temporary files
+*.log
+*.tmp
+.codex-logs/
+.learnings/

@@ -1,0 +1,21 @@
+services:
+  webllm-gateway:
+    build:
+      context: .
+    image: webllm-gateway:local
+    container_name: webllm-gateway
+    restart: unless-stopped
+    ports:
+      - "8610:8610"
+    environment:
+      - WEBAI_API_KEY=local-dev-key
+      - WEBAI_UPSTREAM_BASE_URL=http://host.docker.internal:8500/v1
+      - WEBAI_DEEPSEEK_DS2API_BASE_URL=http://host.docker.internal:9331/v1
+      - WEBAI_DEFAULT_CDP_URL=http://host.docker.internal:9222
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - webai-gateway-data:/data
+
+volumes:
+  webai-gateway-data:

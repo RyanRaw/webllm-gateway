@@ -12550,6 +12550,16 @@ def test_onboarding_returns_gateway_providers_and_models(tmp_path: Path) -> None
     assert "bearer-secret" not in candidate_response.text
 
 
+def test_onboarding_returns_docker_default_cdp_url_from_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("WEBAI_DEFAULT_CDP_URL", "http://host.docker.internal:9222")
+    client = TestClient(create_app(config=_config(), config_path=tmp_path / "config.json", http_client=_not_found_client()))
+
+    response = client.get("/api/admin/onboarding")
+
+    assert response.status_code == 200
+    assert response.json()["defaultCdpUrl"] == "http://host.docker.internal:9222"
+
+
 def test_onboarding_hides_unverified_media_webai2api_providers_before_authorization(tmp_path: Path) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v1/models":
@@ -14658,6 +14668,55 @@ def test_supervisor_treats_missing_external_runtimes_as_optional_adapters(
     assert services["ds2api"]["optional"] is True
     assert services["ds2api"]["status"] == "missing"
     assert status["failedServices"] == []
+
+
+def test_supervisor_preserves_external_runtime_status_for_docker_urls(tmp_path: Path) -> None:
+    from webai_gateway import runtime_supervisor
+
+    state_path = tmp_path / ".webai-gateway" / "runtime" / "managed-runtimes.json"
+    state_path.parent.mkdir(parents=True)
+    state_path.write_text(
+        json.dumps(
+            {
+                "updatedAt": "2026-05-21T00:00:00Z",
+                "services": {
+                    "webai2api": {"status": "external", "message": "WebAI2API runtime is external: http://host.docker.internal:8500/v1"},
+                    "ds2api": {"status": "external", "message": "ds2api runtime is external: http://host.docker.internal:9331/v1"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = GatewayConfig(
+        upstream=UpstreamConfig(base_url="http://host.docker.internal:8500/v1"),
+        provider_runtime=ProviderRuntimeConfig(deepseek_ds2api_base_url="http://host.docker.internal:9331/v1"),
+    )
+
+    status = runtime_supervisor.collect_supervisor_status(config, tmp_path)
+
+    services = {item["id"]: item for item in status["services"]}
+    assert services["webai2api"]["status"] == "external"
+    assert services["ds2api"]["status"] == "external"
+    assert status["failedServices"] == []
+
+
+def test_supervisor_does_not_autostart_non_local_docker_runtime_urls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from webai_gateway import runtime_supervisor
+
+    monkeypatch.setattr(runtime_supervisor, "_port_is_listening", lambda host, port: False)
+    config = GatewayConfig(
+        upstream=UpstreamConfig(base_url="http://host.docker.internal:8500/v1"),
+        provider_runtime=ProviderRuntimeConfig(deepseek_ds2api_base_url="http://host.docker.internal:9331/v1"),
+    )
+
+    state = runtime_supervisor.ensure_managed_runtimes(config, tmp_path / "config.json", tmp_path)
+
+    assert state["services"]["webai2api"]["status"] == "external"
+    assert state["services"]["ds2api"]["status"] == "external"
+    assert "host.docker.internal" in state["services"]["webai2api"]["message"]
+    assert "host.docker.internal" in state["services"]["ds2api"]["message"]
 
 
 def test_supervisor_marks_webai2api_safe_mode_as_failed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

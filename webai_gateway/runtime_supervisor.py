@@ -108,7 +108,9 @@ def _service_status(
     saved = state.get("services", {}).get(service_id, {}) if isinstance(state.get("services"), dict) else {}
     status = str(saved.get("status") or "unknown")
     if probe_ports:
-        if parsed["local"] and parsed["port"] and _port_is_listening(parsed["host"], parsed["port"]):
+        if status == "external" and not parsed["local"]:
+            status = "external"
+        elif parsed["local"] and parsed["port"] and _port_is_listening(parsed["host"], parsed["port"]):
             status = "running"
         elif status in {"started", "running", "already-running"}:
             status = "stopped"
@@ -186,6 +188,8 @@ def _safe_http_error_preview(exc: HTTPError) -> str:
 
 def _ensure_webai2api(config: GatewayConfig, gateway_root: Path) -> dict[str, Any]:
     parsed = _parse_service_url(config.upstream.base_url, 8500)
+    if not parsed["local"]:
+        return {"status": "external", "message": f"WebAI2API runtime is external: {config.upstream.base_url}"}
     if parsed["local"] and parsed["port"] and _port_is_listening(parsed["host"], parsed["port"]):
         return {"status": "already-running", "message": "WebAI2API runtime already listening"}
     sidecar_dir = _default_webai2api_sidecar_dir(gateway_root).resolve()
@@ -209,6 +213,8 @@ def _ensure_webai2api(config: GatewayConfig, gateway_root: Path) -> dict[str, An
 
 def _ensure_ds2api(config: GatewayConfig, config_path: Path, gateway_root: Path) -> dict[str, Any]:
     parsed = _parse_service_url(config.provider_runtime.deepseek_ds2api_base_url, 9331)
+    if not parsed["local"]:
+        return {"status": "external", "message": f"ds2api runtime is external: {config.provider_runtime.deepseek_ds2api_base_url}"}
     if parsed["local"] and parsed["port"] and _port_is_listening(parsed["host"], parsed["port"]):
         return {"status": "already-running", "message": "ds2api runtime already listening"}
     exe = _default_ds2api_exe(gateway_root).resolve()

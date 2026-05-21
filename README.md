@@ -59,6 +59,37 @@ http://127.0.0.1:8610/
 stop_webai_gateway.bat
 ```
 
+### Docker 部署
+
+如果希望跨 Windows / macOS / Linux 使用同一套运行方式，可以直接用 Docker Compose 启动 Gateway：
+
+```powershell
+docker compose up -d --build
+```
+
+启动后打开：
+
+```text
+http://127.0.0.1:8610/
+```
+
+Docker 版本会把 `config.json`、授权凭据、账号检测缓存和运行日志保存在 `webai-gateway-data` volume 里，不会写进镜像。首次启动会自动生成容器内配置，并把 Gateway 监听地址设为 `0.0.0.0:8610`，对外仍通过 `http://127.0.0.1:8610/` 访问。
+
+WebAI2API / ds2api 仍然是可选第三方 adapter runtime，不会被混入本项目镜像。`docker-compose.yml` 默认通过 `host.docker.internal` 访问宿主机上的：
+
+```text
+http://host.docker.internal:8500/v1
+http://host.docker.internal:9331/v1
+```
+
+如果这两个 runtime 跑在别的机器或别的容器里，请修改 `WEBAI_UPSTREAM_BASE_URL` 和 `WEBAI_DEEPSEEK_DS2API_BASE_URL`。网页登录授权推荐在宿主机启动带 CDP 的 Chrome / Edge，再让容器访问 `http://host.docker.internal:9222`；`WEBAI_DEFAULT_CDP_URL` 已在 compose 中给出默认值。
+
+Windows 宿主机可参考：
+
+```powershell
+& "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-address=0.0.0.0 --remote-debugging-port=9222 --user-data-dir="$env:TEMP\webai-gateway-cdp"
+```
+
 更多安装、依赖和启动排障见 [docs/installation.md](docs/installation.md)。
 
 ## 登录授权

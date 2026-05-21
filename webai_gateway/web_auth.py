@@ -28,6 +28,10 @@ QWEN_CREDENTIAL_ORIGINS: dict[str, tuple[str, ...]] = {
 }
 
 
+def default_cdp_url() -> str:
+    return os.environ.get("WEBAI_DEFAULT_CDP_URL", "").strip() or DEFAULT_CDP_URL
+
+
 @dataclass(frozen=True)
 class WebAuthProvider:
     id: str
@@ -641,15 +645,16 @@ def provider_payload(store: CredentialStore) -> dict[str, Any]:
                 "preferredProtocol": provider.preferred_protocol,
             }
         )
-    return {"providers": providers, "defaultCdpUrl": DEFAULT_CDP_URL}
+    return {"providers": providers, "defaultCdpUrl": default_cdp_url()}
 
 
 class BrowserLauncher:
     def __init__(self, profile_dir: str | Path = ".webai-gateway/chrome-auth-profile") -> None:
         self.profile_dir = Path(profile_dir)
 
-    def start(self, provider_id: str, cdp_url: str = DEFAULT_CDP_URL) -> dict[str, Any]:
+    def start(self, provider_id: str, cdp_url: str | None = None) -> dict[str, Any]:
         provider = get_provider(provider_id)
+        cdp_url = cdp_url or default_cdp_url()
         browser = find_browser_executable()
         if not browser:
             return {
@@ -710,11 +715,12 @@ class DeepSeekWebAuthService:
     async def capture(
         self,
         provider_id: str = "deepseek-web",
-        cdp_url: str = DEFAULT_CDP_URL,
+        cdp_url: str | None = None,
         progress: ProgressCallback | None = None,
         timeout_seconds: int = 180,
     ) -> dict[str, Any]:
         provider = get_provider(provider_id)
+        cdp_url = cdp_url or default_cdp_url()
         if provider.id not in {"deepseek-web", *QWEN_DIRECT_PROVIDER_IDS}:
             raise ValueError(f"{provider.name} 暂未实现本地自动捕获；请在 WebAI2API 管理台完成该站点登录。")
         try:

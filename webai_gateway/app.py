@@ -86,13 +86,13 @@ from webai_gateway.tool_bridge import (
     prefer_local_tools_for_local_agent_task,
 )
 from webai_gateway.web_auth import (
-    DEFAULT_CDP_URL,
     BrowserLauncher,
     CredentialStore,
     DeepSeekWebAuthService,
     PROVIDERS,
     catalog_model_payloads,
     create_job,
+    default_cdp_url,
     get_provider,
     is_credential_authorized,
     provider_payload,
@@ -537,6 +537,7 @@ def create_app(
             "models": visible_models,
             "connectionProfiles": connection_profiles,
             "recommendedConnectionProfile": _recommended_connection_profile(connection_profiles),
+            "defaultCdpUrl": default_cdp_url(),
         }
 
 
@@ -1255,7 +1256,7 @@ def create_app(
         body = await _json_body(request)
         provider = get_provider(provider_id)
         if provider.route == "direct":
-            cdp_url = str(body.get("cdpUrl") or body.get("cdp_url") or DEFAULT_CDP_URL)
+            cdp_url = str(body.get("cdpUrl") or body.get("cdp_url") or default_cdp_url())
             result = app.state.browser_launcher.start(provider_id, cdp_url)
             return {
                 **result,
@@ -1704,7 +1705,7 @@ def create_app(
         require_local_admin(request)
         body = await _json_body(request)
         provider_id = str(body.get("provider") or "deepseek-web")
-        cdp_url = str(body.get("cdpUrl") or DEFAULT_CDP_URL)
+        cdp_url = str(body.get("cdpUrl") or default_cdp_url())
         get_provider(provider_id)
         return app.state.browser_launcher.start(provider_id, cdp_url)
 
@@ -1713,7 +1714,7 @@ def create_app(
         require_local_admin(request)
         body = await _json_body(request)
         provider_id = str(body.get("provider") or "deepseek-web")
-        cdp_url = str(body.get("cdpUrl") or DEFAULT_CDP_URL)
+        cdp_url = str(body.get("cdpUrl") or default_cdp_url())
         provider = get_provider(provider_id)
         if provider.status != "available":
             raise HTTPException(status_code=400, detail=f"{provider.name} 暂未开放自动授权")

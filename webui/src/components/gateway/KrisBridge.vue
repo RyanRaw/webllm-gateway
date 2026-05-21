@@ -442,7 +442,11 @@ async function loadOnboarding() {
   try {
     const res = await fetch('/api/admin/onboarding');
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    onboarding.value = await res.json();
+    const data = await res.json();
+    onboarding.value = data;
+    if (data.defaultCdpUrl && cdpUrl.value === 'http://127.0.0.1:9222') {
+      cdpUrl.value = data.defaultCdpUrl;
+    }
     if (!selectedProviderId.value && providers.value.length) {
       selectedProviderId.value = providers.value[0].id;
     }

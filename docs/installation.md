@@ -39,6 +39,45 @@ cd ..
 Copy-Item config.example.json config.json
 ```
 
+## Docker
+
+Docker 部署适合在不同系统上快速启动同一套 Gateway：
+
+```powershell
+docker compose up -d --build
+```
+
+默认映射端口：
+
+```text
+http://127.0.0.1:8610/
+```
+
+容器内的配置、网页登录凭据、账号验证缓存和日志保存在 `webai-gateway-data` volume。不要把宿主机已有的 `credentials/`、`.webai-gateway/` 或浏览器 profile 复制进镜像；如需迁移，请先确认里面没有 cookie、bearer、session token 或 API key 泄露风险。
+
+WebAI2API / ds2api 是外部可选 adapter runtime。Compose 默认使用 `host.docker.internal` 访问宿主机运行的 runtime：
+
+```text
+WEBAI_UPSTREAM_BASE_URL=http://host.docker.internal:8500/v1
+WEBAI_DEEPSEEK_DS2API_BASE_URL=http://host.docker.internal:9331/v1
+```
+
+如果在 Linux 上直接使用 Docker Engine，`docker-compose.yml` 已配置 `host.docker.internal:host-gateway`。如果 runtime 跑在另一台机器或另一个 compose network，请改成对应服务地址。
+
+网页登录授权需要 Gateway 能连到 Chrome / Edge 的 CDP 端口。Docker Compose 默认设置：
+
+```text
+WEBAI_DEFAULT_CDP_URL=http://host.docker.internal:9222
+```
+
+也就是说浏览器建议在宿主机上启动并开放 `9222` 调试端口，容器只连接它并捕获登录态。
+
+Windows 宿主机示例：
+
+```powershell
+& "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-address=0.0.0.0 --remote-debugging-port=9222 --user-data-dir="$env:TEMP\webai-gateway-cdp"
+```
+
 ## Optional Runtime Layout
 
 如果启用 WebAI2API adapter，推荐布局：
