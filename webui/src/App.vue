@@ -148,18 +148,17 @@ onUnmounted(() => {
   <div v-else class="app-shell">
     <LoginModal v-model:visible="loginVisible" />
 
-    <div class="support-strip" role="note">
-      <span class="support-badge">支持</span>
+    <a
+      class="support-strip"
+      href="https://pay.ldxp.cn/shop/FTIWLFHQ"
+      target="_blank"
+      rel="noopener noreferrer"
+      aria-label="打开作者小店"
+    >
+      <span class="support-badge">支持作者</span>
       <span class="support-text">如果 WebAI Gateway 帮你少踩坑，可以通过作者的小店支持，有稳定可靠有质保的plus成品账号、Claude代充等，欢迎选购。</span>
-      <a
-        class="support-link"
-        href="https://pay.ldxp.cn/shop/FTIWLFHQ"
-        target="_blank"
-        rel="noopener noreferrer"
-      >
-        去看看
-      </a>
-    </div>
+      <span class="support-link">去看看</span>
+    </a>
 
     <header class="topbar">
       <div class="brand">
@@ -235,23 +234,30 @@ onUnmounted(() => {
 }
 
 .app-shell {
-  background: #f5f7f8;
+  background:
+    linear-gradient(180deg, rgba(236, 244, 243, 0.88), rgba(247, 249, 250, 0.96) 360px),
+    #f6f8f8;
   color: #111827;
   min-height: 100vh;
-  padding-top: 10px;
+  padding-top: 0;
 }
 
 .support-strip {
   align-items: center;
-  background: #eef5ff;
-  border: 1px solid #bfdbfe;
-  border-radius: 999px;
-  box-shadow: 0 10px 28px rgba(37, 99, 235, 0.14);
+  background: #f4f8ff;
+  border-bottom: 1px solid #cfe1ff;
+  color: inherit;
   display: flex;
-  gap: 12px;
-  margin: 0 24px 10px;
-  min-height: 46px;
-  padding: 6px 10px 6px 14px;
+  gap: 10px;
+  min-height: 34px;
+  padding: 5px 30px;
+  text-decoration: none;
+  transition: background 160ms ease, border-color 160ms ease;
+}
+
+.support-strip:hover {
+  background: #eaf2ff;
+  border-color: #b7d3ff;
 }
 
 .support-badge {
@@ -259,18 +265,22 @@ onUnmounted(() => {
   border-radius: 999px;
   color: #1d4ed8;
   flex: 0 0 auto;
+  font-size: 12px;
   font-weight: 700;
   line-height: 1;
-  padding: 7px 11px;
+  padding: 5px 9px;
 }
 
 .support-text {
   color: #111827;
   flex: 1 1 auto;
-  font-size: 15px;
+  font-size: 13px;
   font-weight: 600;
-  line-height: 1.35;
+  line-height: 1.25;
   min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .support-link {
@@ -278,25 +288,26 @@ onUnmounted(() => {
   border-radius: 999px;
   color: #1d4ed8;
   flex: 0 0 auto;
+  font-size: 13px;
   font-weight: 700;
-  padding: 6px 12px;
-  text-decoration: none;
+  padding: 4px 10px;
 }
 
-.support-link:hover {
+.support-strip:hover .support-link {
   background: #dbeafe;
   color: #1e40af;
 }
 
 .topbar {
   align-items: center;
-  background: rgba(255, 255, 255, 0.96);
-  border-bottom: 1px solid #dbe4ed;
+  backdrop-filter: blur(18px);
+  background: rgba(255, 255, 255, 0.9);
+  border-bottom: 1px solid rgba(203, 213, 225, 0.72);
   display: flex;
   gap: 16px;
   justify-content: space-between;
-  min-height: 68px;
-  padding: 14px 32px;
+  min-height: 58px;
+  padding: 10px 32px;
   position: sticky;
   top: 0;
   z-index: 20;
@@ -313,13 +324,13 @@ onUnmounted(() => {
   align-items: center;
   background: #ecfdf5;
   border: 1px solid #a7f3d0;
-  border-radius: 8px;
+  border-radius: 7px;
   color: #0f766e;
   display: inline-flex;
-  font-size: 20px;
-  height: 40px;
+  font-size: 18px;
+  height: 38px;
   justify-content: center;
-  width: 40px;
+  width: 38px;
 }
 
 .brand strong,
@@ -328,8 +339,14 @@ onUnmounted(() => {
 }
 
 .brand strong {
-  font-size: 18px;
+  font-size: 17px;
   letter-spacing: 0;
+  line-height: 1.15;
+}
+
+.brand small {
+  font-size: 12px;
+  line-height: 1.25;
 }
 
 .brand small,
@@ -339,8 +356,8 @@ onUnmounted(() => {
 
 .content-shell {
   margin: 0 auto;
-  max-width: 1220px;
-  padding: 22px;
+  max-width: 1480px;
+  padding: 24px 28px 36px;
 }
 
 .drawer-stack {
@@ -366,25 +383,50 @@ onUnmounted(() => {
 
 @media (max-width: 720px) {
   .support-strip {
-    align-items: flex-start;
-    border-radius: 16px;
-    flex-wrap: wrap;
-    margin: 0 12px 10px;
+    align-items: center;
+    flex-wrap: nowrap;
+    min-height: 32px;
+    padding: 5px 12px;
   }
 
   .support-text {
-    flex-basis: calc(100% - 70px);
-    font-size: 14px;
+    font-size: 12px;
   }
 
   .support-link {
-    margin-left: auto;
+    display: none;
   }
 
   .topbar {
-    align-items: flex-start;
-    flex-direction: column;
-    padding: 12px 16px;
+    align-items: center;
+    gap: 10px;
+    min-height: 52px;
+    padding: 8px 12px;
+  }
+
+  .brand {
+    gap: 9px;
+  }
+
+  .brand-mark {
+    border-radius: 6px;
+    font-size: 16px;
+    height: 34px;
+    width: 34px;
+  }
+
+  .brand strong {
+    font-size: 15px;
+  }
+
+  .brand small {
+    font-size: 11px;
+  }
+
+  .topbar :deep(.ant-btn) {
+    font-size: 13px;
+    height: 32px;
+    padding-inline: 10px;
   }
 
   .content-shell {
