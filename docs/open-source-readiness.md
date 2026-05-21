@@ -57,7 +57,6 @@ Invoke-RestMethod http://127.0.0.1:8610/health
 - 带工具的 OpenAI 请求返回标准 `message.tool_calls`。
 - Anthropic `/v1/messages` 返回标准 text 或 `tool_use` block。
 - `POST /v1/images/generations` 使用 `gpt-image-2` 返回图片数据。
-- `POST /v1/videos` 返回 video id，`GET /v1/videos/{id}/content` 可取回内容。
 
 ## 架构整理建议
 
@@ -65,7 +64,7 @@ Invoke-RestMethod http://127.0.0.1:8610/health
 
 后续可按低风险顺序拆分：
 
-1. `media_api.py`：迁移 `/v1/images/generations`、`/v1/videos` 和媒体缓存 helper。
+1. `media_api.py`：迁移 `/v1/images/generations` 和媒体 helper。
 2. `admin_api.py`：迁移管理 API、onboarding、diagnostics。
 3. `providers/`：统一 direct provider、WebAI2API、ds2api sidecar 的路由入口。
 4. `security.py`：集中鉴权、脱敏、localhost admin guard。

@@ -117,26 +117,17 @@ GOOGLE_AUTH_COOKIE_HINTS = (
 )
 WEBAI2API_AUTH_COOKIE_HINTS: dict[str, tuple[str, ...]] = {
     "chatgpt": CHATGPT_AUTH_COOKIE_HINTS,
-    "sora": CHATGPT_AUTH_COOKIE_HINTS,
-    "gemini": GOOGLE_AUTH_COOKIE_HINTS,
-    "gemini-biz": GOOGLE_AUTH_COOKIE_HINTS,
-    "google-flow": GOOGLE_AUTH_COOKIE_HINTS,
 }
 WEBAI2API_AUTH_DOMAIN_HINTS: dict[str, tuple[str, ...]] = {
-    "sora": ("sora.chatgpt.com", "chatgpt.com"),
-    "gemini": ("gemini.google.com", "accounts.google.com", "google.com"),
-    "gemini-biz": ("gemini.google.com", "accounts.google.com", "google.com"),
-    "google-flow": ("labs.google", "accounts.google.com", "google.com"),
 }
 HOMEPAGE_SUPPORTED_PROVIDER_IDS = {
     "deepseek-web",
     "qwen",
     "qwen-coder",
     "chatgpt",
-    "google-flow",
-    "sora",
-    "gemini",
 }
+DISABLED_PUBLIC_PROVIDER_IDS = {"gemini", "gemini-biz", "google-flow", "sora"}
+DISABLED_PUBLIC_MODEL_MARKERS = ("gemini", "google_flow", "google-flow", "imagen", "sora", "veo")
 TOOL_BRIDGE_EVENT_LIMIT = 200
 MEDIA_GENERATION_CACHE_LIMIT = 100
 MEDIA_GENERATION_TTL_SECONDS = 60 * 60
@@ -384,7 +375,9 @@ def create_app(
         return app.state.config
 
     def load_gateway_models_with_direct_catalog(cfg: GatewayConfig) -> dict[str, Any]:
-        return _append_qwen_live_model_catalog(app, client, _load_gateway_models(client, cfg), cfg)
+        return _filter_public_model_catalog(
+            _append_qwen_live_model_catalog(app, client, _load_gateway_models(client, cfg), cfg)
+        )
 
     def auth_value_matches(value: str | None, expected: str) -> bool:
         if value is None:
@@ -555,6 +548,8 @@ def create_app(
 
     def _onboarding_provider_visible_on_homepage(provider: dict[str, Any]) -> bool:
         provider_id = str(provider.get("id") or "")
+        if _is_publicly_disabled_provider_id(provider_id):
+            return False
         if provider_id in HOMEPAGE_SUPPORTED_PROVIDER_IDS:
             return True
         credential = provider.get("credential") if isinstance(provider.get("credential"), dict) else {}
@@ -570,12 +565,12 @@ def create_app(
             available_models = provider.get("availableModels") if isinstance(provider.get("availableModels"), list) else []
             model_availability = provider.get("modelAvailability") if isinstance(provider.get("modelAvailability"), dict) else {}
             for model_id in available_models:
-                if isinstance(model_id, str) and model_id.strip():
+                if isinstance(model_id, str) and model_id.strip() and not _is_publicly_disabled_model(model_id):
                     model_ids.add(model_id)
             for model_id, availability in model_availability.items():
                 if not isinstance(model_id, str) or not isinstance(availability, dict):
                     continue
-                if availability.get("status") == "available":
+                if availability.get("status") == "available" and not _is_publicly_disabled_model(model_id):
                     model_ids.add(model_id)
         return model_ids
 
@@ -585,7 +580,10 @@ def create_app(
         return [
             item
             for item in models
-            if isinstance(item, dict) and isinstance(item.get("id"), str) and item.get("id") in visible_model_ids
+            if isinstance(item, dict)
+            and isinstance(item.get("id"), str)
+            and item.get("id") in visible_model_ids
+            and not _is_publicly_disabled_model(item.get("id"))
         ]
 
     def _onboarding_authorized_provider_count(providers: list[dict[str, Any]]) -> int:
@@ -616,6 +614,8 @@ def create_app(
         out = [dict(item) if isinstance(item, dict) else item for item in models]
         seen = {item.get("id") for item in out if isinstance(item, dict)}
         for provider in providers:
+            if _is_publicly_disabled_provider_id(provider.get("id")):
+                continue
             if not _should_add_provider_catalog_models(provider, webai2api_instances):
                 continue
             for model_id in _provider_catalog_model_ids_for_onboarding(provider, seen):
@@ -640,13 +640,17 @@ def create_app(
 
     def _provider_catalog_model_ids_for_onboarding(provider: dict[str, Any], seen: set[Any]) -> list[str]:
         provider_id = str(provider.get("id") or "")
+        if _is_publicly_disabled_provider_id(provider_id):
+            return []
         declared_models = provider.get("models") if isinstance(provider.get("models"), list) else []
         if provider_id == "chatgpt":
             adapter_ids = [str(adapter) for adapter in provider.get("adapters", []) if isinstance(adapter, str)]
             return [
                 model_id
                 for model_id in declared_models
-                if isinstance(model_id, str) and model_id in {"gpt-instant", "gpt-thinking", "gpt-pro"}
+                if isinstance(model_id, str)
+                and model_id in {"gpt-instant", "gpt-thinking", "gpt-pro"}
+                and not _is_publicly_disabled_model(model_id)
                 and not any(f"{adapter}/{model_id}" in seen for adapter in adapter_ids)
             ]
         if provider.get("route") != "direct":
@@ -654,10 +658,16 @@ def create_app(
             return [
                 model_id
                 for model_id in declared_models
-                if isinstance(model_id, str) and not any(f"{adapter}/{model_id}" in seen for adapter in adapter_ids)
+                if isinstance(model_id, str)
+                and not _is_publicly_disabled_model(model_id)
+                and not any(f"{adapter}/{model_id}" in seen for adapter in adapter_ids)
             ]
         if provider.get("route") == "direct":
-            return [model_id for model_id in declared_models if isinstance(model_id, str)]
+            return [
+                model_id
+                for model_id in declared_models
+                if isinstance(model_id, str) and not _is_publicly_disabled_model(model_id)
+            ]
         return []
 
     def _provider_catalog_model_payload(provider: dict[str, Any], model_id: str) -> dict[str, Any]:
@@ -687,6 +697,8 @@ def create_app(
         model_ids: set[Any],
     ) -> list[str]:
         declared_models = provider.get("availableModels")
+        if _is_publicly_disabled_provider_id(provider.get("id")):
+            return []
         if not isinstance(declared_models, list):
             declared_models = provider.get("models", [])
         declared_model_ids = [model_id for model_id in declared_models if isinstance(model_id, str)]
@@ -694,6 +706,8 @@ def create_app(
         seen: set[str] = set()
 
         def add_model(model_id: str) -> None:
+            if _is_publicly_disabled_model(model_id):
+                return
             if model_id not in seen:
                 seen.add(model_id)
                 provider_models.append(model_id)
@@ -1061,6 +1075,8 @@ def create_app(
         provider_id = str(body.get("providerId") or body.get("provider_id") or "").strip()
         account_id = str(body.get("accountId") or body.get("account_id") or "").strip()
         provider = get_provider(provider_id)
+        if _is_publicly_disabled_provider_id(provider_id):
+            raise HTTPException(status_code=400, detail="该网页登录平台暂未开放，不能切换账号。")
         parsed = parse_account_id(account_id)
         if not parsed or parsed.provider_id != provider_id:
             raise HTTPException(status_code=400, detail="账号不属于当前 Provider")
@@ -1076,6 +1092,8 @@ def create_app(
         provider_id = str(body.get("providerId") or body.get("provider_id") or "").strip()
         account_id = str(body.get("accountId") or body.get("account_id") or "").strip()
         provider = get_provider(provider_id)
+        if _is_publicly_disabled_provider_id(provider_id):
+            raise HTTPException(status_code=400, detail="该网页登录平台暂未开放，不能检测模型。")
         parsed = parse_account_id(account_id)
         if not parsed or parsed.provider_id != provider_id:
             raise HTTPException(status_code=400, detail="账号不属于当前 Provider")
@@ -1133,6 +1151,11 @@ def create_app(
 
     async def _start_webai2api_login_mode(provider_id: str, body: dict[str, Any]) -> dict[str, Any]:
         provider = get_provider(provider_id)
+        if _is_publicly_disabled_provider_id(provider_id):
+            raise HTTPException(
+                status_code=400,
+                detail="该网页登录平台暂未开放：当前版本先隐藏 Gemini、Google Flow 和 Sora，等真实验证通过后再启用。",
+            )
         if provider.route == "direct":
             raise HTTPException(status_code=400, detail="该 Provider 使用 Gateway 直连授权，不需要 WebAI2API 登录模式")
         cfg = current_config()
@@ -1623,6 +1646,11 @@ def create_app(
     @app.post("/api/admin/provider-smoke/{provider_id}")
     async def admin_provider_smoke(provider_id: str, request: Request) -> dict[str, Any]:
         require_local_admin(request)
+        if _is_publicly_disabled_provider_id(provider_id):
+            raise HTTPException(
+                status_code=400,
+                detail="该 provider 暂未开放自测：Gemini、Google Flow 和 Sora 尚未通过真实链路验证。",
+            )
         cfg = current_config()
         return await run_in_threadpool(_run_provider_smoke_test, app, client, cfg, provider_id)
 
@@ -1753,7 +1781,7 @@ def create_app(
             pass
         if data is None:
             data = _append_web_models({"object": "list", "data": [{"id": cfg.upstream.model, "object": "model"}]})
-        return JSONResponse(_append_qwen_live_model_catalog(app, client, data, cfg))
+        return JSONResponse(_filter_public_model_catalog(_append_qwen_live_model_catalog(app, client, data, cfg)))
 
     @app.post("/v1/images/generations")
     async def image_generations(
@@ -1821,6 +1849,8 @@ def create_app(
         require_auth(authorization, x_api_key, api_key)
         cfg = current_config()
         body = normalize_model_body(await _json_body(request), default_model=cfg.upstream.model)
+        if _is_publicly_disabled_model(body.get("model")):
+            _raise_publicly_disabled_model(body.get("model"))
         target_account = str(request.headers.get("X-Ds2-Target-Account") or request.headers.get("X-WebAI-Target-Account") or "").strip()
         if target_account:
             body["_webai_target_account_id"] = target_account
@@ -2066,6 +2096,8 @@ def create_app(
         require_auth(authorization, x_api_key, api_key)
         cfg = current_config()
         body = normalize_model_body(await _json_body(request), default_model=cfg.upstream.model)
+        if _is_publicly_disabled_model(body.get("model")):
+            _raise_publicly_disabled_model(body.get("model"))
         try:
             openai_body = anthropic_body_to_openai(
                 body,
@@ -2305,6 +2337,15 @@ def _run_provider_smoke_test(
     config: GatewayConfig,
     provider_id: str,
 ) -> dict[str, Any]:
+    if _is_publicly_disabled_provider_id(provider_id):
+        return {
+            "provider": provider_id,
+            "authorized": False,
+            "ok": False,
+            "passed": 0,
+            "total": 1,
+            "results": [{"id": "disabled", "ok": False, "message": "该 provider 暂未开放，等待真实链路验证通过。"}],
+        }
     try:
         provider = get_provider(provider_id)
     except ValueError:
@@ -2407,13 +2448,15 @@ def _run_webai2api_provider_smoke(
 
 
 def _webai2api_provider_smoke_model(provider: Any, client: httpx.Client, config: GatewayConfig) -> str:
+    if _is_publicly_disabled_provider_id(getattr(provider, "id", "")):
+        return ""
     if not bool(getattr(provider, "capabilities", {}).get("text")):
         return ""
-    models_payload = _load_gateway_models(client, config)
+    models_payload = _filter_public_model_catalog(_load_gateway_models(client, config))
     models = models_payload.get("data") if isinstance(models_payload.get("data"), list) else []
     model_ids = {item.get("id") for item in models if isinstance(item, dict)}
     for model_id in getattr(provider, "models", ()):
-        if model_id in model_ids:
+        if model_id in model_ids and not _is_publicly_disabled_model(model_id):
             return str(model_id)
     adapter_ids = {str(adapter) for adapter in getattr(provider, "adapters", ())}
     adapter_prefixes = tuple(f"{adapter}/" for adapter in adapter_ids)
@@ -2424,9 +2467,16 @@ def _webai2api_provider_smoke_model(provider: Any, client: httpx.Client, config:
         if not isinstance(model_id, str):
             continue
         owner = str(item.get("owned_by") or "")
-        if owner in adapter_ids or model_id.startswith(adapter_prefixes):
+        if not _is_publicly_disabled_model(model_id) and (owner in adapter_ids or model_id.startswith(adapter_prefixes)):
             return model_id
-    first = next((str(model_id) for model_id in getattr(provider, "models", ()) if str(model_id)), "")
+    first = next(
+        (
+            str(model_id)
+            for model_id in getattr(provider, "models", ())
+            if str(model_id) and not _is_publicly_disabled_model(model_id)
+        ),
+        "",
+    )
     return first
 
 
@@ -2504,7 +2554,7 @@ def _run_direct_provider_smoke(
 
 
 def _provider_smoke_models_result(client: httpx.Client, config: GatewayConfig, model: str) -> dict[str, Any]:
-    models_payload = _load_gateway_models(client, config)
+    models_payload = _filter_public_model_catalog(_load_gateway_models(client, config))
     model_ids = {item.get("id") for item in models_payload.get("data", []) if isinstance(item, dict)}
     return _smoke_result("models", model in model_ids, detail={"model": model})
 
@@ -4294,6 +4344,8 @@ def _create_image_generation_response(
     if response_format not in {"url", "b64_json"}:
         raise HTTPException(status_code=400, detail="response_format must be url or b64_json")
     model = normalize_model_id(body.get("model"), DEFAULT_IMAGE_GENERATION_MODEL)
+    if _is_publicly_disabled_model(model):
+        _raise_publicly_disabled_model(model)
     input_images = _media_input_images_from_body(body)
     data_uri = _run_webai2api_media_generation(
         client,
@@ -4321,6 +4373,8 @@ def _create_video_generation_response(
     if not prompt:
         raise HTTPException(status_code=400, detail="prompt is required")
     model = normalize_model_id(body.get("model"), DEFAULT_VIDEO_GENERATION_MODEL)
+    if _is_publicly_disabled_model(model):
+        _raise_publicly_disabled_model(model)
     input_images = _media_input_images_from_body(body)
     data_uri = _run_webai2api_media_generation(
         client,
@@ -4538,6 +4592,44 @@ def _append_web_models(data: dict[str, Any], *, include_webai2api_catalog: bool 
             seen.add(model_id)
             items.append(_enrich_model_payload(dict(item)))
     return {**data, "object": data.get("object") or "list", "data": items}
+
+
+def _filter_public_model_catalog(data: dict[str, Any]) -> dict[str, Any]:
+    items = data.get("data") if isinstance(data.get("data"), list) else []
+    filtered = [
+        item
+        for item in items
+        if not (
+            isinstance(item, dict)
+            and (
+                _is_publicly_disabled_provider_id(item.get("owned_by"))
+                or _is_publicly_disabled_model(item.get("id"))
+            )
+        )
+    ]
+    return {**data, "data": filtered}
+
+
+def _is_publicly_disabled_provider_id(provider_id: Any) -> bool:
+    return str(provider_id or "").strip().lower() in DISABLED_PUBLIC_PROVIDER_IDS
+
+
+def _is_publicly_disabled_model(model_id: Any) -> bool:
+    model = str(model_id or "").strip().lower()
+    if not model:
+        return False
+    return any(marker in model for marker in DISABLED_PUBLIC_MODEL_MARKERS)
+
+
+def _raise_publicly_disabled_model(model_id: Any) -> None:
+    model = str(model_id or "").strip() or "该模型"
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            f"{model} 暂未开放：Gemini、Google Flow 和 Sora 链路还没有通过真实工具调用/媒体生成验证，"
+            "当前版本先从用户入口关闭。请改用已验证的 Qwen、Qwen Coder、DeepSeek 或 ChatGPT 图片模型。"
+        ),
+    )
 
 
 def _enrich_model_payload(item: dict[str, Any]) -> dict[str, Any]:

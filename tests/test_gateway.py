@@ -2022,7 +2022,7 @@ def test_webai2api_upstream_required_tool_choice_failure_returns_sanitized_diagn
         "/v1/chat/completions",
         headers=_headers(),
         json={
-            "model": "gemini_text/gemini-3.1-pro",
+            "model": "gpt-instant",
             "messages": [{"role": "user", "content": "Call get_weather for Beijing."}],
             "tools": [
                 {"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object"}}}
@@ -12291,7 +12291,7 @@ def test_images_generation_passes_reference_images_to_webai2api(tmp_path: Path) 
         "/v1/images/generations",
         headers=_headers(),
         json={
-            "model": "google_flow/gemini-3-pro-image-preview",
+            "model": "gpt-image-2",
             "prompt": "make a clean storyboard frame",
             "response_format": "b64_json",
             "input_image": [
@@ -12303,7 +12303,7 @@ def test_images_generation_passes_reference_images_to_webai2api(tmp_path: Path) 
     )
 
     assert response.status_code == 200
-    assert seen["body"]["model"] == "google_flow/gemini-3-pro-image-preview"
+    assert seen["body"]["model"] == "gpt-image-2"
     assert seen["body"]["messages"] == [
         {
             "role": "user",
@@ -12348,8 +12348,11 @@ def test_images_generation_surfaces_webai2api_sse_errors(tmp_path: Path) -> None
     assert "INVALID_MODEL" in response.json()["detail"]
 
 
-def test_videos_create_stores_retrievable_content_from_webai2api(tmp_path: Path) -> None:
+def test_unverified_sora_video_model_is_blocked_before_upstream(tmp_path: Path) -> None:
+    seen: list[str] = []
+
     def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
         return httpx.Response(
             200,
             json=_openai_response("data:video/mp4;base64,AAECAw=="),
@@ -12370,24 +12373,12 @@ def test_videos_create_stores_retrievable_content_from_webai2api(tmp_path: Path)
         json={"model": "sora-2", "prompt": "海边日落延时摄影"},
     )
 
-    assert created.status_code == 200
-    video = created.json()
-    assert video["object"] == "video"
-    assert video["status"] == "completed"
-    assert video["model"] == "sora-2"
-    assert video["id"].startswith("video_")
-
-    fetched = client.get(f"/v1/videos/{video['id']}", headers=_headers())
-    assert fetched.status_code == 200
-    assert fetched.json()["status"] == "completed"
-
-    content = client.get(f"/v1/videos/{video['id']}/content", headers=_headers())
-    assert content.status_code == 200
-    assert content.headers["content-type"].startswith("video/mp4")
-    assert content.content == b"\x00\x01\x02\x03"
+    assert created.status_code == 400
+    assert "暂未开放" in created.json()["detail"]
+    assert seen == []
 
 
-def test_media_models_are_advertised_with_image_and_video_capabilities(tmp_path: Path) -> None:
+def test_unverified_media_models_are_filtered_from_public_catalog(tmp_path: Path) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
@@ -12420,12 +12411,9 @@ def test_media_models_are_advertised_with_image_and_video_capabilities(tmp_path:
     assert models["gpt-image-2"]["capabilities"]["video"] is False
     assert models["gpt-image-1.5"]["capabilities"]["image"] is True
     assert models["gpt-image-1.5"]["capabilities"]["video"] is False
-    assert models["sora-2"]["type"] == "video"
-    assert models["sora-2"]["capabilities"]["video"] is True
-    assert models["google_flow/gemini-3-pro-image-preview"]["type"] == "image"
-    assert models["google_flow/gemini-3-pro-image-preview"]["capabilities"]["image"] is True
-    assert models["gemini/veo-3.1-generate-preview"]["type"] == "video"
-    assert models["gemini/veo-3.1-generate-preview"]["capabilities"]["video"] is True
+    assert "sora-2" not in models
+    assert "google_flow/gemini-3-pro-image-preview" not in models
+    assert "gemini/veo-3.1-generate-preview" not in models
 
 
 def test_onboarding_returns_gateway_providers_and_models(tmp_path: Path) -> None:
@@ -12462,21 +12450,18 @@ def test_onboarding_returns_gateway_providers_and_models(tmp_path: Path) -> None
     assert body["gateway"]["baseUrl"] == "/v1"
     assert body["gateway"]["apiKey"] == "local-dev-key"
     assert body["gateway"]["defaultModel"] == "web-model"
-    assert body["summary"]["providers"] == 7
+    assert body["summary"]["providers"] == 4
     assert body["summary"]["candidateProviders"] >= 10
     assert body["summary"]["models"] >= 7
     assert body["summary"]["candidateModels"] >= 3
     assert body["summary"]["authorizedProviders"] == 1
     assert body["summary"]["authorizedDirectProviders"] == 1
-    assert body["summary"]["webAI2APIProviders"] == 4
+    assert body["summary"]["webAI2APIProviders"] == 1
     assert {item["id"] for item in body["providers"]} == {
         "deepseek-web",
         "qwen",
         "qwen-coder",
         "chatgpt",
-        "google-flow",
-        "sora",
-        "gemini",
     }
     assert {item["id"] for item in body["models"]} >= {
         "deepseek-v4-pro",
@@ -12508,7 +12493,7 @@ def test_onboarding_returns_gateway_providers_and_models(tmp_path: Path) -> None
     assert "bearer-secret" not in candidate_response.text
 
 
-def test_onboarding_exposes_media_webai2api_providers_before_authorization(tmp_path: Path) -> None:
+def test_onboarding_hides_unverified_media_webai2api_providers_before_authorization(tmp_path: Path) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v1/models":
             return httpx.Response(
@@ -12550,14 +12535,8 @@ def test_onboarding_exposes_media_webai2api_providers_before_authorization(tmp_p
 
     assert response.status_code == 200
     providers = {item["id"]: item for item in response.json()["providers"]}
-    assert {"google-flow", "sora", "gemini"} <= set(providers)
-    assert providers["google-flow"]["credential"]["authorized"] is False
-    assert providers["google-flow"]["accounts"] == []
-    assert providers["google-flow"]["availableModels"] == []
-    assert "imagen-4" in providers["google-flow"]["models"]
-    assert providers["google-flow"]["capabilities"]["image"] is True
-    assert providers["sora"]["capabilities"]["video"] is True
-    assert providers["gemini"]["capabilities"]["video"] is True
+    assert "chatgpt" in providers
+    assert {"google-flow", "sora", "gemini"} & set(providers) == set()
 
 
 def test_onboarding_groups_webai2api_adapter_aliases_with_provider(tmp_path: Path) -> None:
@@ -12733,12 +12712,9 @@ def test_onboarding_marks_webai2api_chatgpt_authorized_from_worker_cookies(tmp_p
     assert "visitor-cookie" not in response.text
 
 
-def test_onboarding_marks_google_flow_authorized_from_google_account_cookies_and_validates_catalog_models(
+def test_onboarding_hides_google_flow_and_blocks_validation_until_verified(
     tmp_path: Path,
 ) -> None:
-    cookie_domains: list[str] = []
-    chat_calls: list[str] = []
-
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v1/models":
             return httpx.Response(200, json={"object": "list", "data": []}, request=request)
@@ -12754,13 +12730,7 @@ def test_onboarding_marks_google_flow_authorized_from_google_account_cookies_and
                 request=request,
             )
         if request.url.path == "/v1/cookies":
-            domain = str(request.url.params.get("domain") or "")
-            cookie_domains.append(domain)
-            cookies = [{"name": "__Secure-1PSID", "value": "google-session-secret"}] if domain == "accounts.google.com" else []
-            return httpx.Response(200, json={"cookies": cookies}, request=request)
-        if request.url.path == "/v1/chat/completions":
-            chat_calls.append(json.loads(request.content.decode("utf-8"))["model"])
-            return httpx.Response(500, json={"error": {"message": "media probe should not use chat"}}, request=request)
+            return httpx.Response(200, json={"cookies": [{"name": "__Secure-1PSID", "value": "google-session-secret"}]}, request=request)
         return httpx.Response(404, json={"error": "unexpected"}, request=request)
 
     client = TestClient(
@@ -12775,29 +12745,21 @@ def test_onboarding_marks_google_flow_authorized_from_google_account_cookies_and
     onboarding_response = client.get("/api/admin/onboarding")
 
     assert onboarding_response.status_code == 200
-    flow = next(item for item in onboarding_response.json()["providers"] if item["id"] == "google-flow")
-    assert flow["credential"]["authorized"] is True
-    assert flow["webAI2APIAuth"]["authorized"] is True
-    assert flow["accounts"][0]["authorized"] is True
-    assert "accounts.google.com" in cookie_domains
-    assert "gemini-3-pro-image-preview" in flow["availableModels"]
-    assert "gemini-3.1-flash-image-landscape" in flow["availableModels"]
+    assert "google-flow" not in {item["id"] for item in onboarding_response.json()["providers"]}
     assert "google-session-secret" not in onboarding_response.text
 
     validation_response = client.post(
         "/api/admin/accounts/validate",
         json={
             "providerId": "google-flow",
-            "accountId": flow["currentAccountId"],
+            "accountId": webai2api_account_id("google-flow", "flow_profile", "flow"),
             "modelIds": ["gemini-3-pro-image-preview", "gemini-3.1-flash-image-landscape"],
             "force": True,
         },
     )
 
-    assert validation_response.status_code == 200
-    assert validation_response.json()["validation"]["gemini-3-pro-image-preview"]["status"] == "available"
-    assert validation_response.json()["validation"]["gemini-3.1-flash-image-landscape"]["status"] == "available"
-    assert chat_calls == []
+    assert validation_response.status_code == 400
+    assert "暂未开放" in validation_response.json()["detail"]
 
 
 def test_account_model_validation_restarts_when_selected_webai2api_worker_is_not_loaded(tmp_path: Path) -> None:
@@ -12808,8 +12770,8 @@ def test_account_model_validation_restarts_when_selected_webai2api_worker_is_not
     chat_calls: list[str] = []
     instances = [
         {
-            "name": "flow_profile",
-            "workers": [{"name": "flow", "type": "google_flow", "mergeTypes": []}],
+            "name": "chatgpt_profile",
+            "workers": [{"name": "chatgpt", "type": "chatgpt_text", "mergeTypes": []}],
         }
     ]
 
@@ -12830,7 +12792,7 @@ def test_account_model_validation_restarts_when_selected_webai2api_worker_is_not
             if not runtime_worker_ready:
                 return httpx.Response(
                     500,
-                    json={"error": {"message": "浏览器实例不存在: flow_profile"}},
+                    json={"error": {"message": "浏览器实例不存在: chatgpt_profile"}},
                     request=request,
                 )
             post_restart_cookie_calls += 1
@@ -12840,10 +12802,10 @@ def test_account_model_validation_restarts_when_selected_webai2api_worker_is_not
                     json={"error": {"message": "WebAI2API is still restarting"}},
                     request=request,
                 )
-            return httpx.Response(200, json={"cookies": [{"name": "__Secure-1PSID", "value": "ok"}]}, request=request)
+            return httpx.Response(200, json={"cookies": [{"name": "__Secure-next-auth.session-token", "value": "ok"}]}, request=request)
         if request.url.path == "/v1/chat/completions":
             chat_calls.append(json.loads(request.content.decode("utf-8"))["model"])
-            return httpx.Response(500, json={"error": {"message": "media probe should not use chat"}}, request=request)
+            return httpx.Response(200, json=_openai_response("VALIDATION_OK"), request=request)
         return httpx.Response(404, json={"error": "unexpected"}, request=request)
 
     client = TestClient(
@@ -12854,23 +12816,23 @@ def test_account_model_validation_restarts_when_selected_webai2api_worker_is_not
             http_client=httpx.Client(transport=httpx.MockTransport(handler)),
         )
     )
-    account_id = webai2api_account_id("google-flow", "flow_profile", "flow")
+    account_id = webai2api_account_id("chatgpt", "chatgpt_profile", "chatgpt")
 
     response = client.post(
         "/api/admin/accounts/validate",
         json={
-            "providerId": "google-flow",
+            "providerId": "chatgpt",
             "accountId": account_id,
-            "modelIds": ["gemini-3-pro-image-preview"],
+            "modelIds": ["gpt-instant"],
             "force": True,
         },
     )
 
     assert response.status_code == 200
-    assert response.json()["validation"]["gemini-3-pro-image-preview"]["status"] == "available"
+    assert response.json()["validation"]["gpt-instant"]["status"] == "available"
     assert restart_payloads == [{"loginMode": False}]
     assert posted_instances
-    assert chat_calls == []
+    assert chat_calls == ["gpt-instant"]
 
 
 def test_onboarding_returns_claude_code_connection_profiles_for_web_providers(tmp_path: Path) -> None:
@@ -13334,7 +13296,7 @@ def test_webai2api_login_start_creates_isolated_profile_without_touching_existin
     assert "cookie" not in response.text.lower()
 
 
-def test_webai2api_login_start_auto_creates_media_worker_when_provider_worker_is_missing(tmp_path: Path) -> None:
+def test_webai2api_login_start_blocks_disabled_media_provider_when_worker_is_missing(tmp_path: Path) -> None:
     posted_instances: list[Any] = []
     restart_payloads: list[Any] = []
     original_instances = [
@@ -13368,23 +13330,13 @@ def test_webai2api_login_start_auto_creates_media_worker_when_provider_worker_is
 
     response = client.post("/api/admin/onboarding/providers/google-flow/login", json={"newAccount": False})
 
-    assert response.status_code == 200
-    body = response.json()
-    assert body["success"] is True
-    assert body["providerId"] == "google-flow"
-    assert body["newAccount"] is True
-    assert body["openMode"] == "runtime_browser"
-    assert body["browserLabel"] == "Camoufox"
-    assert body["displayUrl"] is None
-    assert posted_instances
-    saved_instances = posted_instances[-1]
-    assert saved_instances[0] == original_instances[0]
-    worker = saved_instances[-1]["workers"][0]
-    assert worker["type"] == "google_flow"
-    assert restart_payloads == [{"loginMode": True, "workerName": body["workerName"]}]
+    assert response.status_code == 400
+    assert "暂未开放" in response.json()["detail"]
+    assert posted_instances == []
+    assert restart_payloads == []
 
 
-def test_webai2api_login_start_creates_flow_profile_when_existing_worker_shares_gpt_instance(tmp_path: Path) -> None:
+def test_webai2api_login_start_blocks_disabled_media_provider_when_worker_is_shared(tmp_path: Path) -> None:
     posted_instances: list[Any] = []
     restart_payloads: list[Any] = []
     original_instances = [
@@ -13420,20 +13372,10 @@ def test_webai2api_login_start_creates_flow_profile_when_existing_worker_shares_
 
     response = client.post("/api/admin/onboarding/providers/google-flow/login", json={"newAccount": False})
 
-    assert response.status_code == 200
-    body = response.json()
-    assert body["providerId"] == "google-flow"
-    assert body["newAccount"] is True
-    assert body["workerName"] != "flow_shared"
-    assert body["instanceName"].startswith("gateway_google-flow_")
-    assert posted_instances
-    saved_instances = posted_instances[-1]
-    assert saved_instances[0] == original_instances[0]
-    new_instance = saved_instances[-1]
-    assert new_instance["name"] == body["instanceName"]
-    assert new_instance["userDataMark"] == body["workerName"]
-    assert new_instance["workers"] == [{"name": body["workerName"], "type": "google_flow"}]
-    assert restart_payloads == [{"loginMode": True, "workerName": body["workerName"]}]
+    assert response.status_code == 400
+    assert "暂未开放" in response.json()["detail"]
+    assert posted_instances == []
+    assert restart_payloads == []
 
 
 def test_webai2api_login_start_autostarts_sidecar_for_existing_worker_repair(tmp_path: Path) -> None:

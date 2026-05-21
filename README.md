@@ -1,6 +1,6 @@
 # WebAI Gateway
 
-WebAI Gateway 是一个独立的网页登录模型 API 网关：把 Qwen Web、DeepSeek Web、ChatGPT / Gemini / Sora 等网页登录模型包装成稳定的 OpenAI / Anthropic 兼容接口，让 OpenClaw、Hermes、Claude Code、Codex、KrisAI 等客户端像调用原生 API 一样使用网页登录模型。
+WebAI Gateway 是一个独立的网页登录模型 API 网关：把 Qwen Web、DeepSeek Web 和已验证的网页登录模型包装成稳定的 OpenAI / Anthropic 兼容接口，让 OpenClaw、Hermes、Claude Code、Codex、KrisAI 等客户端像调用原生 API 一样使用网页登录模型。
 
 它的核心价值不是简单转发，而是把“不稳定的网页对话”整理成“可验证、可接入、可工具调用”的标准 API：
 
@@ -25,7 +25,7 @@ WebAI Gateway 是一个独立的网页登录模型 API 网关：把 Qwen Web、D
 如果 WebAI Gateway 帮你少踩坑，可以通过作者的小店支持维护、文档和部署服务：
 [支持作者 / 服务咨询](https://pay.ldxp.cn/shop/FTIWLFHQ)。交流群：1105908706。
 
-本项目不是 OpenAI、Anthropic、Qwen、DeepSeek、ChatGPT、Gemini、Sora、WebAI2API 或 ds2api 的官方项目。使用网页登录模型和第三方 runtime 时，请遵守对应平台服务条款、账号规则和当地法律法规。
+本项目不是 OpenAI、Anthropic、Qwen、DeepSeek、ChatGPT、WebAI2API 或 ds2api 的官方项目。使用网页登录模型和第三方 runtime 时，请遵守对应平台服务条款、账号规则和当地法律法规。
 
 ## 启动
 
@@ -55,7 +55,7 @@ stop_webai_gateway.bat
 
 - 首页默认只展示当前已经实际验证可用的网页登录通路，避免把未验证站点当成可用产品能力。
 - DeepSeek Web、Qwen / 通义千问国际版、Qwen Coder：点击“打开授权浏览器”，在弹出的浏览器里登录。网关检测到真实登录态后才会显示已授权。
-- ChatGPT、Google Flow、Sora、Gemini：通过可选 WebAI2API adapter runtime 接入；点击“登录或修复账号”后 Gateway 会自动准备隔离 worker，完成网页登录授权并恢复 API 后即可检测和调用模型，不需要手动进入外部后台配置工作池。
+- ChatGPT：通过可选 WebAI2API adapter runtime 接入图片生成；点击“登录或修复账号”后 Gateway 会自动准备隔离 worker，完成网页登录授权并恢复 API 后即可检测和调用已验证模型，不需要手动进入外部后台配置工作池。
 - 授权完成后，在“可用模型”里复制模型 ID，填到 KrisAI、OpenClaw、Hermes 或 Claude Code。
 - “接入客户端”区域可以复制 OpenAI / Anthropic 兼容地址和 API Key，也可以重新生成本地网关令牌。
 
@@ -64,7 +64,7 @@ Gateway 首页优先展示统一接入、状态、授权和复制配置。外部
 ## 文档索引
 
 - 安装和单入口启动：[docs/installation.md](docs/installation.md)
-- 图片和视频生成：[docs/media-generation.md](docs/media-generation.md)
+- 图片生成：[docs/media-generation.md](docs/media-generation.md)
 - 可选 adapter runtime 说明：[docs/third-party-runtime.md](docs/third-party-runtime.md)
 - 架构和边界：[docs/architecture.md](docs/architecture.md)
 - 贡献规范：[CONTRIBUTING.md](CONTRIBUTING.md)
@@ -149,22 +149,17 @@ Claude Code Best 可在 `/login` 里选择 `Anthropic Compatible`，或写入 `~
 
 网页登录模型的输入预算由 `providerRuntime.promptMaxChars` 控制，默认 32000 字符。超过预算时会保留开头、WebAI Gateway 工具协议和最后的用户任务，压缩中间的大段技能列表、规则列表或历史上下文，避免网页模型在第一轮请求里长时间无输出。
 
-## 图片和视频生成
+## 图片生成
 
 Gateway 暴露 OpenAI-compatible 媒体接口：
 
 ```text
 POST /v1/images/generations
-POST /v1/videos
-GET /v1/videos/{video_id}
-GET /v1/videos/{video_id}/content
 ```
 
-图片生成建议优先使用 `gpt-image-2`，兼容 `gpt-image-1.5` 和 WebAI2API 暴露的 `google_flow/*` 模型。Gateway 会把参考图参数转成 WebAI2API 多模态消息，因此 Google Flow 图生图/参考图链路可以复用同一个 `/v1/images/generations` 包装；首页“图片生成测试”可以直接执行一次 smoke test，并预览返回图片。
+图片生成建议优先使用 `gpt-image-2`，兼容已验证的 `gpt-image-1.5`。Gateway 会把参考图参数转成 WebAI2API 多模态消息；首页“图片生成测试”可以直接执行一次 smoke test，并预览返回图片。
 
-首页默认展示 Google Flow、Sora 和 Gemini 媒体入口；第一次授权时 Gateway 会自动为对应站点创建独立 WebAI2API 登录 profile/worker，用户只需要完成网页登录并点击“恢复 API 并刷新”。
-
-视频生成使用 `sora-2`、`gemini/veo-3.1-generate-preview` 等 WebAI2API 暴露的视频模型，结果由 Gateway 做短期缓存并通过 `/v1/videos/{video_id}/content` 取回。当前最新 WebAI2API upstream 的 Google Flow adapter 标注为图片生成，视频请走 Sora 或 Gemini/Veo。完整请求示例和注意事项见 [docs/media-generation.md](docs/media-generation.md)。
+未通过真实链路验证的媒体模型当前先从用户入口和模型目录关闭，不作为开源首发能力宣传。
 
 ## 模型目录
 
@@ -185,7 +180,7 @@ deepseek-v4-pro
 
 默认 sidecar 地址是 `http://127.0.0.1:9331/v1`，可在控制台设置页通过 `providerRuntime.deepseekDs2apiBaseUrl` 调整。
 
-WebAI2API 支持的站点和模型会继续透传并合并到 `/v1/models`。模型元数据里会包含非标准字段：
+WebAI2API 支持且已验证开放的站点和模型会继续透传并合并到 `/v1/models`。未验证的媒体/视频模型会被过滤，避免用户误用。模型元数据里会包含非标准字段：
 
 ```json
 {
@@ -263,9 +258,6 @@ WebAI2API 支持的站点和模型会继续透传并合并到 `/v1/models`。模
 - `DELETE /api/admin/web-auth/credentials/{provider_id}`
 - `GET /v1/models`
 - `POST /v1/images/generations`
-- `POST /v1/videos`
-- `GET /v1/videos/{video_id}`
-- `GET /v1/videos/{video_id}/content`
 - `POST /v1/chat/completions`
 - `POST /v1/messages`
 - `POST /v1/messages/count_tokens`

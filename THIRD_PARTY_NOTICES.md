@@ -8,7 +8,7 @@ license file before publishing a packaged distribution.
 
 | Project | Purpose | License | Source |
 | --- | --- | --- | --- |
-| WebAI2API | Optional sidecar runtime for ChatGPT, Gemini, Sora, Google Flow, and related web providers | MIT | https://github.com/foxhui/WebAI2API |
+| WebAI2API | Optional sidecar runtime for selected web-login providers | MIT | https://github.com/foxhui/WebAI2API |
 | ds2api | Optional DeepSeek web runtime and oracle reference | GNU AGPL-3.0 | https://github.com/CJackHwang/ds2api |
 
 WebAI Gateway does not vendor either runtime in the public source tree. If a

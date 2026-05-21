@@ -281,6 +281,7 @@ PROVIDERS: dict[str, WebAuthProvider] = {
         models=_models_for("gemini_biz_text", "gemini_biz"),
         capabilities={"text": True, "image": True, "video": True},
         adapters=("gemini_biz_text", "gemini_biz"),
+        advertise_models=False,
     ),
     "nano-banana-free": WebAuthProvider(
         id="nano-banana-free",
@@ -311,6 +312,7 @@ PROVIDERS: dict[str, WebAuthProvider] = {
         models=_models_for("gemini_text", "gemini"),
         capabilities={"text": True, "image": True, "video": True},
         adapters=("gemini_text", "gemini"),
+        advertise_models=False,
     ),
     "zenmux": WebAuthProvider(
         id="zenmux",
@@ -398,6 +400,7 @@ PROVIDERS: dict[str, WebAuthProvider] = {
         models=_models_for("sora"),
         capabilities={"text": False, "image": False, "video": True},
         adapters=("sora",),
+        advertise_models=False,
     ),
     "google-flow": WebAuthProvider(
         id="google-flow",
@@ -408,6 +411,7 @@ PROVIDERS: dict[str, WebAuthProvider] = {
         models=_models_for("google_flow"),
         capabilities={"text": False, "image": True, "video": False},
         adapters=("google_flow",),
+        advertise_models=False,
     ),
     "doubao": WebAuthProvider(
         id="doubao",

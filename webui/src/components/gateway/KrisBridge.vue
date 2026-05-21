@@ -76,7 +76,7 @@ const gatewayBaseUrl = computed(() => `${window.location.origin}${onboarding.val
 const gatewayRootUrl = computed(() => gatewayBaseUrl.value.replace(/\/v1\/?$/, ''));
 const gatewayToken = computed(() => onboarding.value.gateway?.apiKey || '');
 
-const providerPriority = ['deepseek-web', 'qwen', 'qwen-coder', 'chatgpt', 'google-flow', 'sora', 'gemini'];
+const providerPriority = ['deepseek-web', 'qwen', 'qwen-coder', 'chatgpt'];
 const providers = computed(() => {
   const list = onboarding.value.providers || [];
   return [...list].sort((a, b) => {
@@ -420,7 +420,7 @@ function modelCapabilityLabels(model) {
     return labels;
   }
 
-  if (type === 'video' || modelId.includes('sora') || modelId.includes('video')) {
+  if (type === 'video' || modelId.includes('video')) {
     labels.push({ label: '视频', color: 'orange' });
     return labels;
   }
