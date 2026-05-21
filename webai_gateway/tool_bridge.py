@@ -346,6 +346,14 @@ _OPTIONAL_SCOPE_SELECTION_QUESTION_RE = re.compile(
     r")",
     re.IGNORECASE | re.DOTALL,
 )
+_LATEST_USER_FORBIDS_TOOL_CALL_RE = re.compile(
+    r"\b(?:do\s+not|don't|dont|never|no\s+need\s+to|without)\s+"
+    r"(?:call|use|invoke|request)\s+(?:any\s+)?tools?\b"
+    r"|\b(?:answer|reply|respond)\s+(?:normally|directly|only)\b.{0,80}\b(?:without|no)\s+tools?\b"
+    r"|(?:不要|别|无需|不需要|不用|禁止|停止|别再|不要再).{0,24}(?:调用|使用|请求|发起).{0,12}(?:工具|tool)"
+    r"|(?:只|直接).{0,16}(?:回复|回答).{0,40}(?:不要|别).{0,16}(?:调用|使用).{0,12}(?:工具|tool)",
+    re.IGNORECASE | re.DOTALL,
+)
 _EXPLICIT_ASK_USER_TASK_RE = re.compile(
     r"\b(?:ask\s+(?:me|the\s+user)|clarify\s+with\s+(?:me|the\s+user)|interview\s+(?:me|the\s+user)|"
     r"ask\s+questions?)\b|(?:问我|向我提问|询问用户|先问|澄清问题|访谈)",
@@ -705,6 +713,7 @@ class ToolBridgeContext:
     tools: list[ToolSpec]
     options: ToolBridgeConfig
     task_text: str = ""
+    latest_user_text: str = ""
     has_tool_loop: bool = False
     recent_tool_call_names: tuple[str, ...] = ()
     recent_tool_call_ids: tuple[str, ...] = ()
@@ -913,6 +922,7 @@ def prefer_local_tools_for_local_agent_task(
     tool_choice: Any = None,
 ) -> ToolBridgeContext:
     latest = _effective_human_task_text(messages)
+    latest_user = _latest_user_text(messages)
     task_messages = _messages_for_current_human_task(messages)
     recent_call_drafts = _recent_tool_call_drafts(task_messages) if isinstance(task_messages, list) else []
     has_tool_loop = _messages_have_tool_loop(task_messages) or any(
@@ -991,6 +1001,7 @@ def prefer_local_tools_for_local_agent_task(
                 tools=[],
                 options=context.options,
                 task_text=latest,
+                latest_user_text=latest_user,
                 has_tool_loop=has_tool_loop,
                 recent_tool_call_names=recent_tool_call_names,
                 recent_tool_call_ids=recent_tool_call_ids,
@@ -1023,6 +1034,7 @@ def prefer_local_tools_for_local_agent_task(
             tools=context.tools,
             options=context.options,
             task_text=task_text,
+            latest_user_text=latest_user,
             has_tool_loop=has_tool_loop,
             recent_tool_call_names=recent_tool_call_names,
             recent_tool_call_ids=recent_tool_call_ids,
@@ -1093,6 +1105,7 @@ def prefer_local_tools_for_local_agent_task(
                 tools=[],
                 options=context.options,
                 task_text=latest,
+                latest_user_text=latest_user,
                 has_tool_loop=has_tool_loop,
                 recent_tool_call_names=recent_tool_call_names,
                 recent_tool_call_ids=recent_tool_call_ids,
@@ -1124,6 +1137,7 @@ def prefer_local_tools_for_local_agent_task(
             tools=context.tools,
             options=context.options,
             task_text=latest,
+            latest_user_text=latest_user,
             has_tool_loop=has_tool_loop,
             recent_tool_call_names=recent_tool_call_names,
             recent_tool_call_ids=recent_tool_call_ids,
@@ -1161,6 +1175,7 @@ def prefer_local_tools_for_local_agent_task(
         tools=local_tools,
         options=context.options,
         task_text=latest,
+        latest_user_text=latest_user,
         has_tool_loop=has_tool_loop,
         recent_tool_call_names=recent_tool_call_names,
         recent_tool_call_ids=recent_tool_call_ids,
@@ -1826,8 +1841,11 @@ def _build_ds2api_tool_call_instructions(tool_names: list[str]) -> str:
         "4) input must be an object, even when it is empty.\n"
         "5) Use only the parameter names in the tool schema. Do not invent fields.\n"
         "6) Do not output explanations, role markers, internal monologue, XML, or DSML.\n"
-        "7) If you call a tool, the first non-whitespace characters must be ```tool_json.\n"
-        "8) Never output partial protocol markers such as <|tool_calls>.\n\n"
+        "7) Do not call a tool merely because tools are available. If the latest user request can be answered from conversation context or a prior Tool result, answer normally with no tool_json block.\n"
+        "8) After a successful Tool result, use that observation to answer. Request another tool only when more data or another action is truly necessary.\n"
+        "9) If the latest user explicitly says not to call tools, answer normally unless this request explicitly requires or forces a tool call.\n"
+        "10) If you call a tool, the first non-whitespace characters must be ```tool_json.\n"
+        "11) Never output partial protocol markers such as <|tool_calls>.\n\n"
         "PARAMETER SHAPES:\n"
         "- string => \"value\"\n"
         "- object => {\"field\":\"value\"}\n"
@@ -3170,6 +3188,9 @@ def parse_tool_response(text: str, context: ToolBridgeContext) -> BridgeResult:
     normalized, error = _normalize_candidates(candidates, context)
     if error is not None:
         return finish(content=raw, tool_calls=[], error=error, raw_content=raw)
+    latest_no_tool_error = _latest_user_forbids_tool_call_error(normalized, context)
+    if latest_no_tool_error is not None:
+        return finish(content=raw, tool_calls=[], error=latest_no_tool_error, raw_content=raw)
     if (
         used_bare
         or used_embedded_json
@@ -3191,6 +3212,27 @@ def parse_tool_response(text: str, context: ToolBridgeContext) -> BridgeResult:
     clean = _LEGACY_FUNCTION_CALLS_RE.sub("", clean)
     clean = _TOOL_CODE_RE.sub("", clean)
     return finish(content=clean.strip() if not normalized else "", tool_calls=normalized, raw_content=raw)
+
+
+def _latest_user_forbids_tool_call_error(
+    tool_calls: list[ToolCallDraft],
+    context: ToolBridgeContext,
+) -> BridgeError | None:
+    if not tool_calls:
+        return None
+    if context.tool_choice_policy.is_required():
+        return None
+    latest = context.latest_user_text or context.task_text or ""
+    if not _LATEST_USER_FORBIDS_TOOL_CALL_RE.search(latest):
+        return None
+    return BridgeError(
+        "tool_call_against_latest_user_instruction",
+        (
+            "The latest user request explicitly said not to call tools after a tool result. "
+            "Use the existing conversation and tool result to answer normally with no tool_json block."
+        ),
+        repairable=True,
+    )
 
 
 def to_openai_tool_calls(
@@ -6553,6 +6595,20 @@ def build_repair_messages(messages: list[dict[str, Any]], bad_text: str, error: 
             "if the original tool manifest listed them. If more evidence is required, request exactly one materially different "
             "still-allowed tool/input. Prefer Edit/MultiEdit/Write for a real change when the evidence is enough. If the evidence "
             "is enough for a final answer, provide a substantive final answer with no tool_json block."
+        )
+        return [
+            *messages,
+            {"role": "assistant", "content": (bad_text or "")[:4000]},
+            {"role": "user", "content": repair_instruction},
+        ]
+    if error_kind == "tool_call_against_latest_user_instruction":
+        repair_instruction = (
+            "Previous tool JSON requested another tool after the latest user explicitly asked not to call tools.\n"
+            f"Error code: {error_kind}.\n"
+            f"Error: {reason}.\n"
+            "Do not output tool_json on this retry. Do not call, request, or simulate any tool. "
+            "Use the existing conversation and the latest successful Tool result to answer the user's latest request directly. "
+            "If the user requested an exact short reply, output that reply only."
         )
         return [
             *messages,

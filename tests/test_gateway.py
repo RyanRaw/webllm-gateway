@@ -3474,6 +3474,59 @@ def test_strict_tool_bridge_accepts_calls_array_and_strips_content() -> None:
     assert json.loads(tool_call["function"]["arguments"]) == {"path": "README.md"}
 
 
+def test_tool_bridge_retries_tool_call_when_latest_user_forbids_tools_after_result() -> None:
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "echo_tool",
+                "description": "Echo text",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"text": {"type": "string"}},
+                    "required": ["text"],
+                },
+            },
+        }
+    ]
+    messages = [
+        {"role": "user", "content": "请调用 echo_tool，text=webai_probe_1739"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_probe_1739",
+                    "type": "function",
+                    "function": {"name": "echo_tool", "arguments": '{"text":"webai_probe_1739"}'},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_probe_1739", "content": '{"result":"tool-result-ok"}'},
+        {"role": "user", "content": "工具结果已经返回。不要再调用工具，只回复 final-ok。"},
+    ]
+    context = build_context(
+        tools,
+        ToolBridgeConfig(exposure_policy="all", tool_profile="all"),
+        tool_choice="auto",
+    )
+    context = prefer_local_tools_for_local_agent_task(context, messages, tool_choice="auto")
+
+    result = parse_tool_response(
+        '```tool_json\n{"calls":[{"id":"call_again","name":"echo_tool","input":{"text":"final-ok"}}]}\n```',
+        context,
+    )
+
+    assert result.tool_calls == []
+    assert result.error is not None
+    assert result.error.kind == "tool_call_against_latest_user_instruction"
+    assert result.error.repairable is True
+
+    repair = build_repair_messages(messages, result.raw_content, result.error)[-1]["content"]
+    assert "Do not output tool_json" in repair
+    assert "latest successful Tool result" in repair
+
+
 def test_prompt_tool_bridge_hides_runtime_tools_for_any_client() -> None:
     seen: dict[str, Any] = {}
 
@@ -17229,6 +17282,9 @@ def test_tool_prompt_all_profile_uses_ds2api_schema_and_examples() -> None:
     assert "You have access to these tools:" in prompt
     assert "Tool: Agent" in prompt
     assert "TOOL CALL FORMAT - FOLLOW EXACTLY" in prompt
+    assert "Do not call a tool merely because tools are available" in prompt
+    assert "After a successful Tool result" in prompt
+    assert "If the latest user explicitly says not to call tools" in prompt
     assert "Available tools (allowed names only)" not in prompt
     assert '"name": "Edit"' in prompt
     assert '"old_string": "foo"' in prompt
