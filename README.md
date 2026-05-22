@@ -1,6 +1,6 @@
 # WebLLM Gateway
 
-WebLLM Gateway 是一个独立的网页登录模型 API 网关：把 Qwen Web、DeepSeek Web 和已验证的网页登录模型包装成 OpenAI / Anthropic 兼容、可工具调用的标准 API，让 OpenClaw、Hermes、Claude Code、Codex 等客户端像调用原生模型 API 一样使用网页账号。
+WebLLM Gateway 是一个独立的网页登录模型 API 网关：把 Qwen Web、DeepSeek Web 和已验证的网页登录模型包装成 OpenAI / Anthropic 兼容、可工具调用的标准 API，让 OpenClaw、Hermes、Claude Code、Codex 等客户端像调用原生模型 API 一样使用网页账号。Qwen 3.7 系列已经调通，Qwen 3.7 Max / Plus Preview 可通过 qwen-web 直连链路接入。
 
 > Turn web AI accounts into OpenAI/Anthropic-compatible, tool-callable APIs.
 
@@ -25,6 +25,7 @@ WebLLM Gateway 是一个独立的网页登录模型 API 网关：把 Qwen Web、
 ## 项目优势
 
 - **协议稳定**：优先保持 OpenAI / Anthropic 兼容响应结构，工具调用返回标准 `tool_calls` 或 `tool_use`，不把网页模型的自然语言幻想当成真实工具结果。
+- **Qwen 3.7 已就绪**：Qwen 3.7 Max、Qwen 3.7 Max Preview、Qwen 3.7 Plus Preview 已纳入直连模型目录和回归验证，适合优先作为 Claude Code、Codex、OpenClaw、Hermes 的编程/工具调用模型测试入口。
 - **边界清楚**：Gateway 不接管 agent loop、不执行本地工具、不绕过客户端权限系统，适合作为 OpenClaw、Hermes、Claude Code、Codex 等客户端前面的统一协议层。
 - **可对标验证**：DeepSeek 链路以 ds2api 作为外部 oracle 对照；Qwen 链路持续用真实请求和 parity/oracle 测试回归。
 - **面向小白**：前端优先展示授权、模型检测、接入地址、API Key 和模型 ID；高级 adapter runtime 页面只作为诊断入口。
@@ -147,7 +148,7 @@ OpenAI 兼容客户端：
 ```text
 base_url = http://127.0.0.1:8610/v1
 api_key = local-dev-key
-model = qwen-web/qwen3.6-max-preview
+model = qwen-web/qwen3.7-max-preview
 ```
 
 Claude Code / Anthropic 兼容客户端可使用：
@@ -155,7 +156,7 @@ Claude Code / Anthropic 兼容客户端可使用：
 ```text
 base_url = http://127.0.0.1:8610/v1
 api_key = local-dev-key
-model = qwen-web/qwen3.6-max-preview
+model = qwen-web/qwen3.7-max-preview
 endpoint = /v1/messages
 ```
 
@@ -166,9 +167,9 @@ Claude Code Best 可在 `/login` 里选择 `Anthropic Compatible`，或写入 `~
   "env": {
     "ANTHROPIC_BASE_URL": "http://127.0.0.1:8610/v1",
     "ANTHROPIC_AUTH_TOKEN": "local-dev-key",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "qwen-web/qwen3.5-plus",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL": "qwen-web/qwen3.6-plus",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL": "qwen-web/qwen3.6-max-preview"
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "qwen-web/qwen3.7-plus-preview",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "qwen-web/qwen3.7-max",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "qwen-web/qwen3.7-max-preview"
   }
 }
 ```
@@ -211,9 +212,12 @@ POST /v1/images/generations
 
 ## 模型目录
 
-Qwen / 通义千问国际版本地直连模型：
+Qwen / 通义千问国际版本地直连模型，首推已经调通的 Qwen 3.7 系列：
 
 ```text
+qwen-web/qwen3.7-max-preview
+qwen-web/qwen3.7-max
+qwen-web/qwen3.7-plus-preview
 qwen-web/qwen3.6-max-preview
 qwen-web/qwen3.6-plus
 qwen-web/qwen3.5-plus

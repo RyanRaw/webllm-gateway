@@ -4931,6 +4931,13 @@ def _append_extra_model_payloads(data: dict[str, Any], payloads: list[dict[str, 
     if not payloads:
         return data
     items = data.get("data") if isinstance(data.get("data"), list) else []
+    extra_by_id: dict[str, dict[str, Any]] = {}
+    for item in payloads:
+        if not isinstance(item, dict):
+            continue
+        model_id = normalize_model_id(item.get("id"))
+        if model_id:
+            extra_by_id[model_id] = {**item, "id": model_id}
     out: list[Any] = []
     seen: set[Any] = set()
     for item in items:
@@ -4941,7 +4948,8 @@ def _append_extra_model_payloads(data: dict[str, Any], payloads: list[dict[str, 
         if not model_id or model_id in seen:
             continue
         seen.add(model_id)
-        out.append(_enrich_model_payload({**item, "id": model_id}))
+        source = extra_by_id.get(model_id) or {**item, "id": model_id}
+        out.append(_enrich_model_payload(source))
     for item in payloads:
         if not isinstance(item, dict):
             continue

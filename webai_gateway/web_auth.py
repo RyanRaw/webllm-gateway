@@ -83,6 +83,9 @@ WEBAI2API_MODELS: dict[str, tuple[str, ...]] = {
         "deepseek-thinking-search-expert",
     ),
     "qwen_web": (
+        "qwen3.7-max-preview",
+        "qwen3.7-max",
+        "qwen3.7-plus-preview",
         "qwen3.6-max",
         "qwen3.6-plus",
         "qwen3.6-flash",
@@ -361,8 +364,11 @@ PROVIDERS: dict[str, WebAuthProvider] = {
         name="Qwen / 通义千问国际版",
         login_url="https://chat.qwen.ai/",
         status="available",
-        description="对标 OpenClaw Zero Token 的 qwen-web：可在本机授权浏览器登录 Qwen，并直接使用 qwen-web/ 前缀模型。",
+        description="Qwen Web 直连链路已调通 Qwen 3.7 系列；可在本机授权浏览器登录 Qwen，并直接使用 qwen-web/ 前缀模型。",
         models=(
+            "qwen-web/qwen3.7-max-preview",
+            "qwen-web/qwen3.7-max",
+            "qwen-web/qwen3.7-plus-preview",
             "qwen-web/qwen3.6-max-preview",
             "qwen-web/qwen3.6-plus",
             "qwen-web/qwen3.5-plus",

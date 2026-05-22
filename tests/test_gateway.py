@@ -1313,11 +1313,14 @@ def test_models_returns_configured_model_when_upstream_models_unavailable() -> N
     assert "deepseek-v4-pro[1m]" not in model_ids
     assert "deepseek-web/deepseek-chat" not in model_ids
     assert "deepseek" not in model_ids
+    assert "qwen-web/qwen3.7-max-preview" in model_ids
+    assert "qwen-web/qwen3.7-max" in model_ids
+    assert "qwen-web/qwen3.7-plus-preview" in model_ids
     assert "qwen-web/qwen3.6-max-preview" in model_ids
     assert "qwen-web/qwen3.6-plus" in model_ids
     assert "qwen-web/qwen3-max" in model_ids
     assert "qwen-web/qwen3.6-max" not in model_ids
-    qwen_preview = next(item for item in body["data"] if item["id"] == "qwen-web/qwen3.6-max-preview")
+    qwen_preview = next(item for item in body["data"] if item["id"] == "qwen-web/qwen3.7-max-preview")
     assert qwen_preview["capabilities"]["tool_bridge"] is True
     assert qwen_preview["capabilities"]["supports_native_tools"] is False
     assert "gpt-instant" not in model_ids
@@ -14177,6 +14180,8 @@ def test_vendored_webai2api_frontend_has_gateway_bridge_page() -> None:
     assert "模型不可用原因" in bridge_source
     assert "accountValidationFailures" in bridge_source
     assert "模型验证失败" in bridge_source
+    assert "Qwen 3.7 系列已调通" in bridge_source
+    assert "Qwen 3.7 Max / Plus Preview 已纳入直连链路" in bridge_source
     assert "把网页账号变成可工具调用的 API，实现养虾养马自由！" in bridge_source
     assert "支持在 OpenClaw、Hermes、Claude Code、Codex 或其它兼容 OpenAI 和 Anthropic API 的客户端调用。" in bridge_source
     assert "Gateway 地址" not in bridge_source
@@ -14221,6 +14226,8 @@ def test_public_intro_and_visible_static_ui_do_not_reference_internal_krisai() -
 
     assert "KrisAI" not in readme_source
     assert "KrisAI" not in static_source
+    assert "Qwen 3.7 系列已经调通" in readme_source
+    assert "Qwen 3.7 系列已调通" in static_source
     assert "![WebLLM Gateway 核心界面](docs/assets/webllm-gateway-home.png)" in readme_source
     assert screenshot.exists()
     assert screenshot.stat().st_size > 100_000
@@ -14257,6 +14264,7 @@ def test_open_source_release_materials_are_present() -> None:
     assert "docs/installation.md" in readme
     assert "docs/media-generation.md" in readme
     assert "docs/third-party-runtime.md" in readme
+    assert "qwen-web/qwen3.7-max-preview" in readme
     assert "POST /v1/images/generations" in media
     assert "gpt-image-2" in media
     assert "WebAI2API" in third_party and "MIT" in third_party
@@ -15491,6 +15499,10 @@ def test_web_auth_providers_cover_webai2api_supported_sites(tmp_path: Path) -> N
     assert providers["qwen"]["capabilities"] == {"text": True, "image": False, "video": False}
     assert "qwen_web" in providers["qwen"]["adapters"]
     assert "qwen_cn_web" in providers["qwen-cn"]["adapters"]
+    assert "Qwen 3.7 系列" in providers["qwen"]["description"]
+    assert "qwen-web/qwen3.7-max-preview" in providers["qwen"]["models"]
+    assert "qwen-web/qwen3.7-max" in providers["qwen"]["models"]
+    assert "qwen-web/qwen3.7-plus-preview" in providers["qwen"]["models"]
     assert "qwen-web/qwen3.6-max-preview" in providers["qwen"]["models"]
     assert "qwen-web/qwen3.6-plus" in providers["qwen"]["models"]
     assert "qwen-web/qwen3-max" in providers["qwen"]["models"]

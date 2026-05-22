@@ -982,9 +982,12 @@ onMounted(loadOnboarding);
   <div class="onboarding-shell">
     <section class="hero-panel">
       <div class="hero-copy">
-        <a-tag color="blue">Local WebAI Access</a-tag>
+        <div class="hero-tags">
+          <a-tag color="blue">Local WebAI Access</a-tag>
+          <a-tag color="green">Qwen 3.7 系列已调通</a-tag>
+        </div>
         <h1>把网页账号变成可工具调用的 API，实现养虾养马自由！</h1>
-        <p>登录网页账号，自动检测可用模型，支持在 OpenClaw、Hermes、Claude Code、Codex 或其它兼容 OpenAI 和 Anthropic API 的客户端调用。</p>
+        <p>登录网页账号，自动检测可用模型；Qwen 3.7 Max / Plus Preview 已纳入直连链路，支持在 OpenClaw、Hermes、Claude Code、Codex 或其它兼容 OpenAI 和 Anthropic API 的客户端调用。</p>
         <div class="hero-actions">
           <a-button type="primary" size="large" :loading="actionLoading" @click="handleStartLogin">
             <template #icon><LoginOutlined /></template>
@@ -1571,6 +1574,13 @@ onMounted(loadOnboarding);
   color: #bed8d5;
   font-size: 15px;
   max-width: 740px;
+}
+
+.hero-tags {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .hero-copy :deep(.ant-tag) {
