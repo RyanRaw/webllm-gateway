@@ -6330,7 +6330,7 @@ def _unavailable_local_execution_text(bridge_context: Any) -> str:
         suffix = " ..." if len(allowed) > 16 else ""
         parts.append(f"当前允许工具：{', '.join(allowed[:16])}{suffix}")
         parts.append("这些工具只能完成对应的询问、读写文件或网页获取能力，不能启动本机软件。")
-    parts.append("请在有道龙虾里启用 shell / terminal / open_app / 电脑控制类工具后重试，或先手动打开应用再继续。")
+    parts.append("请在当前客户端启用 shell / terminal / open_app / 电脑控制类工具后重试，或先手动打开应用再继续。")
     return "\n".join(parts)
 
 

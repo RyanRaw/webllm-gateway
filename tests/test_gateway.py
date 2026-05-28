@@ -26787,7 +26787,7 @@ def test_qwen_web_repairs_named_lowercase_tool_intent_for_youdao_tools(tmp_path:
     assert json.loads(tool_call["function"]["arguments"]) == {"file_path": "README.md"}
 
 
-def test_qwen_web_stream_does_not_reparse_retry_exhausted_diagnostic_for_youdao_open_app(tmp_path: Path) -> None:
+def test_qwen_web_stream_does_not_reparse_retry_exhausted_diagnostic_for_open_app(tmp_path: Path) -> None:
     seen_payloads: list[dict[str, Any]] = []
 
     class RepeatedNamedToolIntentQwenClient:
@@ -26855,6 +26855,8 @@ def test_qwen_web_stream_does_not_reparse_retry_exhausted_diagnostic_for_youdao_
     assert "当前允许工具：" in content
     assert "read" in content
     assert "web_fetch" in content
+    assert "请在当前客户端启用 shell / terminal / open_app / 电脑控制类工具后重试" in content
+    assert "有道龙虾" not in content
     assert "上游模型请求了当前未允许" not in content
     assert "Gateway 已拒绝该工具 JSON" not in content
 
