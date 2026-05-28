@@ -157,6 +157,15 @@ _PRIOR_TOOL_RESULT_REFERENCE_RE = re.compile(
     r".{0,100}(?:\u5de5\u5177\u7ed3\u679c|\u7ed3\u679c|\u8f93\u51fa|\u8bc1\u636e|\u56de\u590d)",
     re.IGNORECASE | re.DOTALL,
 )
+_EXPLICIT_LOCAL_EXECUTION_TASK_RE = re.compile(
+    r"(?:"
+    r"(?:\u5e2e\u6211|\u8bf7|\u9ebb\u70e6\u4f60|\u7ed9\u6211|\u5e2e\u5fd9)?"
+    r".{0,16}(?:\u6253\u5f00|\u542f\u52a8|\u8fd0\u884c|\u5524\u8d77|\u6267\u884c|open|launch|start|run)"
+    r".{0,48}(?:QQ|\u5fae\u4fe1|WeChat|Chrome|Edge|Safari|Codex|Claude|Cursor|VS\s*Code|"
+    r"\u7535\u8111|\u672c\u673a|\u684c\u9762|\u5e94\u7528|\u8f6f\u4ef6|\u7a0b\u5e8f|app|desktop)"
+    r")",
+    re.IGNORECASE | re.DOTALL,
+)
 _BARE_FUNCTION_CALL_LINE_RE = re.compile(
     r"^\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*(?:__[A-Za-z0-9_]+)*)\s*\((?P<args>.*)\)\s*$"
 )
@@ -5017,6 +5026,8 @@ def _text_explicitly_starts_new_task_after_tool_loop(text: str) -> bool:
         return True
     if _looks_like_project_context_reset_task(stripped):
         return True
+    if _looks_like_explicit_local_execution_task(stripped):
+        return True
     if any(mark in stripped for mark in ("?", "？", "吗", "呢")):
         return True
     if re.search(
@@ -5026,6 +5037,13 @@ def _text_explicitly_starts_new_task_after_tool_loop(text: str) -> bool:
     ):
         return True
     return len(stripped) >= 80
+
+
+def _looks_like_explicit_local_execution_task(text: str) -> bool:
+    value = re.sub(r"\s+", " ", (text or "").strip())
+    if not value or len(value) > 240:
+        return False
+    return bool(_EXPLICIT_LOCAL_EXECUTION_TASK_RE.search(value))
 
 
 def _message_is_skill_payload_after_tool_result(messages: list[Any], index: int) -> bool:

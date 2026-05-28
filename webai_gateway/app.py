@@ -6296,10 +6296,18 @@ def _controller_retry_exhausted_text(error: BridgeError, *, bridge_context: Any)
 
 
 def _bridge_context_needs_unavailable_local_execution(bridge_context: Any) -> bool:
-    task = str(getattr(bridge_context, "task_text", "") or "")
-    if not _LOCAL_EXECUTION_ACTION_RE.search(task):
+    task = _bridge_context_local_execution_task_text(bridge_context)
+    if not task:
         return False
     return not _bridge_context_has_local_execution_tool(bridge_context)
+
+
+def _bridge_context_local_execution_task_text(bridge_context: Any) -> str:
+    for attr in ("latest_user_text", "task_text"):
+        task = str(getattr(bridge_context, attr, "") or "")
+        if _LOCAL_EXECUTION_ACTION_RE.search(task):
+            return task
+    return ""
 
 
 def _bridge_context_has_local_execution_tool(bridge_context: Any) -> bool:
@@ -6311,7 +6319,7 @@ def _bridge_context_has_local_execution_tool(bridge_context: Any) -> bool:
 
 
 def _unavailable_local_execution_text(bridge_context: Any) -> str:
-    task = str(getattr(bridge_context, "task_text", "") or "")
+    task = _bridge_context_local_execution_task_text(bridge_context) or str(getattr(bridge_context, "task_text", "") or "")
     target = _local_execution_target_from_task(task)
     allowed = sorted(str(tool.name) for tool in getattr(bridge_context, "tools", []) if str(getattr(tool, "name", "") or ""))
     parts = [
