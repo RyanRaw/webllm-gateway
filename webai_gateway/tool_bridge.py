@@ -593,6 +593,8 @@ _LOCAL_AGENT_TOOL_NAMES = frozenset(
         "read",
         "skill",
         "showwidget",
+        "openapp",
+        "launchapp",
         "webfetch",
         "websearch",
         "write",
@@ -1314,6 +1316,93 @@ def build_local_repo_preflight_tool_call(context: ToolBridgeContext) -> ToolCall
         name=tool.name,
         input={_shell_command_key(tool): command},
     )
+
+
+def build_local_execution_preflight_tool_call(context: ToolBridgeContext) -> ToolCallDraft | None:
+    if not context.enabled:
+        return None
+    task_text = (context.latest_user_text or context.task_text or "").strip()
+    if not _task_explicitly_requests_local_execution(task_text):
+        return None
+    tool = _select_local_execution_tool(context.tools)
+    if tool is None:
+        return None
+    target = _local_execution_target_from_task_text(task_text)
+    command = _local_execution_open_command(target)
+    if not command:
+        return None
+    return ToolCallDraft(
+        id="call_web_local_action_1",
+        name=tool.name,
+        input={_shell_command_key(tool): command},
+    )
+
+
+def _select_local_execution_tool(tools: list[ToolSpec]) -> ToolSpec | None:
+    by_compact = {_compact_tool_name(tool.name): tool for tool in tools if tool.name}
+    for compact in ("showwidget", "openapp", "launchapp", "shell", "terminal", "bash", "powershell", "cmd"):
+        tool = by_compact.get(compact)
+        if tool is not None and _is_shell_execution_tool(tool, tool.name):
+            return tool
+    return _select_shell_execution_tool(tools)
+
+
+def _local_execution_target_from_task_text(text: str) -> str:
+    value = text or ""
+    lowered = value.lower()
+    aliases = (
+        ("visual studio code", "Visual Studio Code"),
+        ("vs code", "Visual Studio Code"),
+        ("vscode", "Visual Studio Code"),
+        ("wechat", "WeChat"),
+        ("\u5fae\u4fe1", "WeChat"),
+        ("codex", "Codex"),
+        ("claude", "Claude"),
+        ("cursor", "Cursor"),
+        ("chrome", "Chrome"),
+        ("edge", "Edge"),
+        ("safari", "Safari"),
+        ("qq", "QQ"),
+    )
+    for marker, target in aliases:
+        if marker.lower() in lowered:
+            return target
+    match = re.search(
+        r"(?:\u6253\u5f00|\u542f\u52a8|\u8fd0\u884c|\u5524\u8d77|\u6267\u884c|open|launch|start|run)"
+        r"[\s\uff0c,.:：;；!！?？]*(?:\u6211(?:\u7684)?|\u7535\u8111(?:\u7684)?|\u672c\u673a(?:\u7684)?|\u672c\u5730(?:\u7684)?|app|application)?"
+        r"[\s\uff0c,.:：;；!！?？]*(?P<target>[A-Za-z][A-Za-z0-9_. -]{1,48}|[\u4e00-\u9fff]{2,16})",
+        value,
+        re.IGNORECASE,
+    )
+    if not match:
+        return "app"
+    target = re.sub(r"[\s\uff0c\u3002,.:：;；!！?？]+$", "", match.group("target").strip())
+    return target or "app"
+
+
+def _local_execution_open_command(target: str) -> str:
+    app_name = (target or "app").strip() or "app"
+    scheme = re.sub(r"[^a-z0-9]+", "", app_name.lower())
+    if app_name == "Visual Studio Code":
+        scheme = "vscode"
+    elif app_name == "WeChat":
+        scheme = "wechat"
+    elif app_name == "QQ":
+        scheme = "qq"
+    app_arg = shlex.quote(app_name)
+    scheme_url = f"{scheme}://" if scheme and scheme != "app" else ""
+    commands = [f"open -a {app_arg}"]
+    if scheme_url:
+        quoted_url = shlex.quote(scheme_url)
+        commands.extend(
+            [
+                f"open {quoted_url}",
+                f"xdg-open {quoted_url}",
+                f"cmd /c start \"\" {quoted_url}",
+            ]
+        )
+    commands.append(f"echo {shlex.quote(f'{app_name} not found via open command')}")
+    return " || ".join(commands)
 
 
 _NON_SKILL_SLASH_COMMANDS = frozenset(
@@ -8468,6 +8557,8 @@ def _is_shell_execution_tool(tool: ToolSpec | None, name: str) -> bool:
         "powershell",
         "cmd",
         "showwidget",
+        "openapp",
+        "launchapp",
     }:
         return True
     if not tool or not _has_shell_command_property(tool):

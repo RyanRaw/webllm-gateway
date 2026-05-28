@@ -5313,7 +5313,7 @@ def _local_preflight_response(app: FastAPI, body: dict[str, Any], model: str, br
     preflight_data = build_preflight_chat_response(model, bridge_context)
     if preflight_data is None:
         return None
-    _record_tool_bridge_event(app, "local_repo_preflight", model=model, **_tool_call_event_fields(preflight_data))
+    _record_tool_bridge_event(app, _preflight_event_kind(preflight_data), model=model, **_tool_call_event_fields(preflight_data))
     if bool(body.get("stream")):
         choices = preflight_data.get("choices") if isinstance(preflight_data.get("choices"), list) else []
         msg = choices[0].get("message") if choices and isinstance(choices[0], dict) else {}
@@ -5323,6 +5323,18 @@ def _local_preflight_response(app: FastAPI, body: dict[str, Any], model: str, br
             media_type="text/event-stream",
         )
     return JSONResponse(preflight_data)
+
+
+def _preflight_event_kind(data: dict[str, Any]) -> str:
+    choices = data.get("choices") if isinstance(data.get("choices"), list) else []
+    choice0 = choices[0] if choices and isinstance(choices[0], dict) else {}
+    message = choice0.get("message") if isinstance(choice0.get("message"), dict) else {}
+    tool_calls = message.get("tool_calls") if isinstance(message.get("tool_calls"), list) else []
+    call0 = tool_calls[0] if tool_calls and isinstance(tool_calls[0], dict) else {}
+    call_id = str(call0.get("id") or "")
+    if call_id.startswith("call_web_local_action_"):
+        return "local_execution_preflight"
+    return "local_repo_preflight"
 
 
 def _skill_loader_preflight_response(

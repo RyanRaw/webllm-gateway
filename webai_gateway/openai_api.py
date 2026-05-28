@@ -22,6 +22,7 @@ from webai_gateway.tool_bridge import (
     BridgeResult,
     ToolBridgeContext,
     build_context,
+    build_local_execution_preflight_tool_call,
     build_local_repo_preflight_tool_call,
     build_skill_loader_preflight_tool_call,
     build_repair_messages,
@@ -350,7 +351,9 @@ def _latest_recoverable_local_agent_task_text(messages: Any) -> str:
 
 
 def build_preflight_chat_response(model: str, bridge_context: ToolBridgeContext) -> dict[str, Any] | None:
-    call = build_local_repo_preflight_tool_call(bridge_context)
+    call = build_local_execution_preflight_tool_call(bridge_context)
+    if call is None:
+        call = build_local_repo_preflight_tool_call(bridge_context)
     if call is None:
         return None
     return _tool_call_preflight_chat_response(model, bridge_context, call)
