@@ -6723,14 +6723,17 @@ def _call_deepseek_ds2api_with_retry(
 
 
 def _deepseek_web_chat(app: FastAPI, client: httpx.Client, body: dict[str, Any], config: GatewayConfig) -> Response:
-    credential = app.state.credential_store.get("deepseek-web")
-    if not is_credential_authorized("deepseek-web", credential):
-        raise HTTPException(status_code=424, detail=_provider_auth_required_detail("DeepSeek Web"))
     payload, bridge, allowed_tools, bridge_context = _build_deepseek_direct_payload(body, config)
     model = str(payload.get("model") or DEEPSEEK_DEFAULT_MODEL)
     skill_preflight = _skill_loader_preflight_response(app, model, bridge_context, require_namespaced_slash=True)
     if skill_preflight is not None:
         return skill_preflight
+    preflight = _local_preflight_response(app, body, model, bridge_context)
+    if preflight is not None:
+        return preflight
+    credential = app.state.credential_store.get("deepseek-web")
+    if not is_credential_authorized("deepseek-web", credential):
+        raise HTTPException(status_code=424, detail=_provider_auth_required_detail("DeepSeek Web"))
     _record_completion_started_diagnostic(
         app,
         endpoint="/v1/chat/completions",
@@ -6916,9 +6919,6 @@ def _deepseek_web_chat_payload(app: FastAPI, client: httpx.Client, body: dict[st
 
 def _qwen_web_chat(app: FastAPI, client: httpx.Client, body: dict[str, Any], config: GatewayConfig) -> Response:
     account_id = _selected_direct_account_id(app, "qwen", body)
-    credential = _direct_credential_for_account(app, "qwen", account_id)
-    if not is_credential_authorized("qwen", credential):
-        raise HTTPException(status_code=424, detail=_provider_auth_required_detail("Qwen Web"))
     payload, bridge, allowed_tools, bridge_context = _build_direct_payload(
         body,
         config,
@@ -6932,6 +6932,9 @@ def _qwen_web_chat(app: FastAPI, client: httpx.Client, body: dict[str, Any], con
     preflight = _local_preflight_response(app, body, model, bridge_context)
     if preflight is not None:
         return preflight
+    credential = _direct_credential_for_account(app, "qwen", account_id)
+    if not is_credential_authorized("qwen", credential):
+        raise HTTPException(status_code=424, detail=_provider_auth_required_detail("Qwen Web"))
     _record_completion_started_diagnostic(
         app,
         endpoint="/v1/chat/completions",
@@ -7161,9 +7164,6 @@ def _qwen_coder_chat_payload(app: FastAPI, client: httpx.Client, body: dict[str,
 
 def _qwen_coder_chat(app: FastAPI, client: httpx.Client, body: dict[str, Any], config: GatewayConfig) -> Response:
     account_id = _selected_direct_account_id(app, "qwen-coder", body)
-    credential = _direct_credential_for_account(app, "qwen-coder", account_id)
-    if not is_credential_authorized("qwen-coder", credential):
-        raise HTTPException(status_code=424, detail=_provider_auth_required_detail("Qwen Coder Web"))
     payload, bridge, allowed_tools, bridge_context = _build_direct_payload(
         body,
         config,
@@ -7177,6 +7177,9 @@ def _qwen_coder_chat(app: FastAPI, client: httpx.Client, body: dict[str, Any], c
     preflight = _local_preflight_response(app, body, model, bridge_context)
     if preflight is not None:
         return preflight
+    credential = _direct_credential_for_account(app, "qwen-coder", account_id)
+    if not is_credential_authorized("qwen-coder", credential):
+        raise HTTPException(status_code=424, detail=_provider_auth_required_detail("Qwen Coder Web"))
     _record_completion_started_diagnostic(
         app,
         endpoint="/v1/chat/completions",

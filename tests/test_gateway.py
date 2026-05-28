@@ -27254,6 +27254,61 @@ def test_local_app_preflight_uses_open_app_schema_without_command(tmp_path: Path
     assert json.loads(tool_call["function"]["arguments"]) == {"app": "QQ"}
 
 
+def test_qwen_local_app_preflight_does_not_require_web_login(tmp_path: Path) -> None:
+    class FailingQwenClient:
+        def __init__(self, credential: dict[str, Any], http_client: httpx.Client | None = None) -> None:
+            self.credential = credential
+
+        def chat_completions(self, payload: dict[str, Any]) -> dict[str, Any]:
+            raise AssertionError("local app preflight should not call qwen upstream")
+
+    config = GatewayConfig(
+        server=ServerConfig(api_key="local-dev-key"),
+        upstream=UpstreamConfig(base_url="http://upstream.test/v1", model="web-model"),
+        tool_bridge=ToolBridgeConfig(activation_policy="auto", exposure_policy="all", tool_profile="all"),
+    )
+    client = TestClient(
+        create_app(
+            config=config,
+            credential_store=CredentialStore(tmp_path / "credentials"),
+            qwen_client_factory=FailingQwenClient,
+            http_client=_not_found_client(),
+        )
+    )
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers=_headers(),
+        json={
+            "model": "qwen-web/qwen3.7-max-preview",
+            "messages": [{"role": "user", "content": "\u5e2e\u6211\u6253\u5f00\u6211\u7535\u8111\u7684QQ"}],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "open_app",
+                        "description": "Open a local application",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"app": {"type": "string"}},
+                            "required": ["app"],
+                            "additionalProperties": False,
+                        },
+                    },
+                }
+            ],
+            "max_tokens": 1024,
+        },
+    )
+
+    assert response.status_code == 200
+    choice = response.json()["choices"][0]
+    assert choice["finish_reason"] == "tool_calls"
+    tool_call = choice["message"]["tool_calls"][0]
+    assert tool_call["function"]["name"] == "open_app"
+    assert json.loads(tool_call["function"]["arguments"]) == {"app": "QQ"}
+
+
 def test_qwen_web_tool_bridge_recovers_when_permission_denial_repair_repeats(tmp_path: Path) -> None:
     seen_payloads: list[dict[str, Any]] = []
     denial = (
