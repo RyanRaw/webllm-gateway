@@ -1324,27 +1324,101 @@ def build_local_execution_preflight_tool_call(context: ToolBridgeContext) -> Too
     task_text = (context.latest_user_text or context.task_text or "").strip()
     if not _task_explicitly_requests_local_execution(task_text):
         return None
-    tool = _select_local_execution_tool(context.tools)
-    if tool is None:
-        return None
     target = _local_execution_target_from_task_text(task_text)
     command = _local_execution_open_command(target)
     if not command:
         return None
+    tool_and_input = _select_local_execution_tool_and_input(context.tools, target=target, command=command)
+    if tool_and_input is None:
+        return None
+    tool, input_value = tool_and_input
     return ToolCallDraft(
         id="call_web_local_action_1",
         name=tool.name,
-        input={_shell_command_key(tool): command},
+        input=input_value,
     )
 
 
 def _select_local_execution_tool(tools: list[ToolSpec]) -> ToolSpec | None:
+    selected = _select_local_execution_tool_and_input(
+        tools,
+        target="app",
+        command=_local_execution_open_command("app"),
+    )
+    return selected[0] if selected is not None else None
+
+
+def _select_local_execution_tool_and_input(
+    tools: list[ToolSpec],
+    *,
+    target: str,
+    command: str,
+) -> tuple[ToolSpec, dict[str, Any]] | None:
     by_compact = {_compact_tool_name(tool.name): tool for tool in tools if tool.name}
-    for compact in ("showwidget", "openapp", "launchapp", "shell", "terminal", "bash", "powershell", "cmd"):
-        tool = by_compact.get(compact)
-        if tool is not None and _is_shell_execution_tool(tool, tool.name):
-            return tool
-    return _select_shell_execution_tool(tools)
+    preferred_names = ("openapp", "launchapp", "showwidget", "shell", "terminal", "bash", "powershell", "cmd")
+    ordered_tools = [by_compact[name] for name in preferred_names if name in by_compact]
+    fallback_shell = _select_shell_execution_tool(tools)
+    if fallback_shell is not None and fallback_shell not in ordered_tools:
+        ordered_tools.append(fallback_shell)
+    for tool in ordered_tools:
+        input_value = local_execution_input_for_tool(tool, target=target, command=command)
+        if input_value is not None:
+            return tool, input_value
+    return None
+
+
+def local_execution_input_for_tool(tool: ToolSpec, *, target: str, command: str) -> dict[str, Any] | None:
+    properties = _tool_schema_properties(tool)
+    compact = _compact_tool_name(tool.name)
+    scheme_url = _local_execution_scheme_url(target)
+    app_name = (target or "app").strip() or "app"
+    for key in ("command", "cmd"):
+        if key in properties:
+            return {key: command}
+    if compact in {"shell", "terminal", "bash", "powershell", "cmd", "command", "runcommand", "exec", "execute"}:
+        if _tool_schema_allows_extra_key(tool, "command"):
+            return {"command": command}
+    if compact in {"openapp", "launchapp"}:
+        for key in ("app", "app_name", "application", "name", "target"):
+            if key in properties:
+                return {key: app_name}
+        if scheme_url and "url" in properties:
+            return {"url": scheme_url}
+        if _tool_schema_allows_extra_key(tool, "command"):
+            return {"command": command}
+    if compact == "showwidget":
+        if scheme_url and "url" in properties:
+            return {"url": scheme_url}
+        for key in ("app", "app_name", "application", "name", "target"):
+            if key in properties:
+                return {key: app_name}
+        if _show_widget_tool_accepts_command(tool) and _tool_schema_allows_extra_key(tool, "command"):
+            return {"command": command}
+    return None
+
+
+def has_compatible_local_execution_tool(tools: list[ToolSpec], *, target: str = "app") -> bool:
+    command = _local_execution_open_command(target)
+    return _select_local_execution_tool_and_input(tools, target=target, command=command) is not None
+
+
+def _tool_schema_properties(tool: ToolSpec) -> dict[str, Any]:
+    schema = tool.input_schema if isinstance(tool.input_schema, dict) else {}
+    properties = schema.get("properties")
+    return properties if isinstance(properties, dict) else {}
+
+
+def _tool_schema_allows_extra_key(tool: ToolSpec, key: str) -> bool:
+    properties = _tool_schema_properties(tool)
+    if key in properties:
+        return True
+    schema = tool.input_schema if isinstance(tool.input_schema, dict) else {}
+    return schema.get("additionalProperties") is not False
+
+
+def _show_widget_tool_accepts_command(tool: ToolSpec) -> bool:
+    description = f"{tool.name}\n{tool.description}".lower()
+    return any(marker in description for marker in ("command", "shell", "terminal", "execute", "run command", "open app"))
 
 
 def _local_execution_target_from_task_text(text: str) -> str:
@@ -1382,15 +1456,8 @@ def _local_execution_target_from_task_text(text: str) -> str:
 
 def _local_execution_open_command(target: str) -> str:
     app_name = (target or "app").strip() or "app"
-    scheme = re.sub(r"[^a-z0-9]+", "", app_name.lower())
-    if app_name == "Visual Studio Code":
-        scheme = "vscode"
-    elif app_name == "WeChat":
-        scheme = "wechat"
-    elif app_name == "QQ":
-        scheme = "qq"
+    scheme_url = _local_execution_scheme_url(app_name)
     app_arg = shlex.quote(app_name)
-    scheme_url = f"{scheme}://" if scheme and scheme != "app" else ""
     commands = [f"open -a {app_arg}"]
     if scheme_url:
         quoted_url = shlex.quote(scheme_url)
@@ -1403,6 +1470,18 @@ def _local_execution_open_command(target: str) -> str:
         )
     commands.append(f"echo {shlex.quote(f'{app_name} not found via open command')}")
     return " || ".join(commands)
+
+
+def _local_execution_scheme_url(target: str) -> str:
+    app_name = (target or "app").strip() or "app"
+    scheme = re.sub(r"[^a-z0-9]+", "", app_name.lower())
+    if app_name == "Visual Studio Code":
+        scheme = "vscode"
+    elif app_name == "WeChat":
+        scheme = "wechat"
+    elif app_name == "QQ":
+        scheme = "qq"
+    return f"{scheme}://" if scheme and scheme != "app" else ""
 
 
 _NON_SKILL_SLASH_COMMANDS = frozenset(

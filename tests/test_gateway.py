@@ -26888,7 +26888,11 @@ def test_workbuddy_second_local_app_request_after_tool_result_starts_new_task(tm
     tools = [
         {
             "type": "function",
-            "function": {"name": name, "description": name, "parameters": {"type": "object"}},
+            "function": {
+                "name": name,
+                "description": "Show a command widget" if name == "show_widget" else name,
+                "parameters": {"type": "object"},
+            },
         }
         for name in [
             "AskUserQuestion",
@@ -26987,7 +26991,11 @@ def test_workbuddy_second_codex_request_after_qq_tool_result_preflights_show_wid
     tools = [
         {
             "type": "function",
-            "function": {"name": name, "description": name, "parameters": {"type": "object"}},
+            "function": {
+                "name": name,
+                "description": "Show a command widget" if name == "show_widget" else name,
+                "parameters": {"type": "object"},
+            },
         }
         for name in ["AskUserQuestion", "Read", "WebFetch", "show_widget"]
     ]
@@ -27125,6 +27133,125 @@ def test_workbuddy_anthropic_second_local_app_request_uses_show_widget(tmp_path:
     assert command.startswith("open -a QQ || open qq://")
     assert "xdg-open qq://" in command
     assert 'cmd /c start "" qq://' in command
+
+
+def test_local_app_preflight_does_not_send_command_to_closed_show_widget_schema(tmp_path: Path) -> None:
+    seen_payloads: list[dict[str, Any]] = []
+
+    class NaturalLanguageQwenClient:
+        def __init__(self, credential: dict[str, Any], http_client: httpx.Client | None = None) -> None:
+            self.credential = credential
+
+        def chat_completions(self, payload: dict[str, Any]) -> dict[str, Any]:
+            seen_payloads.append(payload)
+            return _openai_response("\u6211\u5df2\u7ecf\u5e2e\u4f60\u6253\u5f00 Codex\u3002")
+
+    config = GatewayConfig(
+        server=ServerConfig(api_key="local-dev-key"),
+        upstream=UpstreamConfig(base_url="http://upstream.test/v1", model="web-model"),
+        tool_bridge=ToolBridgeConfig(activation_policy="auto", exposure_policy="all", tool_profile="all"),
+    )
+    client = TestClient(
+        create_app(
+            config=config,
+            credential_store=_credential_store(tmp_path),
+            qwen_client_factory=NaturalLanguageQwenClient,
+            http_client=_not_found_client(),
+        )
+    )
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers=_headers(),
+        json={
+            "model": "qwen-web/qwen3.7-max-preview",
+            "messages": [{"role": "user", "content": "\u5e2e\u6211\u6253\u5f00\u6211\u7535\u8111\u7684codex"}],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "show_widget",
+                        "description": "Show a UI widget",
+                        "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+                    },
+                },
+                {
+                    "type": "function",
+                    "function": {"name": "Read", "description": "Read files", "parameters": {"type": "object"}},
+                },
+            ],
+            "max_tokens": 1024,
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(seen_payloads) >= 1
+    choice = response.json()["choices"][0]
+    assert choice["finish_reason"] == "stop"
+    content = choice["message"]["content"]
+    assert "当前客户端没有提供可以打开本机应用或执行命令的工具" in content
+    assert "Gateway 不能直接打开codex" in content
+    assert "show_widget" in content
+    assert "tool_calls" not in choice["message"]
+
+
+def test_local_app_preflight_uses_open_app_schema_without_command(tmp_path: Path) -> None:
+    seen_payloads: list[dict[str, Any]] = []
+
+    class NaturalLanguageQwenClient:
+        def __init__(self, credential: dict[str, Any], http_client: httpx.Client | None = None) -> None:
+            self.credential = credential
+
+        def chat_completions(self, payload: dict[str, Any]) -> dict[str, Any]:
+            seen_payloads.append(payload)
+            return _openai_response("\u6211\u5df2\u7ecf\u5e2e\u4f60\u6253\u5f00 QQ\u3002")
+
+    config = GatewayConfig(
+        server=ServerConfig(api_key="local-dev-key"),
+        upstream=UpstreamConfig(base_url="http://upstream.test/v1", model="web-model"),
+        tool_bridge=ToolBridgeConfig(activation_policy="auto", exposure_policy="all", tool_profile="all"),
+    )
+    client = TestClient(
+        create_app(
+            config=config,
+            credential_store=_credential_store(tmp_path),
+            qwen_client_factory=NaturalLanguageQwenClient,
+            http_client=_not_found_client(),
+        )
+    )
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers=_headers(),
+        json={
+            "model": "qwen-web/qwen3.7-max-preview",
+            "messages": [{"role": "user", "content": "\u5e2e\u6211\u6253\u5f00\u6211\u7535\u8111\u7684QQ"}],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "open_app",
+                        "description": "Open a local application",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"app": {"type": "string"}},
+                            "required": ["app"],
+                            "additionalProperties": False,
+                        },
+                    },
+                }
+            ],
+            "max_tokens": 1024,
+        },
+    )
+
+    assert response.status_code == 200
+    assert seen_payloads == []
+    choice = response.json()["choices"][0]
+    assert choice["finish_reason"] == "tool_calls"
+    tool_call = choice["message"]["tool_calls"][0]
+    assert tool_call["function"]["name"] == "open_app"
+    assert json.loads(tool_call["function"]["arguments"]) == {"app": "QQ"}
 
 
 def test_qwen_web_tool_bridge_recovers_when_permission_denial_repair_repeats(tmp_path: Path) -> None:

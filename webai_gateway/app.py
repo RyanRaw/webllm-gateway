@@ -84,6 +84,7 @@ from webai_gateway.tool_bridge import (
     BridgeError,
     BridgeResult,
     build_context,
+    has_compatible_local_execution_tool,
     parse_tool_response,
     prefer_local_tools_for_local_agent_task,
 )
@@ -4631,6 +4632,11 @@ def _tool_call_event_fields(data: dict[str, Any]) -> dict[str, Any]:
         command = args.get("command") if isinstance(args.get("command"), str) else args.get("cmd")
         if isinstance(command, str):
             fields["commandPreview"] = _preview_text(command)
+        for key in ("app", "app_name", "application", "name", "target", "url"):
+            value = args.get(key)
+            if isinstance(value, str) and value.strip():
+                fields["inputPreview"] = {key: _preview_text(value, max_chars=120)}
+                break
     return fields
 
 
@@ -5313,7 +5319,17 @@ def _local_preflight_response(app: FastAPI, body: dict[str, Any], model: str, br
     preflight_data = build_preflight_chat_response(model, bridge_context)
     if preflight_data is None:
         return None
-    _record_tool_bridge_event(app, _preflight_event_kind(preflight_data), model=model, **_tool_call_event_fields(preflight_data))
+    event_kind = _preflight_event_kind(preflight_data)
+    event_fields = _tool_call_event_fields(preflight_data)
+    _record_tool_bridge_event(app, event_kind, model=model, **event_fields)
+    _record_request_diagnostic(
+        app,
+        event_kind,
+        model=model,
+        **event_fields,
+        **_request_body_diagnostic_fields(body),
+        **_tool_bridge_context_diagnostic_fields(bridge_context),
+    )
     if bool(body.get("stream")):
         choices = preflight_data.get("choices") if isinstance(preflight_data.get("choices"), list) else []
         msg = choices[0].get("message") if choices and isinstance(choices[0], dict) else {}
@@ -6324,11 +6340,16 @@ def _bridge_context_local_execution_task_text(bridge_context: Any) -> str:
 
 
 def _bridge_context_has_local_execution_tool(bridge_context: Any) -> bool:
-    for tool in getattr(bridge_context, "tools", []) or []:
-        compact = re.sub(r"[^a-z0-9]+", "", str(getattr(tool, "name", "") or "").lower())
-        if compact in _LOCAL_EXECUTION_TOOL_NAMES:
-            return True
-    return False
+    task = _bridge_context_local_execution_task_text(bridge_context)
+    target = _local_execution_target_from_task(task) if task else "app"
+    try:
+        return has_compatible_local_execution_tool(list(getattr(bridge_context, "tools", []) or []), target=target)
+    except Exception:
+        for tool in getattr(bridge_context, "tools", []) or []:
+            compact = re.sub(r"[^a-z0-9]+", "", str(getattr(tool, "name", "") or "").lower())
+            if compact in _LOCAL_EXECUTION_TOOL_NAMES:
+                return True
+        return False
 
 
 def _unavailable_local_execution_text(bridge_context: Any) -> str:
