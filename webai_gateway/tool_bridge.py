@@ -128,7 +128,9 @@ _TOOL_BLOCKED_CLAIM_RE = re.compile(
     re.IGNORECASE,
 )
 _SUCCESSFUL_TOOL_RESULT_RE = re.compile(
-    r"(?:completed\s+with\s+no\s+output|exit\s*code\s*[:=]?\s*0|success(?:ful|fully)?|执行完成|成功|完成)",
+    r"(?:completed\s+with\s+no\s+output|exit\s*code\s*[:=]?\s*0|success(?:ful|fully)?|"
+    r"already\s+(?:open|opened|running|done|executed)|opened|"
+    r"执行完成|执行成功|已执行(?:命令)?|已经执行(?:命令)?|已打开|已经打开|打开成功|已启动|已经启动|启动成功|成功|完成)",
     re.IGNORECASE,
 )
 _TOOL_SUMMARY_HEADER_RE = re.compile(r"assistant\s+requested\s+tool\s+calls\s*:", re.IGNORECASE)
@@ -568,6 +570,7 @@ _REPEAT_DISCOVERY_TOOL_NAMES = frozenset(
     }
 )
 _SHELL_LOOP_TOOL_NAMES = frozenset({"bash", "cmd", "powershell", "shell", "terminal"})
+_SUCCESSFUL_REPEAT_ACTION_TOOL_NAMES = frozenset({"showwidget", "openapp", "launchapp"})
 _SHELL_READONLY_GIT_HOUSEKEEPING_MARKERS = (
     " branch",
     " diff",
@@ -1332,11 +1335,20 @@ def build_local_execution_preflight_tool_call(context: ToolBridgeContext) -> Too
     if tool_and_input is None:
         return None
     tool, input_value = tool_and_input
-    return ToolCallDraft(
+    call = ToolCallDraft(
         id="call_web_local_action_1",
         name=tool.name,
         input=input_value,
     )
+    if _repeats_successful_local_execution_preflight(context, call):
+        return None
+    return call
+
+
+def _repeats_successful_local_execution_preflight(context: ToolBridgeContext, call: ToolCallDraft) -> bool:
+    if not context.has_tool_loop or not context.recent_successful_tool_result_summaries:
+        return False
+    return _tool_loop_summary(call) in context.recent_successful_tool_result_summaries
 
 
 def _select_local_execution_tool(tools: list[ToolSpec]) -> ToolSpec | None:
@@ -6699,6 +6711,20 @@ def build_repair_messages(messages: list[dict[str, Any]], bad_text: str, error: 
             {"role": "assistant", "content": (bad_text or "")[:4000]},
             {"role": "user", "content": repair_instruction},
         ]
+    if error_kind == "repeat_successful_tool_call_without_progress":
+        repair_instruction = (
+            "Previous tool JSON repeated a tool call that already succeeded in this conversation.\n"
+            f"Error code: {error_kind}.\n"
+            f"Error: {reason}.\n"
+            "Do not request the same tool/input again. Use the successful Tool result already in the conversation. "
+            "If the latest user request is satisfied, answer normally with no tool_json block. Only request another "
+            "tool when it is materially different and still necessary for the original task."
+        )
+        return [
+            *messages,
+            {"role": "assistant", "content": (bad_text or "")[:4000]},
+            {"role": "user", "content": repair_instruction},
+        ]
     if error_kind == "off_task_environment_configuration_final":
         repair_instruction = (
             "Previous final answer went off task into agent/environment configuration advice.\n"
@@ -7000,6 +7026,14 @@ def _normalize_candidates(candidates: list[Any], context: ToolBridgeContext) -> 
             )
             if repeat_skill_error:
                 soft_non_progress_errors.append(repeat_skill_error)
+                continue
+            repeat_successful_tool_error = _repeat_successful_tool_call_without_progress_error(
+                normalized,
+                canonical_name,
+                context,
+            )
+            if repeat_successful_tool_error:
+                soft_non_progress_errors.append(repeat_successful_tool_error)
                 continue
             repeat_unchanged_read_error = _repeat_unchanged_read_error(normalized, canonical_name, context)
             if repeat_unchanged_read_error:
@@ -7548,6 +7582,45 @@ def _repeat_same_skill_without_progress_error(
         ),
         repairable=True,
     )
+
+
+def _repeat_successful_tool_call_without_progress_error(
+    call: ToolCallDraft,
+    canonical_name: str,
+    context: ToolBridgeContext,
+) -> BridgeError | None:
+    if not context.has_tool_loop or not context.recent_successful_tool_result_summaries:
+        return None
+    if not _is_successful_repeat_guard_tool(call, canonical_name):
+        return None
+    current = _tool_loop_summary(ToolCallDraft(id=call.id, name=canonical_name, input=call.input))
+    if current not in context.recent_successful_tool_result_summaries:
+        return None
+    return BridgeError(
+        "repeat_successful_tool_call_without_progress",
+        (
+            f"The model repeated the same tool call ({current}) after that exact call already produced a "
+            "successful tool_result in the active tool loop. Use the successful result already in the "
+            "conversation, choose a materially different tool/input only if still necessary, or answer normally."
+        ),
+        repairable=True,
+    )
+
+
+def _is_successful_repeat_guard_tool(call: ToolCallDraft, canonical_name: str) -> bool:
+    compact = _compact_tool_name(canonical_name)
+    if compact in _SUCCESSFUL_REPEAT_ACTION_TOOL_NAMES:
+        return True
+    if compact in _SHELL_LOOP_TOOL_NAMES:
+        return _looks_like_local_execution_command(_shell_command_from_input(call.input))
+    return False
+
+
+def _looks_like_local_execution_command(command: str) -> bool:
+    value = (command or "").strip().lower()
+    if not value:
+        return False
+    return any(marker in value for marker in ("open -a ", "xdg-open ", "cmd /c start ", "not found via open command"))
 
 
 def _repeat_unchanged_read_error(

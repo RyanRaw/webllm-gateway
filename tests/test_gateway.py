@@ -9705,6 +9705,63 @@ def test_tool_bridge_rejects_repeated_discovery_without_progress() -> None:
     assert result.tool_calls == []
 
 
+def test_tool_bridge_rejects_repeated_successful_local_action_without_progress() -> None:
+    command = (
+        "open -a QQ || open qq:// || xdg-open qq:// || "
+        "cmd /c start \"\" qq:// || echo 'QQ not found via open command'"
+    )
+    messages = [
+        {"role": "user", "content": "帮我打开我电脑的QQ"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_open_qq",
+                    "type": "function",
+                    "function": {
+                        "name": "show_widget",
+                        "arguments": json.dumps({"command": command}, ensure_ascii=False),
+                    },
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_open_qq", "content": "已执行命令"},
+    ]
+    context = build_context(
+        [
+            {
+                "type": "function",
+                "function": {
+                    "name": "show_widget",
+                    "description": "Show a command widget",
+                    "parameters": {"type": "object"},
+                },
+            },
+            {
+                "type": "function",
+                "function": {"name": "Read", "description": "Read files", "parameters": {"type": "object"}},
+            },
+        ],
+        ToolBridgeConfig(exposure_policy="safe", max_tools_in_prompt=32),
+    )
+    context = prefer_local_tools_for_local_agent_task(context, messages)
+
+    result = parse_tool_response(
+        "```tool_json\n"
+        + json.dumps(
+            {"calls": [{"id": "call_repeat_open_qq", "name": "show_widget", "input": {"command": command}}]},
+            ensure_ascii=False,
+        )
+        + "\n```",
+        context,
+    )
+
+    assert result.error is not None
+    assert result.error.kind == "repeat_successful_tool_call_without_progress"
+    assert result.tool_calls == []
+
+
 def test_tool_bridge_drops_repeated_discovery_when_batch_has_progress() -> None:
     messages = [
         {"role": "user", "content": "/using-superpowers implement the local codebase plan"},
@@ -27106,6 +27163,169 @@ def test_workbuddy_second_codex_request_after_qq_tool_result_preflights_show_wid
     assert "xdg-open codex://" in command
     assert 'cmd /c start "" codex://' in command
     assert "Codex not found via open command" in command
+
+
+def test_qwen_tool_controller_recovers_repeated_successful_local_action(tmp_path: Path) -> None:
+    seen_payloads: list[dict[str, Any]] = []
+    command = (
+        "open -a QQ || open qq:// || xdg-open qq:// || "
+        "cmd /c start \"\" qq:// || echo 'QQ not found via open command'"
+    )
+
+    class RepeatingShowWidgetQwenClient:
+        def __init__(self, credential: dict[str, Any], http_client: httpx.Client | None = None) -> None:
+            self.credential = credential
+
+        def chat_completions(self, payload: dict[str, Any]) -> dict[str, Any]:
+            seen_payloads.append(payload)
+            if len(seen_payloads) == 1:
+                return _openai_response(
+                    "```tool_json\n"
+                    + json.dumps(
+                        {"calls": [{"id": "call_repeat_open_qq", "name": "show_widget", "input": {"command": command}}]},
+                        ensure_ascii=False,
+                    )
+                    + "\n```"
+                )
+            return _openai_response("QQ 已经打开了。")
+
+    config = GatewayConfig(
+        server=ServerConfig(api_key="local-dev-key"),
+        upstream=UpstreamConfig(base_url="http://upstream.test/v1", model="web-model"),
+        tool_bridge=ToolBridgeConfig(activation_policy="auto", exposure_policy="safe"),
+    )
+    client = TestClient(
+        create_app(
+            config=config,
+            credential_store=_credential_store(tmp_path),
+            qwen_client_factory=RepeatingShowWidgetQwenClient,
+            http_client=_not_found_client(),
+        )
+    )
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers=_headers(),
+        json={
+            "model": "qwen-web/qwen3.7-max-preview",
+            "messages": [
+                {"role": "user", "content": "帮我打开我电脑的QQ"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_open_qq",
+                            "type": "function",
+                            "function": {
+                                "name": "show_widget",
+                                "arguments": json.dumps({"command": command}, ensure_ascii=False),
+                            },
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call_open_qq", "content": "已执行命令"},
+            ],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "show_widget",
+                        "description": "Show a command widget",
+                        "parameters": {"type": "object"},
+                    },
+                },
+                {
+                    "type": "function",
+                    "function": {"name": "Read", "description": "Read files", "parameters": {"type": "object"}},
+                },
+            ],
+            "max_tokens": 1024,
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(seen_payloads) == 2
+    choice = response.json()["choices"][0]
+    assert choice["finish_reason"] == "stop"
+    assert choice["message"]["content"] == "QQ 已经打开了。"
+    assert "tool_calls" not in choice["message"]
+    retry_prompt = "\n".join(str(message.get("content", "")) for message in seen_payloads[1]["messages"])
+    assert "repeat_successful_tool_call_without_progress" in retry_prompt
+    assert "Do not request the same tool/input again" in retry_prompt
+
+
+def test_anthropic_qwen_controller_recovers_repeated_successful_local_action(tmp_path: Path) -> None:
+    seen_payloads: list[dict[str, Any]] = []
+    command = (
+        "open -a QQ || open qq:// || xdg-open qq:// || "
+        "cmd /c start \"\" qq:// || echo 'QQ not found via open command'"
+    )
+
+    class RepeatingShowWidgetQwenClient:
+        def __init__(self, credential: dict[str, Any], http_client: httpx.Client | None = None) -> None:
+            self.credential = credential
+
+        def chat_completions(self, payload: dict[str, Any]) -> dict[str, Any]:
+            seen_payloads.append(payload)
+            if len(seen_payloads) == 1:
+                return _openai_response(
+                    "```tool_json\n"
+                    + json.dumps(
+                        {"calls": [{"id": "call_repeat_open_qq", "name": "show_widget", "input": {"command": command}}]},
+                        ensure_ascii=False,
+                    )
+                    + "\n```"
+                )
+            return _openai_response("QQ 已经打开了。")
+
+    config = GatewayConfig(
+        server=ServerConfig(api_key="local-dev-key"),
+        upstream=UpstreamConfig(base_url="http://upstream.test/v1", model="web-model"),
+        tool_bridge=ToolBridgeConfig(activation_policy="auto", exposure_policy="safe"),
+    )
+    client = TestClient(
+        create_app(
+            config=config,
+            credential_store=_credential_store(tmp_path),
+            qwen_client_factory=RepeatingShowWidgetQwenClient,
+            http_client=_not_found_client(),
+        )
+    )
+
+    response = client.post(
+        "/v1/messages",
+        headers={**_headers(), "anthropic-version": "2023-06-01"},
+        json={
+            "model": "qwen-web/qwen3.7-max-preview",
+            "messages": [
+                {"role": "user", "content": "帮我打开我电脑的QQ"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "id": "call_open_qq", "name": "show_widget", "input": {"command": command}}
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [{"type": "tool_result", "tool_use_id": "call_open_qq", "content": "已执行命令"}],
+                },
+            ],
+            "tools": [
+                {"name": "show_widget", "description": "Show a command widget", "input_schema": {"type": "object"}},
+                {"name": "Read", "description": "Read files", "input_schema": {"type": "object"}},
+            ],
+            "max_tokens": 1024,
+        },
+    )
+
+    assert response.status_code == 200
+    assert len(seen_payloads) == 2
+    body = response.json()
+    assert body["stop_reason"] == "end_turn"
+    assert body["content"] == [{"type": "text", "text": "QQ 已经打开了。"}]
+    retry_prompt = "\n".join(str(message.get("content", "")) for message in seen_payloads[1]["messages"])
+    assert "repeat_successful_tool_call_without_progress" in retry_prompt
 
 
 def test_workbuddy_anthropic_second_local_app_request_uses_show_widget(tmp_path: Path) -> None:
