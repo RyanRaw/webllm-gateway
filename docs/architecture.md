@@ -2,6 +2,8 @@
 
 WebLLM Gateway 是一个网页登录模型 API 网关。它把 Qwen Web、DeepSeek Web、ChatGPT/WebAI2API 等网页登录上游包装成 OpenAI / Anthropic 兼容 API，同时把不稳定的网页模型文本工具调用转换成稳定的标准工具协议。
 
+2026-07-18 的完整分层说明、ds2api v4.6.1 parity 矩阵和稳定性审计见 [ds2api-parity-stability-2026-07-18.md](ds2api-parity-stability-2026-07-18.md)。
+
 ```mermaid
 flowchart LR
   U["用户 / 下游客户端"] --> G["WebLLM Gateway :8610"]

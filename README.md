@@ -131,6 +131,7 @@ Gateway 首页优先展示统一接入、状态、授权和复制配置。外部
 - 图片生成：[docs/media-generation.md](docs/media-generation.md)
 - 可选 adapter runtime 说明：[docs/third-party-runtime.md](docs/third-party-runtime.md)
 - 架构和边界：[docs/architecture.md](docs/architecture.md)
+- ds2api v4.6.1 对标与稳定性审计：[docs/ds2api-parity-stability-2026-07-18.md](docs/ds2api-parity-stability-2026-07-18.md)
 - 贡献规范：[CONTRIBUTING.md](CONTRIBUTING.md)
 - 安全策略：[SECURITY.md](SECURITY.md)
 - 第三方声明：[NOTICE.md](NOTICE.md)

@@ -131,11 +131,11 @@ def build_assistant_turn(
         )
 
     error = BridgeError(
-        "upstream_empty_output",
+        "upstream_empty_output" if has_visible_thinking else "upstream_unavailable",
         (
             "Upstream account hit a rate limit and returned reasoning without visible output."
             if has_visible_thinking
-            else "Upstream account hit a rate limit and returned empty output."
+            else "Upstream service is unavailable and returned no output."
         ),
     )
     bridge_result = BridgeResult(

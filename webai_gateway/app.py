@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import contextvars
 from collections import OrderedDict, deque
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import inspect
 import json
@@ -270,32 +271,61 @@ class _DirectProviderPoolGate:
         self._queue: list[str] = []
         self._in_use: dict[str, int] = {}
         self._waiting = 0
-        self._cooldown_until = 0.0
+        self._cooldown_until: dict[str, float] = {}
+        self._auth_failed_revisions: dict[str, dict[str, None]] = {}
 
-    def acquire(self, account_ids: list[str], *, target: str = "") -> str:
+    def acquire(
+        self,
+        account_ids: list[str],
+        *,
+        target: str = "",
+        preferred: str = "",
+        exclude: set[str] | None = None,
+        account_revisions: dict[str, str] | None = None,
+    ) -> str:
         normalized = [str(account_id) for account_id in account_ids if str(account_id).strip()]
+        excluded = exclude or set()
+        revisions = account_revisions or {}
         if not normalized:
+            return ""
+        if target and (target not in normalized or target in excluded):
+            return ""
+        if all(account_id in excluded for account_id in normalized):
             return ""
         queued = False
         with self._condition:
-            self._sync_accounts_locked(normalized)
+            self._sync_accounts_locked(normalized, revisions)
             while True:
                 now = time.monotonic()
-                cooldown_wait = max(0.0, self._cooldown_until - now)
-                if cooldown_wait <= 0:
-                    for account_id in self._candidate_accounts_locked(normalized, target=target):
-                        if self._in_use.get(account_id, 0) < self.max_inflight_per_account:
-                            self._in_use[account_id] = self._in_use.get(account_id, 0) + 1
-                            self._bump_queue_locked(account_id)
-                            if queued:
-                                self._waiting = max(0, self._waiting - 1)
-                            return account_id
+                cooldown_waits: list[float] = []
+                candidates = self._candidate_accounts_locked(
+                    normalized,
+                    target=target,
+                    preferred=preferred,
+                    exclude=excluded,
+                    account_revisions=revisions,
+                )
+                if not candidates and not target:
+                    if queued:
+                        self._waiting = max(0, self._waiting - 1)
+                    return ""
+                for account_id in candidates:
+                    cooldown_wait = max(0.0, self._cooldown_until.get(account_id, 0.0) - now)
+                    if cooldown_wait > 0:
+                        cooldown_waits.append(cooldown_wait)
+                        continue
+                    if self._in_use.get(account_id, 0) < self.max_inflight_per_account:
+                        self._in_use[account_id] = self._in_use.get(account_id, 0) + 1
+                        self._bump_queue_locked(account_id)
+                        if queued:
+                            self._waiting = max(0, self._waiting - 1)
+                        return account_id
                 if not queued:
                     if self._waiting >= self.max_queue:
                         return ""
                     self._waiting += 1
                     queued = True
-                self._condition.wait(timeout=cooldown_wait if cooldown_wait > 0 else 0.1)
+                self._condition.wait(timeout=min(cooldown_waits) if cooldown_waits else 0.1)
 
     def release(self, account_id: str) -> None:
         if not account_id:
@@ -308,23 +338,50 @@ class _DirectProviderPoolGate:
                 self._in_use[account_id] = count - 1
             self._condition.notify_all()
 
-    def note_rate_limit(self) -> None:
-        if self.cooldown_seconds <= 0:
+    def note_rate_limit(self, account_id: str) -> None:
+        if self.cooldown_seconds <= 0 or not account_id:
             return
         with self._condition:
-            self._cooldown_until = max(self._cooldown_until, time.monotonic() + self.cooldown_seconds)
+            self._cooldown_until[account_id] = max(
+                self._cooldown_until.get(account_id, 0.0),
+                time.monotonic() + self.cooldown_seconds,
+            )
             self._condition.notify_all()
 
-    def snapshot(self, account_ids: list[str]) -> dict[str, Any]:
-        normalized = [str(account_id) for account_id in account_ids if str(account_id).strip()]
+    def note_auth_failure(self, account_id: str, account_revision: str) -> None:
+        if not account_id:
+            return
         with self._condition:
-            self._sync_accounts_locked(normalized)
+            failed_revisions = self._auth_failed_revisions.setdefault(account_id, {})
+            failed_revisions[str(account_revision or "unversioned")] = None
+            while len(failed_revisions) > 8:
+                failed_revisions.pop(next(iter(failed_revisions)))
+            self._condition.notify_all()
+
+    def snapshot(
+        self,
+        account_ids: list[str],
+        *,
+        account_revisions: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        normalized = [str(account_id) for account_id in account_ids if str(account_id).strip()]
+        revisions = account_revisions or {}
+        with self._condition:
+            self._sync_accounts_locked(normalized, revisions)
+            now = time.monotonic()
             in_use_accounts = sorted(account_id for account_id, count in self._in_use.items() if count > 0)
             available_accounts = [
                 account_id
                 for account_id in self._queue
                 if self._in_use.get(account_id, 0) < self.max_inflight_per_account
+                and self._cooldown_until.get(account_id, 0.0) <= now
+                and not self._account_has_current_auth_failure_locked(account_id, revisions)
             ]
+            auth_failed_accounts = sorted(
+                account_id
+                for account_id in normalized
+                if self._account_has_current_auth_failure_locked(account_id, revisions)
+            )
             in_use_slots = sum(self._in_use.get(account_id, 0) for account_id in normalized)
             recommended = len(normalized) * self.max_inflight_per_account
             return {
@@ -333,6 +390,7 @@ class _DirectProviderPoolGate:
                 "total": len(normalized),
                 "available_accounts": available_accounts,
                 "in_use_accounts": in_use_accounts,
+                "auth_failed_accounts": auth_failed_accounts,
                 "max_inflight_per_account": self.max_inflight_per_account,
                 "global_max_inflight": recommended,
                 "recommended_concurrency": recommended,
@@ -340,20 +398,57 @@ class _DirectProviderPoolGate:
                 "max_queue_size": self.max_queue,
             }
 
-    def _sync_accounts_locked(self, account_ids: list[str]) -> None:
+    def _sync_accounts_locked(self, account_ids: list[str], account_revisions: dict[str, str]) -> None:
         current = set(account_ids)
         self._queue = [account_id for account_id in self._queue if account_id in current]
         for account_id in account_ids:
             if account_id not in self._queue:
                 self._queue.append(account_id)
-        for account_id in list(self._in_use):
-            if account_id not in current:
-                self._in_use.pop(account_id, None)
+        now = time.monotonic()
+        for account_id in list(self._cooldown_until):
+            if (
+                account_id not in current
+                and self._in_use.get(account_id, 0) <= 0
+                and self._cooldown_until.get(account_id, 0.0) <= now
+            ):
+                self._cooldown_until.pop(account_id, None)
+        for account_id in list(self._auth_failed_revisions):
+            if account_id not in current and self._in_use.get(account_id, 0) <= 0:
+                self._auth_failed_revisions.pop(account_id, None)
 
-    def _candidate_accounts_locked(self, account_ids: list[str], *, target: str) -> list[str]:
+    def _candidate_accounts_locked(
+        self,
+        account_ids: list[str],
+        *,
+        target: str,
+        preferred: str = "",
+        exclude: set[str] | None = None,
+        account_revisions: dict[str, str] | None = None,
+    ) -> list[str]:
+        excluded = exclude or set()
         if target:
-            return [target] if target in account_ids else []
-        return [account_id for account_id in self._queue if account_id in account_ids]
+            return [target] if target in account_ids and target not in excluded else []
+        candidates = [
+            account_id
+            for account_id in self._queue
+            if account_id in account_ids
+            and account_id not in excluded
+            and not self._account_has_current_auth_failure_locked(account_id, account_revisions or {})
+        ]
+        if preferred in candidates:
+            candidates = [preferred, *(account_id for account_id in candidates if account_id != preferred)]
+        return candidates
+
+    def _account_has_current_auth_failure_locked(
+        self,
+        account_id: str,
+        account_revisions: dict[str, str],
+    ) -> bool:
+        failed_revisions = self._auth_failed_revisions.get(account_id)
+        if not failed_revisions:
+            return False
+        current_revision = str(account_revisions.get(account_id) or "unversioned")
+        return current_revision in failed_revisions
 
     def _bump_queue_locked(self, account_id: str) -> None:
         if account_id not in self._queue:
@@ -391,6 +486,7 @@ def create_app(
     app.state.qwen_client_factory = qwen_client_factory or QwenWebClient
     app.state.qwen_coder_client_factory = qwen_coder_client_factory or QwenCoderClient
     app.state.web_auth_jobs = {}
+    app.state.web_auth_job_lock = threading.RLock()
     app.state.tool_bridge_events = deque(maxlen=TOOL_BRIDGE_EVENT_LIMIT)
     diagnostics_persistence_enabled = not (config is not None and config_file == Path("config.json"))
     request_diagnostics_log_path = (
@@ -1146,9 +1242,10 @@ def create_app(
             raise HTTPException(status_code=400, detail="该 Provider 不使用 Gateway direct 队列")
         cfg = current_config()
         accounts = _authorized_direct_account_ids(app, provider_id)
+        account_revisions = _direct_account_credential_revisions(app, provider_id, accounts)
         route = "qwen-coder" if provider_id == "qwen-coder" else "qwen-web" if provider_id == "qwen" else provider_id
         gate = _qwen_direct_gate(app, cfg, route)
-        return gate.snapshot(accounts)
+        return gate.snapshot(accounts, account_revisions=account_revisions)
 
     @app.post("/api/admin/accounts/select")
     async def admin_accounts_select(request: Request) -> dict[str, Any]:
@@ -1775,7 +1872,19 @@ def create_app(
     def delete_web_auth_credential(provider_id: str, request: Request) -> dict[str, Any]:
         require_local_admin(request)
         get_provider(provider_id)
-        app.state.credential_store.delete(provider_id)
+        with app.state.web_auth_job_lock:
+            app.state.credential_store.delete(provider_id)
+            for job in app.state.web_auth_jobs.values():
+                if job.get("provider") != provider_id or job.get("status") != "running":
+                    continue
+                job.update(
+                    {
+                        "status": "failed",
+                        "cancelled": True,
+                        "message": "凭证已被清除，本次授权结果已作废；如需重新登录，请发起新的授权任务。",
+                        "updatedAt": utc_now(),
+                    }
+                )
         return {"credential": app.state.credential_store.summary(provider_id)}
 
     @app.post("/api/admin/web-auth/browser/start")
@@ -1827,26 +1936,50 @@ def create_app(
         if provider.status != "available":
             raise HTTPException(status_code=400, detail=f"{provider.name} 暂未开放自动授权")
         job = create_job(provider_id)
-        app.state.web_auth_jobs[job["id"]] = job
+        with app.state.web_auth_job_lock:
+            credential_revision = app.state.credential_store.revision(provider_id)
+            app.state.web_auth_jobs[job["id"]] = job
 
         async def run_job() -> None:
             try:
                 def progress(message: str) -> None:
-                    job["message"] = message
-                    job["updatedAt"] = utc_now()
+                    with app.state.web_auth_job_lock:
+                        if job.get("status") != "running":
+                            return
+                        job["message"] = message
+                        job["updatedAt"] = utc_now()
 
                 credential = await app.state.web_auth_service.capture(provider_id, cdp_url, progress)
-                app.state.credential_store.save(provider_id, credential)
-                job.update(
-                    {
-                        "status": "succeeded",
-                        "message": "网页登录状态已保存，可以直接使用对应网页模型。",
-                        "credential": app.state.credential_store.summary(provider_id),
-                        "updatedAt": utc_now(),
-                    }
-                )
+                with app.state.web_auth_job_lock:
+                    saved = app.state.credential_store.save_if_revision(
+                        provider_id,
+                        credential,
+                        credential_revision,
+                    )
+                    if saved is None:
+                        job.update(
+                            {
+                                "status": "failed",
+                                "cancelled": True,
+                                "message": "授权期间凭证已被清除或更新，本次捕获结果未保存；请重新发起授权。",
+                                "credential": app.state.credential_store.summary(provider_id),
+                                "updatedAt": utc_now(),
+                            }
+                        )
+                    else:
+                        job.update(
+                            {
+                                "status": "succeeded",
+                                "message": "网页登录状态已保存，可以直接使用对应网页模型。",
+                                "credential": app.state.credential_store.summary(provider_id),
+                                "updatedAt": utc_now(),
+                            }
+                        )
             except Exception as exc:
-                job.update({"status": "failed", "message": str(exc), "updatedAt": utc_now()})
+                with app.state.web_auth_job_lock:
+                    if job.get("cancelled"):
+                        return
+                    job.update({"status": "failed", "message": str(exc), "updatedAt": utc_now()})
 
         if run_auth_jobs_inline:
             await run_job()
@@ -1859,10 +1992,11 @@ def create_app(
     @app.get("/api/admin/web-auth/jobs/{job_id}")
     def get_web_auth_job(job_id: str, request: Request) -> dict[str, Any]:
         require_local_admin(request)
-        job = app.state.web_auth_jobs.get(job_id)
-        if not job:
-            raise HTTPException(status_code=404, detail="授权任务不存在")
-        return job
+        with app.state.web_auth_job_lock:
+            job = app.state.web_auth_jobs.get(job_id)
+            if not job:
+                raise HTTPException(status_code=404, detail="授权任务不存在")
+            return dict(job)
 
     @app.api_route("/admin", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"], include_in_schema=False)
     @app.api_route("/admin/{admin_path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"], include_in_schema=False)
@@ -6486,16 +6620,6 @@ def _gpt_thinking_body_for_deepseek_ds2api(body: dict[str, Any]) -> dict[str, An
     return routed
 
 
-def _deepseek_ds2api_retry_delays(app: FastAPI) -> tuple[float, ...]:
-    raw = getattr(app.state, "deepseek_ds2api_retry_delays", (1.0, 3.0, 8.0))
-    if raw is None:
-        return ()
-    try:
-        return tuple(max(0.0, float(item)) for item in raw)
-    except (TypeError, ValueError):
-        return ()
-
-
 def _deepseek_ds2api_bearer_gate(app: FastAPI, config: GatewayConfig) -> _ProviderRateLimitGate:
     gate_config = (
         max(1, int(config.provider_runtime.deepseek_ds2api_bearer_max_inflight)),
@@ -6587,6 +6711,24 @@ def _authorized_direct_account_ids(app: FastAPI, provider_id: str) -> list[str]:
     return out
 
 
+def _direct_account_credential_revisions(
+    app: FastAPI,
+    provider_id: str,
+    account_ids: list[str],
+) -> dict[str, str]:
+    revisions: dict[str, str] = {}
+    for account_id in account_ids:
+        credential = _direct_credential_for_account(app, provider_id, account_id)
+        if not isinstance(credential, dict):
+            continue
+        revisions[account_id] = str(
+            credential.get("updatedAt")
+            or credential.get("createdAt")
+            or "unversioned"
+        )
+    return revisions
+
+
 def _selected_direct_account_id(app: FastAPI, provider_id: str, body: dict[str, Any]) -> str:
     target = str(body.get("_webai_target_account_id") or "").strip()
     if target:
@@ -6594,10 +6736,10 @@ def _selected_direct_account_id(app: FastAPI, provider_id: str, body: dict[str, 
         if not parsed or parsed.source != "direct" or parsed.provider_id != provider_id:
             raise HTTPException(status_code=400, detail="目标账号不属于当前 Provider")
         return target
-    current = app.state.account_registry.current_account_id(provider_id)
-    if current and current in _direct_account_ids_for_provider(app, provider_id):
-        return current
     authorized = _authorized_direct_account_ids(app, provider_id)
+    current = app.state.account_registry.current_account_id(provider_id)
+    if current and current in authorized:
+        return current
     return authorized[0] if authorized else direct_account_id(provider_id)
 
 
@@ -6637,23 +6779,64 @@ def _call_qwen_direct_with_gate(
     payload: dict[str, Any],
     config: GatewayConfig,
 ) -> dict[str, Any]:
+    with _qwen_direct_gate_lease(
+        app,
+        provider_id=provider_id,
+        route=route,
+        config=config,
+        target=account_id,
+    ):
+        return web_client.chat_completions(payload)
+
+
+@contextmanager
+def _qwen_direct_gate_lease(
+    app: FastAPI,
+    *,
+    provider_id: str,
+    route: str,
+    config: GatewayConfig,
+    target: str = "",
+    preferred: str = "",
+    exclude: set[str] | None = None,
+):
     gate = _qwen_direct_gate(app, config, route)
-    acquired_account_id = gate.acquire(_authorized_direct_account_ids(app, provider_id), target=account_id)
+    authorized_account_ids = _authorized_direct_account_ids(app, provider_id)
+    account_revisions = _direct_account_credential_revisions(app, provider_id, authorized_account_ids)
+    acquired_account_id = gate.acquire(
+        authorized_account_ids,
+        target=target,
+        preferred=preferred,
+        exclude=exclude,
+        account_revisions=account_revisions,
+    )
     if not acquired_account_id:
+        snapshot = gate.snapshot(authorized_account_ids, account_revisions=account_revisions)
+        relevant_accounts = [
+            account_id
+            for account_id in authorized_account_ids
+            if not exclude or account_id not in exclude
+        ]
+        auth_failed_accounts = set(snapshot.get("auth_failed_accounts") or [])
+        if not target and relevant_accounts and all(
+            account_id in auth_failed_accounts for account_id in relevant_accounts
+        ):
+            raise HTTPException(
+                status_code=424,
+                detail=_provider_auth_expired_detail(get_provider(provider_id).name),
+            )
         raise HTTPException(status_code=429, detail="Qwen direct 请求过多：当前登录账号的等待队列已满，请稍后重试或降低客户端并发。")
     try:
-        return web_client.chat_completions(payload)
+        yield acquired_account_id
     except Exception as exc:
         if _is_qwen_direct_rate_limit_exception(exc):
-            gate.note_rate_limit()
+            gate.note_rate_limit(acquired_account_id)
+        status_code = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+        if _is_provider_auth_failure(status_code, exc):
+            gate.note_auth_failure(acquired_account_id, account_revisions.get(acquired_account_id, "unversioned"))
         raise
     finally:
         gate.release(acquired_account_id)
-
-
-def _is_deepseek_ds2api_upstream_empty_output_rate_limit(exc: DeepSeekDs2apiError) -> bool:
-    text = str(exc).lower()
-    return exc.status_code == 429 and ("upstream_empty_output" in text or "empty output" in text)
 
 
 def _provider_auth_required_detail(provider_label: str) -> str:
@@ -6696,30 +6879,29 @@ def _is_provider_auth_failure(status_code: int | None, text: Any) -> bool:
     return any(marker in lowered for marker in markers)
 
 
-def _call_deepseek_ds2api_with_retry(
+def _is_qwen_direct_account_switch_exception(exc: BaseException) -> bool:
+    if _is_qwen_direct_rate_limit_exception(exc):
+        return True
+    status_code = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+    return _is_provider_auth_failure(status_code, exc)
+
+
+def _call_deepseek_ds2api_with_gate(
     app: FastAPI,
     web_client: Any,
     payload: dict[str, Any],
     config: GatewayConfig,
 ) -> dict[str, Any]:
-    delays = _deepseek_ds2api_retry_delays(app)
     gate = _deepseek_ds2api_bearer_gate(app, config)
-    for attempt in range(len(delays) + 1):
-        gate.acquire()
-        try:
-            return web_client.chat_completions(payload)
-        except DeepSeekDs2apiError as exc:
-            if _is_deepseek_ds2api_upstream_empty_output_rate_limit(exc):
-                gate.note_rate_limit()
-            if exc.status_code != 429 or attempt >= len(delays):
-                raise
-            delay = delays[attempt]
-        finally:
-            gate.release()
-        if attempt < len(delays):
-            if delay > 0:
-                time.sleep(delay)
-    raise RuntimeError("unreachable ds2api retry state")
+    gate.acquire()
+    try:
+        return web_client.chat_completions(payload)
+    except DeepSeekDs2apiError as exc:
+        if exc.status_code == 429:
+            gate.note_rate_limit()
+        raise
+    finally:
+        gate.release()
 
 
 def _deepseek_web_chat(app: FastAPI, client: httpx.Client, body: dict[str, Any], config: GatewayConfig) -> Response:
@@ -6756,7 +6938,7 @@ def _deepseek_web_chat(app: FastAPI, client: httpx.Client, body: dict[str, Any],
                 ),
             )
         web_client = _build_deepseek_web_client(app.state.deepseek_client_factory, credential, client, config)
-        data = _call_deepseek_ds2api_with_retry(app, web_client, payload, config)
+        data = _call_deepseek_ds2api_with_gate(app, web_client, payload, config)
     except DeepSeekDs2apiError as exc:
         status_code = _provider_dependency_status_code(exc.status_code)
         _record_completion_error_diagnostic(
@@ -6828,7 +7010,7 @@ def _deepseek_web_chat(app: FastAPI, client: httpx.Client, body: dict[str, Any],
             allowed_tools=allowed_tools,
             bridge_context=bridge_context,
             model=model,
-            retry_chat=lambda retry_payload: _call_deepseek_ds2api_with_retry(app, web_client, retry_payload, config),
+            retry_chat=lambda retry_payload: _call_deepseek_ds2api_with_gate(app, web_client, retry_payload, config),
             native_web_search=bool(payload.get("_webai_native_web_search")),
             request_trace=_completion_request_trace_fields(
                 endpoint="/v1/chat/completions",
@@ -6948,36 +7130,46 @@ def _qwen_web_chat(app: FastAPI, client: httpx.Client, body: dict[str, Any], con
     try:
         web_client = None
         target_pinned = bool(str(body.get("_webai_target_account_id") or "").strip())
-        web_client = _build_qwen_web_client(app.state.qwen_client_factory, credential, client, config)
         try:
-            data = _call_qwen_direct_with_gate(
+            with _qwen_direct_gate_lease(
                 app,
                 provider_id="qwen",
                 route="qwen-web",
-                account_id=account_id,
-                web_client=web_client,
-                payload=payload,
                 config=config,
+                target=account_id if target_pinned else "",
+                preferred="" if target_pinned else account_id,
+            ) as leased_account_id:
+                account_id = leased_account_id
+                credential = _direct_credential_for_account(app, "qwen", account_id)
+                if not is_credential_authorized("qwen", credential):
+                    raise HTTPException(status_code=424, detail=_provider_auth_required_detail("Qwen Web"))
+                web_client = _build_qwen_web_client(app.state.qwen_client_factory, credential, client, config)
+                data = web_client.chat_completions(payload)
+        except Exception as exc:
+            if isinstance(exc, HTTPException):
+                raise
+            alternate_account_id = (
+                ""
+                if target_pinned or not _is_qwen_direct_account_switch_exception(exc)
+                else _alternate_direct_account_id(app, "qwen", account_id)
             )
-        except httpx.HTTPStatusError as exc:
-            alternate_account_id = "" if target_pinned or not _is_qwen_direct_rate_limit_exception(exc) else _alternate_direct_account_id(app, "qwen", account_id)
             if not alternate_account_id:
                 raise
-            alternate_credential = _direct_credential_for_account(app, "qwen", alternate_account_id)
-            if not is_credential_authorized("qwen", alternate_credential):
-                raise
-            account_id = alternate_account_id
-            credential = alternate_credential
-            web_client = _build_qwen_web_client(app.state.qwen_client_factory, credential, client, config)
-            data = _call_qwen_direct_with_gate(
+            failed_account_id = account_id
+            with _qwen_direct_gate_lease(
                 app,
                 provider_id="qwen",
                 route="qwen-web",
-                account_id=account_id,
-                web_client=web_client,
-                payload=payload,
                 config=config,
-            )
+                preferred=alternate_account_id,
+                exclude={failed_account_id},
+            ) as leased_account_id:
+                account_id = leased_account_id
+                credential = _direct_credential_for_account(app, "qwen", account_id)
+                if not is_credential_authorized("qwen", credential):
+                    raise HTTPException(status_code=424, detail=_provider_auth_required_detail("Qwen Web"))
+                web_client = _build_qwen_web_client(app.state.qwen_client_factory, credential, client, config)
+                data = web_client.chat_completions(payload)
     except HTTPException:
         raise
     except httpx.HTTPStatusError as exc:
@@ -7193,36 +7385,46 @@ def _qwen_coder_chat(app: FastAPI, client: httpx.Client, body: dict[str, Any], c
     try:
         web_client = None
         target_pinned = bool(str(body.get("_webai_target_account_id") or "").strip())
-        web_client = _build_qwen_coder_client(app.state.qwen_coder_client_factory, credential, client, config)
         try:
-            data = _call_qwen_direct_with_gate(
+            with _qwen_direct_gate_lease(
                 app,
                 provider_id="qwen-coder",
                 route="qwen-coder",
-                account_id=account_id,
-                web_client=web_client,
-                payload=payload,
                 config=config,
+                target=account_id if target_pinned else "",
+                preferred="" if target_pinned else account_id,
+            ) as leased_account_id:
+                account_id = leased_account_id
+                credential = _direct_credential_for_account(app, "qwen-coder", account_id)
+                if not is_credential_authorized("qwen-coder", credential):
+                    raise HTTPException(status_code=424, detail=_provider_auth_required_detail("Qwen Coder Web"))
+                web_client = _build_qwen_coder_client(app.state.qwen_coder_client_factory, credential, client, config)
+                data = web_client.chat_completions(payload)
+        except Exception as exc:
+            if isinstance(exc, HTTPException):
+                raise
+            alternate_account_id = (
+                ""
+                if target_pinned or not _is_qwen_direct_account_switch_exception(exc)
+                else _alternate_direct_account_id(app, "qwen-coder", account_id)
             )
-        except httpx.HTTPStatusError as exc:
-            alternate_account_id = "" if target_pinned or not _is_qwen_direct_rate_limit_exception(exc) else _alternate_direct_account_id(app, "qwen-coder", account_id)
             if not alternate_account_id:
                 raise
-            alternate_credential = _direct_credential_for_account(app, "qwen-coder", alternate_account_id)
-            if not is_credential_authorized("qwen-coder", alternate_credential):
-                raise
-            account_id = alternate_account_id
-            credential = alternate_credential
-            web_client = _build_qwen_coder_client(app.state.qwen_coder_client_factory, credential, client, config)
-            data = _call_qwen_direct_with_gate(
+            failed_account_id = account_id
+            with _qwen_direct_gate_lease(
                 app,
                 provider_id="qwen-coder",
                 route="qwen-coder",
-                account_id=account_id,
-                web_client=web_client,
-                payload=payload,
                 config=config,
-            )
+                preferred=alternate_account_id,
+                exclude={failed_account_id},
+            ) as leased_account_id:
+                account_id = leased_account_id
+                credential = _direct_credential_for_account(app, "qwen-coder", account_id)
+                if not is_credential_authorized("qwen-coder", credential):
+                    raise HTTPException(status_code=424, detail=_provider_auth_required_detail("Qwen Coder Web"))
+                web_client = _build_qwen_coder_client(app.state.qwen_coder_client_factory, credential, client, config)
+                data = web_client.chat_completions(payload)
     except HTTPException:
         raise
     except httpx.HTTPStatusError as exc:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import ast
+from bisect import bisect_right
 import fnmatch
 import html
 import re
@@ -3011,28 +3012,30 @@ def parse_tool_response(text: str, context: ToolBridgeContext) -> BridgeResult:
         )
 
     candidates: list[Any] = []
-    unfenced_raw = _without_fenced_code_blocks(raw)
-    direct_tool_marker_seen = _has_direct_tool_tag_syntax(unfenced_raw, context)
+    executable_scan = _masked_non_executable_tool_examples(raw)
+    semantic_scan = _masked_inline_code_and_cdata(raw)
+    fenced_tool_matches = _top_level_fenced_tool_json_matches(raw)
+    direct_tool_marker_seen = _has_direct_tool_tag_syntax(executable_scan, context)
     marker_seen = bool(
-        _FENCED_TOOL_RE.search(raw)
-        or _INCOMPLETE_FENCED_TOOL_RE.search(raw)
-        or _FENCED_JSON_FRAGMENT_RE.search(raw)
-        or _XML_TOOL_RE.search(raw)
+        fenced_tool_matches
+        or _has_top_level_tool_json_fence(raw)
+        or (_FENCED_JSON_FRAGMENT_RE.search(raw) and _has_top_level_json_candidate_fence(raw))
+        or _XML_TOOL_RE.search(executable_scan)
         or _has_dsml_tool_call_syntax(raw)
-        or _looks_like_ds2api_xml_tool_markup(unfenced_raw)
+        or _looks_like_ds2api_xml_tool_markup(executable_scan)
         or direct_tool_marker_seen
-        or _LEGACY_FUNCTION_CALLS_RE.search(raw)
-        or _TOOL_CODE_RE.search(raw)
+        or _LEGACY_FUNCTION_CALLS_RE.search(executable_scan)
+        or _TOOL_CODE_RE.search(executable_scan)
     )
     malformed_seen = False
-    for match in _FENCED_TOOL_RE.finditer(raw):
+    for match in fenced_tool_matches:
         item = _loads_tool_json_candidate(match.group(1), context)
         if item is None:
             malformed_seen = True
         else:
             candidates.append(item)
-    for match in _XML_TOOL_RE.finditer(raw):
-        item = _loads_tool_json_candidate(match.group(1), context)
+    for match in _XML_TOOL_RE.finditer(executable_scan):
+        item = _loads_tool_json_candidate(raw[match.start(1) : match.end(1)], context)
         if item is None:
             malformed_seen = True
         else:
@@ -3046,14 +3049,14 @@ def parse_tool_response(text: str, context: ToolBridgeContext) -> BridgeResult:
             malformed_seen = False
     used_xml_function_equals = False
     if not candidates:
-        xml_function_candidates = _extract_xml_function_equals_candidates(raw)
+        xml_function_candidates = _extract_xml_function_equals_candidates(executable_scan, source_text=raw)
         if xml_function_candidates:
             candidates.extend(xml_function_candidates)
             used_xml_function_equals = True
             malformed_seen = False
     used_direct_tool_tags = False
     if not candidates:
-        direct_tool_tag_candidates = _extract_direct_tool_tag_candidates(raw, context)
+        direct_tool_tag_candidates = _extract_direct_tool_tag_candidates(executable_scan, context, source_text=raw)
         if direct_tool_tag_candidates:
             candidates.extend(direct_tool_tag_candidates)
             used_direct_tool_tags = True
@@ -3072,38 +3075,38 @@ def parse_tool_response(text: str, context: ToolBridgeContext) -> BridgeResult:
             used_bare = True
     used_embedded_json = False
     if not candidates:
-        embedded_candidates = _extract_embedded_tool_json_candidates(raw)
+        embedded_candidates = _extract_embedded_tool_json_candidates(executable_scan, source_text=raw)
         if embedded_candidates:
             candidates.extend(embedded_candidates)
             used_embedded_json = True
-    echoed_tool_history = _looks_like_echoed_tool_history(raw)
+    echoed_tool_history = _looks_like_echoed_tool_history(executable_scan)
     used_summary = False
     if not candidates and not echoed_tool_history:
-        summary_candidates = _extract_tool_summary_candidates(raw, context)
+        summary_candidates = _extract_tool_summary_candidates(executable_scan, context, source_text=raw)
         if summary_candidates:
             candidates.extend(summary_candidates)
             used_summary = True
     used_legacy_function_calls = False
     if not candidates:
-        legacy_candidates = _extract_legacy_function_call_candidates(raw)
+        legacy_candidates = _extract_legacy_function_call_candidates(executable_scan, source_text=raw)
         if legacy_candidates:
             candidates.extend(legacy_candidates)
             used_legacy_function_calls = True
     used_tool_code = False
     if not candidates:
-        tool_code_candidates = _extract_tool_code_candidates(raw, context)
+        tool_code_candidates = _extract_tool_code_candidates(executable_scan, context, source_text=raw)
         if tool_code_candidates:
             candidates.extend(tool_code_candidates)
             used_tool_code = True
     used_bare_function_call = False
     if not candidates:
-        bare_function_candidates = _extract_bare_function_call_candidates(raw, context)
+        bare_function_candidates = _extract_bare_function_call_candidates(executable_scan, context, source_text=raw)
         if bare_function_candidates:
             candidates.extend(bare_function_candidates)
             used_bare_function_call = True
     used_provider_search = False
     if not candidates:
-        search_candidates, search_query = _extract_provider_search_candidates(raw, context)
+        search_candidates, search_query = _extract_provider_search_candidates(executable_scan, context, source_text=raw)
         if search_candidates:
             candidates.extend(search_candidates)
             used_provider_search = True
@@ -3122,13 +3125,13 @@ def parse_tool_response(text: str, context: ToolBridgeContext) -> BridgeResult:
             used_unwrapped_shell = True
     used_forced_marker_recovery = False
     if not candidates:
-        forced_marker_candidate = _forced_single_tool_marker_candidate(raw, context)
+        forced_marker_candidate = _forced_single_tool_marker_candidate(executable_scan, context)
         if forced_marker_candidate:
             candidates.append(forced_marker_candidate)
             used_forced_marker_recovery = True
     if not candidates:
         record_phase("extract", "ok", "plain_text/no_candidate")
-        warning = "tool_result_claim_without_tool_call" if _TOOL_RESULT_CLAIM_RE.search(raw) else None
+        warning = "tool_result_claim_without_tool_call" if _TOOL_RESULT_CLAIM_RE.search(executable_scan) else None
         fenced_shell_commands = _extract_fenced_shell_command_lines(raw)
         if _looks_like_empty_or_garbled_fence_response(raw, context):
             return finish(
@@ -3181,9 +3184,9 @@ def parse_tool_response(text: str, context: ToolBridgeContext) -> BridgeResult:
                 warning=warning,
                 raw_content=raw,
             )
-        if _looks_like_substantive_chinese_improvement_plan(raw) and _allows_plain_review_or_plan_text(context):
+        if _looks_like_substantive_chinese_improvement_plan(semantic_scan) and _allows_plain_review_or_plan_text(context):
             return finish(content=raw, tool_calls=[], warning=warning, raw_content=raw)
-        if _is_allowed_tool_denial(raw, context):
+        if _is_allowed_tool_denial(executable_scan, context):
             return finish(
                 content=raw,
                 tool_calls=[],
@@ -3191,7 +3194,7 @@ def parse_tool_response(text: str, context: ToolBridgeContext) -> BridgeResult:
                 warning=warning,
                 raw_content=raw,
             )
-        if _is_deferred_named_tool_action_without_call(raw, context):
+        if _is_deferred_named_tool_action_without_call(executable_scan, context):
             return finish(
                 content=raw,
                 tool_calls=[],
@@ -3203,7 +3206,7 @@ def parse_tool_response(text: str, context: ToolBridgeContext) -> BridgeResult:
                 warning=warning,
                 raw_content=raw,
             )
-        if _is_unverified_code_change_completion(raw, context):
+        if _is_unverified_code_change_completion(executable_scan, context):
             return finish(
                 content=raw,
                 tool_calls=[],
@@ -3250,7 +3253,7 @@ def parse_tool_response(text: str, context: ToolBridgeContext) -> BridgeResult:
                 warning=warning,
                 raw_content=raw,
             )
-        if _is_prose_shell_command_intent_without_call(raw, context):
+        if _is_prose_shell_command_intent_without_call(executable_scan, context):
             shell_error = _hidden_local_agent_shell_tool_error("Bash", context) or BridgeError(
                     "shell_command_without_tool_json",
                     (
@@ -3296,7 +3299,7 @@ def parse_tool_response(text: str, context: ToolBridgeContext) -> BridgeResult:
                 warning=warning,
                 raw_content=raw,
             )
-        if _is_deferred_local_file_inspection_without_call(raw, context):
+        if _is_deferred_local_file_inspection_without_call(executable_scan, context):
             return finish(
                 content=raw,
                 tool_calls=[],
@@ -3308,7 +3311,7 @@ def parse_tool_response(text: str, context: ToolBridgeContext) -> BridgeResult:
                 warning=warning,
                 raw_content=raw,
             )
-        if _is_unproven_final_answer_without_tool_call(raw, context):
+        if _is_unproven_final_answer_without_tool_call(executable_scan, context):
             return finish(
                 content=raw,
                 tool_calls=[],
@@ -3324,7 +3327,7 @@ def parse_tool_response(text: str, context: ToolBridgeContext) -> BridgeResult:
                 warning=warning,
                 raw_content=raw,
             )
-        if context.allowed_names and _has_code_change_tool(context) and _DEFERRED_CODE_CHANGE_ACTION_RE.search(raw):
+        if context.allowed_names and _has_code_change_tool(context) and _DEFERRED_CODE_CHANGE_ACTION_RE.search(executable_scan):
             if _allows_plain_review_or_plan_text(context):
                 return finish(
                     content=raw,
@@ -3350,7 +3353,7 @@ def parse_tool_response(text: str, context: ToolBridgeContext) -> BridgeResult:
                 warning=warning,
                 raw_content=raw,
             )
-        if context.allowed_names and _DEFERRED_TOOL_ACTION_RE.search(raw):
+        if context.allowed_names and _DEFERRED_TOOL_ACTION_RE.search(executable_scan):
             return finish(
                 content=raw,
                 tool_calls=[],
@@ -3362,7 +3365,7 @@ def parse_tool_response(text: str, context: ToolBridgeContext) -> BridgeResult:
                 warning=warning,
                 raw_content=raw,
             )
-        if _is_premature_clarification_without_tool_call(raw, context):
+        if _is_premature_clarification_without_tool_call(executable_scan, context):
             return finish(
                 content=raw,
                 tool_calls=[],
@@ -3586,27 +3589,35 @@ def _stringify_schema_value(value: Any) -> tuple[Any, bool]:
         return value, False
 
 
-def _extract_tool_summary_candidates(text: str, context: ToolBridgeContext) -> list[dict[str, Any]]:
-    header_match = _TOOL_SUMMARY_HEADER_RE.search(text or "")
+def _extract_tool_summary_candidates(
+    text: str,
+    context: ToolBridgeContext,
+    *,
+    source_text: str | None = None,
+) -> list[dict[str, Any]]:
+    scan = text or ""
+    source = scan if source_text is None else source_text
+    header_match = _TOOL_SUMMARY_HEADER_RE.search(scan)
     if not header_match:
         return []
     allowed_lower = {name.lower() for name in context.allowed_names}
     candidates: list[dict[str, Any]] = []
-    summary_text = (text or "")[header_match.end() :]
-    for match in _TOOL_SUMMARY_CALL_START_RE.finditer(summary_text):
+    summary_scan = scan[header_match.end() :]
+    summary_source = source[header_match.end() :]
+    for match in _TOOL_SUMMARY_CALL_START_RE.finditer(summary_scan):
         name = match.group("name").strip()
         if name.lower() not in allowed_lower:
             continue
-        input_start = _skip_ws(summary_text, match.end())
-        if input_start >= len(summary_text) or summary_text[input_start] != "{":
+        input_start = _skip_ws(summary_scan, match.end())
+        if input_start >= len(summary_scan) or summary_scan[input_start] != "{":
             continue
-        input_end = _balanced_json_object_end(summary_text, input_start)
+        input_end = _balanced_json_object_end(summary_source, input_start)
         if input_end is None:
             continue
-        close_paren = _skip_ws(summary_text, input_end)
-        if close_paren >= len(summary_text) or summary_text[close_paren] != ")":
+        close_paren = _skip_ws(summary_scan, input_end)
+        if close_paren >= len(summary_scan) or summary_scan[close_paren] != ")":
             continue
-        args = _loads_summary_input(summary_text[input_start:input_end])
+        args = _loads_summary_input(summary_source[input_start:input_end])
         candidates.append({"id": f"toolu_summary_{len(candidates) + 1}", "name": name, "input": args})
     return candidates
 
@@ -3843,19 +3854,37 @@ def _extract_dsml_tool_call_blocks(text: str) -> list[str]:
 
 def _find_dsml_tool_call_block_ranges(text: str) -> list[tuple[int, int]]:
     raw = text or ""
-    fenced_ranges = _fenced_code_ranges(raw)
+    fenced_ranges, inline_code_ranges, cdata_ranges = _tool_literal_markup_ranges(raw)
+    literal_ranges = _merge_ranges([*fenced_ranges, *inline_code_ranges, *cdata_ranges])
+    markdown_literal_ranges = _merge_ranges([*fenced_ranges, *inline_code_ranges])
     ranges: list[tuple[int, int]] = []
     pos = 0
     while True:
         start_match = _XML_TOOL_CALLS_OPEN_RE.search(raw, pos)
         if not start_match:
             break
-        if _index_in_ranges(start_match.start(), fenced_ranges) or _index_inside_cdata(raw, start_match.start()):
+        if (
+            _index_in_ranges(start_match.start(), fenced_ranges)
+            or _index_in_ranges(start_match.start(), inline_code_ranges)
+            or _index_in_ranges(start_match.start(), cdata_ranges)
+        ):
             pos = start_match.end()
             continue
-        close_match = _find_regex_outside_cdata(_XML_TOOL_CALLS_CLOSE_RE, raw, start_match.end())
+        close_match = _find_regex_outside_ranges(
+            _XML_TOOL_CALLS_CLOSE_RE,
+            raw,
+            literal_ranges,
+            start_match.end(),
+        )
         if close_match is None and "<![CDATA[" in raw[start_match.end() :]:
-            close_match = _XML_TOOL_CALLS_CLOSE_RE.search(raw, start_match.end())
+            # Keep the loose-CDATA recovery used by ds2api-style output, but
+            # never let a Markdown example terminate a real outer block.
+            close_match = _find_regex_outside_ranges(
+                _XML_TOOL_CALLS_CLOSE_RE,
+                raw,
+                markdown_literal_ranges,
+                start_match.end(),
+            )
         if close_match is None:
             pos = start_match.end()
             continue
@@ -3866,7 +3895,15 @@ def _find_dsml_tool_call_block_ranges(text: str) -> list[tuple[int, int]]:
 
 def _extract_missing_opening_wrapper_dsml_blocks(text: str, existing_ranges: list[tuple[int, int]]) -> list[str]:
     raw = text or ""
-    fenced_ranges = _fenced_code_ranges(raw)
+    fenced_ranges, inline_code_ranges, cdata_ranges = _tool_literal_markup_ranges(raw)
+    literal_ranges = _merge_ranges([*fenced_ranges, *inline_code_ranges, *cdata_ranges])
+    valid_wrapper_opens = [
+        match.start()
+        for match in _XML_TOOL_CALLS_OPEN_RE.finditer(raw)
+        if not _index_in_ranges(match.start(), fenced_ranges)
+        and not _index_in_ranges(match.start(), inline_code_ranges)
+        and not _index_in_ranges(match.start(), cdata_ranges)
+    ]
     blocks: list[str] = []
     pos = 0
     while True:
@@ -3875,33 +3912,34 @@ def _extract_missing_opening_wrapper_dsml_blocks(text: str, existing_ranges: lis
             break
         if (
             _index_in_ranges(invoke_match.start(), fenced_ranges)
-            or _index_inside_cdata(raw, invoke_match.start())
+            or _index_in_ranges(invoke_match.start(), inline_code_ranges)
+            or _index_in_ranges(invoke_match.start(), cdata_ranges)
             or _index_in_ranges(invoke_match.start(), existing_ranges)
         ):
             pos = invoke_match.end()
             continue
-        close_match = _find_regex_outside_cdata(_XML_TOOL_CALLS_CLOSE_RE, raw, invoke_match.end())
+        close_match = _find_regex_outside_ranges(
+            _XML_TOOL_CALLS_CLOSE_RE,
+            raw,
+            literal_ranges,
+            invoke_match.end(),
+        )
         if close_match is None:
             pos = invoke_match.end()
             continue
-        if _index_in_ranges(close_match.start(), fenced_ranges):
+        if _index_in_ranges(close_match.start(), fenced_ranges) or _index_in_ranges(
+            close_match.start(), inline_code_ranges
+        ):
             pos = close_match.end()
             continue
-        open_before = _find_last_tool_calls_open_before(raw, invoke_match.start())
+        open_index = bisect_right(valid_wrapper_opens, invoke_match.start()) - 1
+        open_before = valid_wrapper_opens[open_index] if open_index >= 0 else None
         if open_before is not None and open_before >= pos:
             pos = close_match.end()
             continue
         blocks.append("<tool_calls>" + raw[invoke_match.start() : close_match.end()])
         pos = close_match.end()
     return blocks
-
-
-def _find_last_tool_calls_open_before(text: str, end: int) -> int | None:
-    last: int | None = None
-    for match in _XML_TOOL_CALLS_OPEN_RE.finditer((text or "")[: max(end, 0)]):
-        if not _index_inside_cdata(text, match.start()):
-            last = match.start()
-    return last
 
 
 def _fenced_code_ranges(text: str) -> list[tuple[int, int]]:
@@ -3936,6 +3974,188 @@ def _fenced_code_ranges(text: str) -> list[tuple[int, int]]:
     return ranges
 
 
+def _markdown_inline_code_ranges(
+    text: str,
+    *,
+    fenced_ranges: list[tuple[int, int]] | None = None,
+) -> list[tuple[int, int]]:
+    """Return closed Markdown inline-code spans outside fences and CDATA.
+
+    An unmatched backtick is treated as literal text. This mirrors ds2api's
+    v4.6.1 behavior: documentation examples in a closed inline span are not
+    executable, while a real tool call after a stray backtick remains visible.
+    """
+
+    raw = text or ""
+    fenced = fenced_ranges if fenced_ranges is not None else _fenced_code_ranges(raw)
+    ignored = _merge_ranges([*fenced, *_cdata_ranges(raw)])
+    tokens: list[tuple[int, int, int]] = []
+    ignored_index = 0
+    index = 0
+    while index < len(raw):
+        while ignored_index < len(ignored) and ignored[ignored_index][1] <= index:
+            ignored_index += 1
+        if ignored_index < len(ignored) and ignored[ignored_index][0] <= index < ignored[ignored_index][1]:
+            index = ignored[ignored_index][1]
+            continue
+        if raw[index] != "`":
+            index += 1
+            continue
+        end = index + 1
+        while end < len(raw) and raw[end] == "`":
+            end += 1
+        tokens.append((index, end, end - index))
+        index = end
+
+    next_same: list[int | None] = [None] * len(tokens)
+    last_by_width: dict[int, int] = {}
+    for token_index in range(len(tokens) - 1, -1, -1):
+        width = tokens[token_index][2]
+        next_same[token_index] = last_by_width.get(width)
+        last_by_width[width] = token_index
+
+    ranges: list[tuple[int, int]] = []
+    token_index = 0
+    while token_index < len(tokens):
+        close_index = next_same[token_index]
+        if close_index is None:
+            token_index += 1
+            continue
+        ranges.append((tokens[token_index][0], tokens[close_index][1]))
+        token_index = close_index + 1
+    return ranges
+
+
+def _top_level_fenced_tool_json_matches(text: str) -> list[re.Match[str]]:
+    raw = text or ""
+    fenced_ranges = _fenced_code_ranges(raw)
+    matches: list[re.Match[str]] = []
+    for match in _FENCED_TOOL_RE.finditer(raw):
+        line_start = raw.rfind("\n", 0, match.start()) + 1
+        containing = next(
+            ((start, end) for start, end in fenced_ranges if start <= match.start() < end),
+            None,
+        )
+        if containing is None or containing[0] != line_start:
+            continue
+        if raw[line_start : match.start()].strip():
+            continue
+        matches.append(match)
+    return matches
+
+
+def _has_top_level_tool_json_fence(text: str) -> bool:
+    raw = text or ""
+    for start, _end in _fenced_code_ranges(raw):
+        line_end = raw.find("\n", start)
+        if line_end < 0:
+            line_end = len(raw)
+        opener = raw[start:line_end].lstrip(" \t")
+        marker = _fence_open_marker(opener)
+        if not marker or marker[0] != "`":
+            continue
+        language = opener[len(marker) :].strip().split(None, 1)[0].lower() if opener[len(marker) :].strip() else ""
+        if language == "tool_json":
+            return True
+    return False
+
+
+def _has_top_level_json_candidate_fence(text: str) -> bool:
+    raw = text or ""
+    for start, _end in _fenced_code_ranges(raw):
+        line_end = raw.find("\n", start)
+        if line_end < 0:
+            line_end = len(raw)
+        opener = raw[start:line_end].lstrip(" \t")
+        marker = _fence_open_marker(opener)
+        if not marker or marker[0] != "`":
+            continue
+        tail = opener[len(marker) :].strip()
+        language = tail.split(None, 1)[0].lower() if tail else ""
+        if language not in {
+            "bash",
+            "batch",
+            "cmd",
+            "html",
+            "javascript",
+            "js",
+            "markdown",
+            "md",
+            "plaintext",
+            "powershell",
+            "ps1",
+            "pwsh",
+            "python",
+            "sh",
+            "shell",
+            "text",
+            "typescript",
+            "ts",
+            "xml",
+            "yaml",
+            "yml",
+            "zsh",
+        }:
+            return True
+    return False
+
+
+def _masked_non_executable_tool_examples(text: str) -> str:
+    raw = text or ""
+    fenced, inline, cdata = _tool_literal_markup_ranges(raw)
+    return _mask_text_ranges(raw, [*fenced, *inline, *cdata])
+
+
+def _tool_literal_markup_ranges(
+    text: str,
+) -> tuple[list[tuple[int, int]], list[tuple[int, int]], list[tuple[int, int]]]:
+    """Return executable-scan exclusions without promoting fences inside CDATA.
+
+    Complex string parameters can contain fenced DSML and nested CDATA text.
+    The line-oriented fence scanner may see the closing fence as a new opener
+    after an inner ``]]>``.  The structural CDATA scanner is authoritative for
+    that region, so discard any fence whose opener is already inside it.
+    """
+
+    raw = text or ""
+    cdata = _cdata_ranges(raw)
+    fenced = [item for item in _fenced_code_ranges(raw) if not _index_in_ranges(item[0], cdata)]
+    inline = _markdown_inline_code_ranges(raw, fenced_ranges=fenced)
+    return fenced, inline, cdata
+
+
+def _masked_inline_code_and_cdata(text: str) -> str:
+    raw = text or ""
+    fenced = _fenced_code_ranges(raw)
+    inline = _markdown_inline_code_ranges(raw, fenced_ranges=fenced)
+    return _mask_text_ranges(raw, [*inline, *_cdata_ranges(raw)])
+
+
+def _mask_text_ranges(text: str, ranges: list[tuple[int, int]]) -> str:
+    raw = text or ""
+    merged = _merge_ranges(ranges)
+    if not merged:
+        return raw
+    out: list[str] = []
+    pos = 0
+    for start, end in merged:
+        out.append(raw[pos:start])
+        out.append(re.sub(r"[^\r\n]", " ", raw[start:end]))
+        pos = end
+    out.append(raw[pos:])
+    return "".join(out)
+
+
+def _merge_ranges(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted((max(0, start), max(0, end)) for start, end in ranges if end > start):
+        if not merged or start > merged[-1][1]:
+            merged.append((start, end))
+            continue
+        merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+    return merged
+
+
 def _without_fenced_code_blocks(text: str) -> str:
     raw = text or ""
     ranges = _fenced_code_ranges(raw)
@@ -3950,6 +4170,36 @@ def _without_fenced_code_blocks(text: str) -> str:
     return "".join(out)
 
 
+def _without_markdown_code_spans(text: str) -> str:
+    """Remove fenced and closed inline Markdown code used as documentation.
+
+    A stray, unclosed backtick remains ordinary text so it cannot hide a later
+    real tool call. Closed examples, however, must not trigger repair or
+    semantic tool-action heuristics.
+    """
+
+    raw = text or ""
+    fenced_ranges = _fenced_code_ranges(raw)
+    ranges = _merge_ranges(
+        [
+            *fenced_ranges,
+            *_markdown_inline_code_ranges(raw, fenced_ranges=fenced_ranges),
+            *_cdata_ranges(raw),
+        ]
+    )
+    if not ranges:
+        return raw
+    out: list[str] = []
+    pos = 0
+    for start, end in ranges:
+        if start < pos:
+            continue
+        out.append(raw[pos:start])
+        pos = end
+    out.append(raw[pos:])
+    return "".join(out)
+
+
 def _looks_like_empty_or_garbled_fence_response(raw: str, context: ToolBridgeContext) -> bool:
     stripped = (raw or "").strip()
     if not stripped or not context.allowed_names:
@@ -3957,6 +4207,36 @@ def _looks_like_empty_or_garbled_fence_response(raw: str, context: ToolBridgeCon
     if stripped in {"```", "~~~"}:
         return True
     if not (stripped.startswith("```") or stripped.startswith("~~~")):
+        return False
+    first_line = stripped.splitlines()[0].lstrip(" \t")
+    opener = _fence_open_marker(first_line)
+    opener_tail = first_line[len(opener) :].strip() if opener else ""
+    language = opener_tail.split(None, 1)[0].lower() if opener_tail else ""
+    documentation_languages = {
+        "bash",
+        "batch",
+        "cmd",
+        "html",
+        "javascript",
+        "js",
+        "markdown",
+        "md",
+        "plaintext",
+        "powershell",
+        "ps1",
+        "pwsh",
+        "python",
+        "sh",
+        "shell",
+        "text",
+        "typescript",
+        "ts",
+        "xml",
+        "yaml",
+        "yml",
+        "zsh",
+    }
+    if language in documentation_languages:
         return False
     ranges = _fenced_code_ranges(stripped)
     if ranges and _without_fenced_code_blocks(stripped).strip():
@@ -4056,7 +4336,13 @@ def _cdata_ranges(text: str) -> list[tuple[int, int]]:
 
 
 def _index_in_ranges(index: int, ranges: list[tuple[int, int]]) -> bool:
-    return any(start <= index < end for start, end in ranges)
+    if not ranges:
+        return False
+    position = bisect_right(ranges, (index, float("inf"))) - 1
+    if position < 0:
+        return False
+    start, end = ranges[position]
+    return start <= index < end
 
 
 def _index_inside_cdata(text: str, index: int) -> bool:
@@ -4064,13 +4350,22 @@ def _index_inside_cdata(text: str, index: int) -> bool:
 
 
 def _find_regex_outside_cdata(pattern: re.Pattern[str], text: str, start: int = 0) -> re.Match[str] | None:
+    return _find_regex_outside_ranges(pattern, text, _cdata_ranges(text), start)
+
+
+def _find_regex_outside_ranges(
+    pattern: re.Pattern[str],
+    text: str,
+    ignored_ranges: list[tuple[int, int]],
+    start: int = 0,
+) -> re.Match[str] | None:
     pos = start
     raw = text or ""
     while True:
         match = pattern.search(raw, pos)
         if match is None:
             return None
-        if not _index_inside_cdata(raw, match.start()):
+        if not _index_in_ranges(match.start(), ignored_ranges):
             return match
         pos = match.end()
 
@@ -4146,22 +4441,23 @@ def _dsml_local_tag_from_body(body: str) -> tuple[str, int] | None:
 
 def _find_xml_element_blocks(text: str, tag: str) -> list[tuple[int, int, str, str]]:
     raw = text or ""
+    scan = _masked_non_executable_tool_examples(raw)
     start_re = re.compile(rf"<{re.escape(tag)}\b(?P<attrs>[^>]*)>", re.IGNORECASE | re.DOTALL)
     close_re = re.compile(rf"</{re.escape(tag)}\s*>", re.IGNORECASE | re.DOTALL)
     blocks: list[tuple[int, int, str, str]] = []
     pos = 0
     while True:
-        start_match = _find_regex_outside_cdata(start_re, raw, pos)
+        start_match = start_re.search(scan, pos)
         if start_match is None:
             break
-        close_match = _find_regex_outside_cdata(close_re, raw, start_match.end())
+        close_match = close_re.search(scan, start_match.end())
         if close_match is None:
             break
         blocks.append(
             (
                 start_match.start(),
                 close_match.end(),
-                start_match.group("attrs") or "",
+                raw[start_match.start("attrs") : start_match.end("attrs")],
                 raw[start_match.end() : close_match.start()],
             )
         )
@@ -4643,16 +4939,22 @@ def _split_top_level_json_values(raw: str) -> list[str] | None:
     return values if len(values) >= 2 else None
 
 
-def _extract_legacy_function_call_candidates(text: str) -> list[dict[str, Any]]:
+def _extract_legacy_function_call_candidates(text: str, *, source_text: str | None = None) -> list[dict[str, Any]]:
+    scan = text or ""
+    source = scan if source_text is None else source_text
     candidates: list[dict[str, Any]] = []
-    for block_match in _LEGACY_FUNCTION_CALLS_RE.finditer(text or ""):
-        block = block_match.group("body") or ""
-        for invoke in _LEGACY_INVOKE_RE.finditer(block):
-            attrs = _legacy_attrs(invoke.group("attrs") or "")
+    for block_match in _LEGACY_FUNCTION_CALLS_RE.finditer(scan):
+        block_scan = block_match.group("body") or ""
+        block_source = source[block_match.start("body") : block_match.end("body")]
+        for invoke in _LEGACY_INVOKE_RE.finditer(block_scan):
+            attrs = _legacy_attrs(block_source[invoke.start("attrs") : invoke.end("attrs")])
             name = str(attrs.get("name") or attrs.get("tool") or attrs.get("function") or "").strip()
             if not name:
                 continue
-            input_value = _legacy_invoke_input(invoke.group("body") or "")
+            body = ""
+            if invoke.group("body") is not None:
+                body = block_source[invoke.start("body") : invoke.end("body")]
+            input_value = _legacy_invoke_input(body)
             candidates.append(
                 {
                     "id": f"toolu_legacy_{len(candidates) + 1}",
@@ -4663,15 +4965,23 @@ def _extract_legacy_function_call_candidates(text: str) -> list[dict[str, Any]]:
     return candidates
 
 
-def _extract_xml_function_equals_candidates(text: str) -> list[dict[str, Any]]:
+def _extract_xml_function_equals_candidates(text: str, *, source_text: str | None = None) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
-    raw = text or ""
-    tool_blocks = [block_match.group(1) or "" for block_match in _XML_TOOL_RE.finditer(raw)]
-    blocks = tool_blocks or [raw]
-    for block in blocks:
-        for function_match in _XML_FUNCTION_EQUALS_RE.finditer(block):
+    scan = text or ""
+    source = scan if source_text is None else source_text
+    tool_blocks = [
+        (
+            block_match.group(1) or "",
+            source[block_match.start(1) : block_match.end(1)],
+        )
+        for block_match in _XML_TOOL_RE.finditer(scan)
+    ]
+    blocks = tool_blocks or [(scan, source)]
+    for block_scan, block_source in blocks:
+        for function_match in _XML_FUNCTION_EQUALS_RE.finditer(block_scan):
             name = function_match.group("name").strip()
-            input_value = _legacy_invoke_input(function_match.group("body") or "")
+            body = block_source[function_match.start("body") : function_match.end("body")]
+            input_value = _legacy_invoke_input(body)
             candidates.append(
                 {
                     "id": f"toolu_xml_function_{len(candidates) + 1}",
@@ -4695,11 +5005,17 @@ def _has_direct_tool_tag_syntax(text: str, context: ToolBridgeContext) -> bool:
     return False
 
 
-def _extract_direct_tool_tag_candidates(text: str, context: ToolBridgeContext) -> list[dict[str, Any]]:
+def _extract_direct_tool_tag_candidates(
+    text: str,
+    context: ToolBridgeContext,
+    *,
+    source_text: str | None = None,
+) -> list[dict[str, Any]]:
     lookup = _direct_tool_tag_lookup(context)
     if not lookup:
         return []
-    raw = _without_fenced_code_blocks(text or "")
+    raw = text or ""
+    source = raw if source_text is None else source_text
     candidates: list[dict[str, Any]] = []
     pos = 0
     while True:
@@ -4716,7 +5032,7 @@ def _extract_direct_tool_tag_candidates(text: str, context: ToolBridgeContext) -
         if close_match is None:
             pos = start_match.end()
             continue
-        body = raw[start_match.end() : close_match.start()]
+        body = source[start_match.end() : close_match.start()]
         input_value = _direct_tool_tag_input(body, canonical_name, context)
         candidates.append(
             {
@@ -4822,26 +5138,45 @@ def _single_text_input_key_for_tool(tool_name: str, context: ToolBridgeContext) 
     return key
 
 
-def _extract_tool_code_candidates(text: str, context: ToolBridgeContext) -> list[dict[str, Any]]:
+def _extract_tool_code_candidates(
+    text: str,
+    context: ToolBridgeContext,
+    *,
+    source_text: str | None = None,
+) -> list[dict[str, Any]]:
+    scan = text or ""
+    source = scan if source_text is None else source_text
     candidates: list[dict[str, Any]] = []
-    for block_match in _TOOL_CODE_RE.finditer(text or ""):
+    for block_match in _TOOL_CODE_RE.finditer(scan):
         block = block_match.group("body") or ""
+        source_block = source[block_match.start("body") : block_match.end("body")]
         candidates.extend(
             _extract_function_call_line_candidates(
                 block,
                 context,
                 id_prefix="toolu_code",
                 start_index=len(candidates) + 1,
+                source_text=source_block,
             )
         )
     return candidates
 
 
-def _extract_bare_function_call_candidates(text: str, context: ToolBridgeContext) -> list[dict[str, Any]]:
+def _extract_bare_function_call_candidates(
+    text: str,
+    context: ToolBridgeContext,
+    *,
+    source_text: str | None = None,
+) -> list[dict[str, Any]]:
     raw = text or ""
     if not raw.strip() or "```" in raw:
         return []
-    return _extract_function_call_line_candidates(raw, context, id_prefix="toolu_bare")
+    return _extract_function_call_line_candidates(
+        raw,
+        context,
+        id_prefix="toolu_bare",
+        source_text=source_text,
+    )
 
 
 def _markdown_tool_call_artifact_summary(text: str, context: ToolBridgeContext) -> str:
@@ -4874,16 +5209,20 @@ def _extract_function_call_line_candidates(
     *,
     id_prefix: str,
     start_index: int = 1,
+    source_text: str | None = None,
 ) -> list[dict[str, Any]]:
     allowed_lower = {name.lower() for name in context.allowed_names}
     if not allowed_lower:
         return []
 
     candidates: list[dict[str, Any]] = []
-    for line in (text or "").splitlines():
-        source = line.strip()
-        if not source or not _BARE_FUNCTION_CALL_LINE_RE.match(source):
+    scan_lines = (text or "").splitlines()
+    source_lines = (source_text if source_text is not None else text or "").splitlines()
+    for index, line in enumerate(scan_lines):
+        scan_source = line.strip()
+        if not scan_source or not _BARE_FUNCTION_CALL_LINE_RE.match(scan_source):
             continue
+        source = source_lines[index].strip() if index < len(source_lines) else scan_source
         parsed = _parse_allowed_function_call_source(source, allowed_lower)
         if parsed is None:
             continue
@@ -4987,8 +5326,13 @@ def _balanced_json_object_end(text: str, start: int) -> int | None:
     return None
 
 
-def _extract_provider_search_candidates(text: str, context: ToolBridgeContext) -> tuple[list[dict[str, Any]], str | None]:
-    query = _extract_provider_search_query(text)
+def _extract_provider_search_candidates(
+    text: str,
+    context: ToolBridgeContext,
+    *,
+    source_text: str | None = None,
+) -> tuple[list[dict[str, Any]], str | None]:
+    query = _extract_provider_search_query(text, source_text=source_text)
     if query is None:
         return [], None
     if not query:
@@ -4999,11 +5343,13 @@ def _extract_provider_search_candidates(text: str, context: ToolBridgeContext) -
     return [{"id": "toolu_search_1", "name": tool.name, "input": _provider_search_input(tool, query)}], query
 
 
-def _extract_provider_search_query(text: str) -> str | None:
-    match = _PROVIDER_SEARCH_RE.search(text or "")
+def _extract_provider_search_query(text: str, *, source_text: str | None = None) -> str | None:
+    scan = text or ""
+    source = scan if source_text is None else source_text
+    match = _PROVIDER_SEARCH_RE.search(scan)
     if not match:
         return None
-    body = match.group("body") or ""
+    body = source[match.start("body") : match.end("body")]
     query_match = _PROVIDER_SEARCH_QUERY_RE.search(body)
     raw_query = query_match.group("query") if query_match else re.sub(r"<[^>]+>", " ", body)
     return re.sub(r"\s+", " ", html.unescape(raw_query or "")).strip()
@@ -6198,7 +6544,7 @@ def _is_deferred_named_tool_action_without_call(text: str, context: ToolBridgeCo
         or _task_explicitly_allows_mutation(context.task_text)
     ):
         return False
-    lowered = _without_fenced_code_blocks(text).lower()
+    lowered = _without_markdown_code_spans(text).lower()
     if _PRIOR_TOOL_RESULT_REFERENCE_RE.search(lowered):
         return False
     action_markers = (
@@ -6536,22 +6882,23 @@ def _escape_invalid_json_backslashes(raw: str) -> str:
     return "".join(out)
 
 
-def _extract_embedded_tool_json_candidates(text: str) -> list[Any]:
-    raw = text or ""
-    stripped = raw.strip()
+def _extract_embedded_tool_json_candidates(text: str, *, source_text: str | None = None) -> list[Any]:
+    scan = text or ""
+    source = scan if source_text is None else source_text
+    stripped = scan.strip()
     if not stripped or stripped.startswith("{") or stripped.startswith("["):
         return []
 
     decoder = json.JSONDecoder()
     starts_checked = 0
-    for index, char in enumerate(raw):
+    for index, char in enumerate(scan):
         if char not in "{[":
             continue
         starts_checked += 1
         if starts_checked > 128:
             break
         try:
-            value, _ = decoder.raw_decode(raw[index:])
+            value, _ = decoder.raw_decode(source[index:])
         except ValueError:
             continue
         if _looks_like_tool_json_candidate(value):
@@ -6583,6 +6930,11 @@ def _extract_unwrapped_shell_command_candidates(text: str, context: ToolBridgeCo
     if not (context.has_tool_loop or _looks_like_local_agent_task(context.task_text)):
         return []
     fenced_commands = _extract_fenced_shell_command_lines(text or "")
+    if fenced_commands and _without_fenced_code_blocks(text or "").strip():
+        # A shell fence embedded in a longer explanation is documentation, not
+        # an executable request. The compatibility recovery is limited to a
+        # response whose only substantive content is the shell fence.
+        return []
     commands = fenced_commands or [match.group("command").strip() for match in _SHELL_COMMAND_LINE_RE.finditer(text or "")]
     if not commands:
         return []
@@ -6602,8 +6954,17 @@ def _extract_unwrapped_shell_command_candidates(text: str, context: ToolBridgeCo
 
 
 def _extract_fenced_shell_command_lines(text: str) -> list[str]:
+    raw = text or ""
+    fenced_ranges = _fenced_code_ranges(raw)
     commands: list[str] = []
-    for match in _FENCED_CODE_BLOCK_RE.finditer(text or ""):
+    for match in _FENCED_CODE_BLOCK_RE.finditer(raw):
+        line_start = raw.rfind("\n", 0, match.start()) + 1
+        containing = next(
+            ((start, end) for start, end in fenced_ranges if start <= match.start() < end),
+            None,
+        )
+        if containing is None or containing[0] != line_start or raw[line_start : match.start()].strip():
+            continue
         lang = (match.group("lang") or "").strip().lower()
         if lang not in {"bash", "sh", "shell", "zsh", "powershell", "pwsh", "ps1", "cmd", "bat", "batch"}:
             continue

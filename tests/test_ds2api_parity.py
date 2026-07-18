@@ -15,7 +15,7 @@ from ds2api_oracle import (
     run_ds2api_runner,
 )
 from webai_gateway.config import ToolBridgeConfig
-from webai_gateway.openai_api import build_tool_call_sse, parse_chat_response
+from webai_gateway.openai_api import EMPTY_ASSISTANT_RESPONSE_TEXT, build_tool_call_sse, parse_chat_response
 from webai_gateway.tool_bridge import (
     build_context,
     parse_tool_response,
@@ -92,6 +92,7 @@ def _run_ds2api_runner(
     tools: list[dict[str, Any]] | None = None,
     tool_choice: str = "auto",
     content_filter: bool = False,
+    chunks: list[str] | None = None,
 ) -> dict[str, Any]:
     return run_ds2api_runner(
         runner,
@@ -103,6 +104,7 @@ def _run_ds2api_runner(
         tools=tools,
         tool_choice=tool_choice,
         content_filter=content_filter,
+        chunks=chunks,
     )
 
 
@@ -379,6 +381,21 @@ DS2API_DIFFERENTIAL_PARSE_CASES: list[dict[str, Any]] = [
         "names": ["read_file", "search"],
     },
     {
+        "id": "closed_inline_markdown_tool_example_ignored",
+        "text": '示例：`<tool_calls><invoke name="read_file"><parameter name="path">README.md</parameter></invoke></tool_calls>`',
+        "names": ["read_file"],
+    },
+    {
+        "id": "stray_unclosed_backtick_before_real_call",
+        "text": 'note with stray ` before real call <tool_calls><invoke name="read_file"><parameter name="path">real.md</parameter></invoke></tool_calls>',
+        "names": ["read_file"],
+    },
+    {
+        "id": "backticks_inside_tool_parameter_preserved",
+        "text": '<tool_calls><invoke name="Bash"><parameter name="command">echo `date`</parameter></invoke></tool_calls>',
+        "names": ["Bash"],
+    },
+    {
         "id": "four_backtick_fence",
         "text": '````markdown\n```xml\n<tool_calls><invoke name="read_file"><parameter name="path">README.md</parameter></invoke></tool_calls>\n```\n````\n<tool_calls><invoke name="search"><parameter name="q">outside</parameter></invoke></tool_calls>',
         "names": ["read_file", "search"],
@@ -422,6 +439,37 @@ def test_ds2api_differential_parse_behavior(ds2api_runner: Path, case: dict[str,
     gateway_calls = _gateway_calls_snapshot(case["text"], case["names"])
 
     assert gateway_calls == reference["calls"]
+
+
+@pytest.mark.parametrize(
+    ("chunks", "names"),
+    [
+        (
+            [
+                "示例：`",
+                '<tool_calls><invoke name="read_file"><parameter name="path">README.md</parameter></invoke></tool_calls>',
+                "` 完毕。",
+            ],
+            ["read_file"],
+        ),
+        (
+            [
+                "note with stray ` before real call ",
+                '<tool_calls><invoke name="read_file"><parameter name="path">real.md</parameter></invoke></tool_calls>',
+            ],
+            ["read_file"],
+        ),
+    ],
+    ids=["closed_inline_example", "unclosed_inline_before_real_call"],
+)
+def test_ds2api_stream_sieve_backtick_behavior_matches_buffered_gateway(
+    ds2api_runner: Path,
+    chunks: list[str],
+    names: list[str],
+) -> None:
+    reference = _run_ds2api_runner(ds2api_runner, mode="sieve", text="", names=names, chunks=chunks)
+
+    assert _gateway_calls_snapshot("".join(chunks), names) == reference["calls"]
 
 
 def test_ds2api_differential_assistant_uses_thinking_only_when_visible_text_empty(ds2api_runner: Path) -> None:
@@ -572,8 +620,61 @@ def test_ds2api_assistant_turn_matches_required_and_empty_output_oracle(ds2api_r
         detection_thinking="",
         bridge_context=context,
     )
+    assert reference["turn"]["error"] == {
+        "status": 429,
+        "message": "Upstream account hit a rate limit and returned reasoning without visible output.",
+        "code": "upstream_empty_output",
+    }
     assert turn.error_code == reference["turn"]["error"]["code"]
+    assert turn.error_message == reference["turn"]["error"]["message"]
+    assert turn.finish_reason == reference["turn"]["finishReason"]
     assert turn.has_visible_output == reference["turn"]["hasVisibleOutput"]
+    assert turn.should_fail == reference["turn"]["shouldFail"]
+
+    reference = _run_ds2api_runner(
+        ds2api_runner,
+        mode="turn",
+        text="",
+        thinking="",
+        names=["Read"],
+    )
+    turn = build_assistant_turn(
+        raw_text="",
+        visible_text="",
+        thinking="",
+        detection_thinking="",
+        bridge_context=context,
+    )
+    assert reference["turn"]["error"] == {
+        "status": 503,
+        "message": "Upstream service is unavailable and returned no output.",
+        "code": "upstream_unavailable",
+    }
+    assert turn.error_code == reference["turn"]["error"]["code"]
+    assert turn.error_message == reference["turn"]["error"]["message"]
+    assert turn.finish_reason == reference["turn"]["finishReason"]
+    assert turn.has_visible_output == reference["turn"]["hasVisibleOutput"]
+    assert turn.should_fail == reference["turn"]["shouldFail"]
+
+    parsed, bridge_result = parse_chat_response(
+        {
+            "choices": [
+                {
+                    "index": 0,
+                    "finish_reason": "stop",
+                    "message": {"role": "assistant", "content": ""},
+                }
+            ]
+        },
+        bridge=True,
+        allowed_tools={"Read"},
+        model="web-model",
+        bridge_context=context,
+        return_bridge_result=True,
+    )
+    assert bridge_result.error is not None
+    assert bridge_result.error.kind == reference["turn"]["error"]["code"]
+    assert parsed["choices"][0]["message"]["content"] == EMPTY_ASSISTANT_RESPONSE_TEXT
 
 
 def test_ds2api_parity_accepts_canonical_and_dsml_xml_wrappers() -> None:

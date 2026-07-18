@@ -28,6 +28,7 @@ import (
 	"ds2api/internal/promptcompat"
 	"ds2api/internal/sse"
 	"ds2api/internal/toolcall"
+	"ds2api/internal/toolstream"
 )
 
 type request struct {
@@ -39,6 +40,7 @@ type request struct {
 	ToolsRaw           any `json:"toolsRaw"`
 	ToolChoice         string `json:"toolChoice"`
 	ContentFilter      bool `json:"contentFilter"`
+	Chunks             []string `json:"chunks"`
 }
 
 type outputError struct {
@@ -55,6 +57,7 @@ type response struct {
 	OpenAI            []map[string]any `json:"openai,omitempty"`
 	Stream            []map[string]any `json:"stream,omitempty"`
 	Turn              map[string]any `json:"turn,omitempty"`
+	Content           string `json:"content,omitempty"`
 }
 
 func main() {
@@ -117,6 +120,25 @@ func main() {
 				"error": errPayload,
 			},
 		}
+		if err := json.NewEncoder(os.Stdout).Encode(resp); err != nil {
+			fmt.Fprintf(os.Stderr, "encode response: %v\n", err)
+			os.Exit(2)
+		}
+		return
+	case "sieve":
+		var state toolstream.State
+		events := make([]toolstream.Event, 0)
+		for _, chunk := range req.Chunks {
+			events = append(events, toolstream.ProcessChunk(&state, chunk, req.Names)...)
+		}
+		events = append(events, toolstream.Flush(&state, req.Names)...)
+		content := ""
+		calls := make([]toolcall.ParsedToolCall, 0)
+		for _, event := range events {
+			content += event.Content
+			calls = append(calls, event.ToolCalls...)
+		}
+		resp := response{Calls: calls, Content: content}
 		if err := json.NewEncoder(os.Stdout).Encode(resp); err != nil {
 			fmt.Fprintf(os.Stderr, "encode response: %v\n", err)
 			os.Exit(2)
@@ -214,6 +236,7 @@ def run_ds2api_runner(
     tools: list[dict[str, Any]] | None = None,
     tool_choice: str = "auto",
     content_filter: bool = False,
+    chunks: list[str] | None = None,
 ) -> dict[str, Any]:
     request = {
         "mode": mode,
@@ -224,6 +247,7 @@ def run_ds2api_runner(
         "toolsRaw": tools if tools is not None else _tools_for_names(names),
         "toolChoice": tool_choice,
         "contentFilter": content_filter,
+        "chunks": chunks or [],
     }
     completed = subprocess.run(
         [str(runner)],
@@ -307,7 +331,7 @@ def _export_git_snapshot(root: Path, commit: str, destination: Path) -> None:
         capture_output=True,
     )
     with tarfile.open(fileobj=io.BytesIO(archive.stdout), mode="r:") as tar:
-        tar.extractall(destination)
+        tar.extractall(destination, filter="data")
 
 
 def _find_or_download_reference_archive(commit: str) -> Path:

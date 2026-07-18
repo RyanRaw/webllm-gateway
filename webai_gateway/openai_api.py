@@ -1316,7 +1316,7 @@ def parse_chat_response(
     )
     result = assistant_turn.bridge_result
     if not result.tool_calls:
-        if result.error and result.error.kind in {"upstream_empty_output", "content_filter"}:
+        if result.error and result.error.kind in {"upstream_empty_output", "upstream_unavailable", "content_filter"}:
             msg["content"] = EMPTY_ASSISTANT_RESPONSE_TEXT
             result = BridgeResult(
                 content=EMPTY_ASSISTANT_RESPONSE_TEXT,
@@ -1341,7 +1341,7 @@ def parse_chat_response(
                 )
         if (
             result.error
-            and result.error.kind not in {"upstream_empty_output", "content_filter"}
+            and result.error.kind not in {"upstream_empty_output", "upstream_unavailable", "content_filter"}
             and (
                 not result.error.repairable
                 or result.error.kind == "tool_choice_violation"

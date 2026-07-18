@@ -16,7 +16,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from webai_gateway.app import create_app
+from webai_gateway.app import _DirectProviderPoolGate, create_app
 from webai_gateway.anthropic_api import anthropic_body_to_openai
 from webai_gateway.accounts import AccountRegistry, webai2api_account_id
 from webai_gateway.config import (
@@ -613,6 +613,177 @@ def test_tool_bridge_ignores_ds2api_tool_xml_inside_unclosed_markdown_fence() ->
     assert result.tool_calls == []
     assert result.error is None
     assert "Example only" in result.content
+
+
+def test_tool_bridge_ignores_ds2api_tool_xml_inside_closed_inline_code() -> None:
+    context = _controller_context_with_tools(["Read"])
+
+    result = parse_tool_response(
+        'Example only: `<tool_calls><invoke name="Read"><parameter name="file_path">README.md</parameter></invoke></tool_calls>`',
+        context,
+    )
+
+    assert result.tool_calls == []
+    assert result.error is None
+    assert "Example only" in result.content
+
+
+def test_tool_bridge_parses_ds2api_tool_xml_after_stray_unclosed_backtick() -> None:
+    context = _controller_context_with_tools(["Read"])
+
+    result = parse_tool_response(
+        'note with stray ` before real call '
+        '<tool_calls><invoke name="Read"><parameter name="file_path">README.md</parameter></invoke></tool_calls>',
+        context,
+    )
+
+    assert result.error is None
+    assert [(call.name, call.input) for call in result.tool_calls] == [
+        ("Read", {"file_path": "README.md"})
+    ]
+
+
+_NONCANONICAL_TOOL_EXAMPLES = [
+    '<tool_call>{"name":"Read","input":{"file_path":"README.md"}}</tool_call>',
+    '<tool_call><function=Read><parameter name="file_path">README.md</parameter></function></tool_call>',
+    '<function_calls><invoke name="Read"><parameter name="file_path">README.md</parameter></invoke></function_calls>',
+    '<tool_code>Read(file_path="README.md")</tool_code>',
+    '<Read><file_path>README.md</file_path></Read>',
+    'example {"name":"Read","input":{"file_path":"README.md"}}',
+    'assistant requested tool calls:\nRead({"file_path":"README.md"})',
+    '<search><query>latest release</query></search>',
+]
+
+
+@pytest.mark.parametrize("snippet", _NONCANONICAL_TOOL_EXAMPLES)
+@pytest.mark.parametrize(
+    "wrapped",
+    [
+        lambda value: f"Example only: `{value}`",
+        lambda value: f"~~~text\n{value}\n~~~",
+        lambda value: f"<![CDATA[{value}]]>",
+    ],
+    ids=["inline", "tilde_fence", "cdata"],
+)
+def test_tool_bridge_ignores_all_noncanonical_tool_examples_in_literal_markup(
+    snippet: str,
+    wrapped: Any,
+) -> None:
+    context = _controller_context_with_tools(["Read", "WebSearch"])
+
+    result = parse_tool_response(wrapped(snippet), context)
+
+    assert result.tool_calls == []
+    assert result.error is None
+    assert result.warning is None
+
+
+@pytest.mark.parametrize("snippet", _NONCANONICAL_TOOL_EXAMPLES)
+def test_tool_bridge_ignores_inline_example_before_real_dsml_call(snippet: str) -> None:
+    context = _controller_context_with_tools(["Read", "WebSearch"])
+    real_call = (
+        '<tool_calls><invoke name="Read"><parameter name="file_path">real.md</parameter></invoke></tool_calls>'
+    )
+
+    result = parse_tool_response(f"Example: `{snippet}`\n{real_call}", context)
+
+    assert result.error is None
+    assert [(call.name, call.input) for call in result.tool_calls] == [("Read", {"file_path": "real.md"})]
+
+
+def test_tool_bridge_ignores_inline_fake_closers_inside_real_dsml_call() -> None:
+    context = _controller_context_with_tools(["Read"])
+    text = (
+        '<tool_calls><invoke name="Read">example `</invoke></tool_calls>`'
+        '<parameter name="file_path">real.md</parameter></invoke></tool_calls>'
+    )
+
+    result = parse_tool_response(text, context)
+
+    assert result.error is None
+    assert [(call.name, call.input) for call in result.tool_calls] == [("Read", {"file_path": "real.md"})]
+
+
+@pytest.mark.parametrize(
+    "wrapped",
+    [
+        lambda value: f"`{value}`",
+        lambda value: f"~~~text\n{value}\n~~~",
+        lambda value: f"<![CDATA[{value}]]>",
+    ],
+    ids=["inline", "tilde_fence", "cdata"],
+)
+def test_tool_bridge_literal_semantic_examples_do_not_trigger_repair(wrapped: Any) -> None:
+    context = _controller_context_with_tools(["Read", "Bash"])
+    example = "tool Read is not available; next I will inspect project files and run git status; tool result"
+
+    result = parse_tool_response(wrapped(example), context)
+
+    assert result.tool_calls == []
+    assert result.error is None
+    assert result.warning is None
+
+
+def test_tool_bridge_does_not_execute_nested_tool_json_inside_four_backtick_documentation_fence() -> None:
+    context = _controller_context_with_tools(["Read"])
+    text = (
+        "````markdown\n"
+        "```tool_json\n"
+        '{"calls":[{"id":"call_doc","name":"Read","input":{"file_path":"README.md"}}]}\n'
+        "```\n"
+        "````"
+    )
+
+    result = parse_tool_response(text, context)
+
+    assert result.tool_calls == []
+    assert result.error is None
+
+
+def test_tool_bridge_still_executes_top_level_tool_json_fence() -> None:
+    context = _controller_context_with_tools(["Read"])
+
+    result = parse_tool_response(
+        '```tool_json\n{"calls":[{"id":"call_1","name":"Read","input":{"file_path":"README.md"}}]}\n```',
+        context,
+    )
+
+    assert result.error is None
+    assert [(call.name, call.input) for call in result.tool_calls] == [("Read", {"file_path": "README.md"})]
+
+
+def test_tool_bridge_inline_delimiter_scan_is_bounded_and_keeps_later_real_call() -> None:
+    context = _controller_context_with_tools(["Read"])
+    unmatched_delimiters = " ".join("`" * width for width in range(1, 301))
+    real_call = (
+        '<tool_calls><invoke name="Read"><parameter name="file_path">real.md</parameter></invoke></tool_calls>'
+    )
+
+    started = time.monotonic()
+    result = parse_tool_response(f"{unmatched_delimiters}\n{real_call}", context)
+
+    assert result.error is None
+    assert [(call.name, call.input) for call in result.tool_calls] == [("Read", {"file_path": "real.md"})]
+    assert time.monotonic() - started < 1.0
+
+
+def test_tool_bridge_many_literal_dsml_ranges_remain_bounded() -> None:
+    context = _controller_context_with_tools(["Read"])
+    literal = (
+        '`<tool_calls><invoke name="Read"><parameter name="file_path">example.md</parameter>'
+        "</invoke></tool_calls>`"
+    )
+    examples = "\n".join(literal for _ in range(1200))
+    real_call = (
+        '<tool_calls><invoke name="Read"><parameter name="file_path">real.md</parameter></invoke></tool_calls>'
+    )
+
+    started = time.monotonic()
+    result = parse_tool_response(f"{examples}\n{real_call}", context)
+
+    assert result.error is None
+    assert [(call.name, call.input) for call in result.tool_calls] == [("Read", {"file_path": "real.md"})]
+    assert time.monotonic() - started < 1.5
 
 
 def test_sanitize_leaked_tool_protocol_output_matches_ds2api_tool_wrapper_cleanup() -> None:
@@ -15196,7 +15367,7 @@ def test_admin_provider_smoke_reports_qwen_tool_loop_without_secrets(tmp_path: P
             "cookie": "qwen_session=session-secret",
             "bearer": "",
             "userAgent": "Chrome Test",
-            "metadata": {"sessionToken": "session-token"},
+            "metadata": {"sessionToken": "session-secret"},
         },
     )
     client = TestClient(
@@ -15313,7 +15484,7 @@ def test_admin_provider_smoke_returns_step_failures_without_secrets(tmp_path: Pa
             "cookie": "qwen_session=session-secret",
             "bearer": "",
             "userAgent": "Chrome Test",
-            "metadata": {"sessionToken": "session-token"},
+            "metadata": {"sessionToken": "session-secret"},
         },
     )
     client = TestClient(
@@ -15740,6 +15911,198 @@ def test_deepseek_cookie_only_credential_is_not_authorized() -> None:
     assert summary["fields"] == {"cookie": True, "bearer": False, "userAgent": True}
 
 
+@pytest.mark.parametrize("placeholder", ["   ", "null", "Undefined", "NONE", "nil", "Bearer", "Bearer   "])
+@pytest.mark.parametrize("provider_id", ["qwen", "qwen-coder", "deepseek-web"])
+def test_direct_provider_placeholder_bearer_is_not_authorized(provider_id: str, placeholder: str) -> None:
+    summary = credential_summary(
+        provider_id,
+        {
+            "provider": provider_id,
+            "cookie": "qwen_session=real-session" if provider_id.startswith("qwen") else "ds_session_id=real-session",
+            "bearer": placeholder,
+            "userAgent": "Chrome Test",
+            "metadata": {"sessionToken": placeholder},
+        },
+    )
+
+    assert summary["authorized"] is False
+    assert summary["fields"]["bearer"] is False
+
+
+@pytest.mark.parametrize("cookie", ["   ", "null", "name=undefined", "name=NONE", "name=nil"])
+def test_generic_provider_placeholder_cookie_is_not_authorized(cookie: str) -> None:
+    summary = credential_summary("chatgpt", {"cookie": cookie, "bearer": "", "userAgent": "Chrome Test"})
+
+    assert summary["authorized"] is False
+    assert summary["fields"]["cookie"] is False
+
+
+def test_qwen_metadata_only_credential_is_not_authorized() -> None:
+    summary = credential_summary(
+        "qwen",
+        {
+            "cookie": "",
+            "bearer": "",
+            "metadata": {"sessionToken": "session-token"},
+        },
+    )
+
+    assert summary["authorized"] is False
+
+
+def test_qwen_visitor_session_cookie_cannot_authorize_metadata_token() -> None:
+    summary = credential_summary(
+        "qwen",
+        {
+            "cookie": "visitor_session_id=visitor-session",
+            "bearer": "",
+            "metadata": {"sessionToken": "visitor-session"},
+        },
+    )
+
+    assert summary["authorized"] is False
+
+
+def test_credential_store_normalizes_bearer_scheme_and_tolerates_corrupt_json(tmp_path: Path) -> None:
+    store = CredentialStore(tmp_path / "credentials")
+
+    saved = store.save(
+        "deepseek-web",
+        {"cookie": "", "bearer": "  Bearer real-token  ", "userAgent": " Chrome Test "},
+    )
+
+    assert saved["bearer"] == "real-token"
+    assert store.get("deepseek-web")["bearer"] == "real-token"
+    broken = tmp_path / "credentials" / "qwen.json"
+    broken.write_text("{broken", encoding="utf-8")
+    assert store.get("qwen") is None
+
+
+def test_credential_store_delete_removes_legacy_and_all_direct_profiles(tmp_path: Path) -> None:
+    store = CredentialStore(tmp_path / "credentials")
+    store.save(
+        "qwen",
+        {
+            "cookie": "qwen_session=default-session",
+            "bearer": "default-bearer",
+            "userAgent": "Chrome Default",
+        },
+    )
+    store.save_profile(
+        "qwen",
+        "alt",
+        {
+            "cookie": "qwen_session=alt-session",
+            "bearer": "alt-bearer",
+            "userAgent": "Chrome Alt",
+        },
+    )
+
+    store.delete("qwen")
+
+    assert store.get("qwen") is None
+    assert store.get_profile("qwen", "default") is None
+    assert store.get_profile("qwen", "alt") is None
+    assert store.list_profile_ids("qwen") == []
+
+
+def test_credential_store_delete_invalidates_earlier_capture_revision(tmp_path: Path) -> None:
+    store = CredentialStore(tmp_path / "credentials")
+    capture_revision = store.revision("deepseek-web")
+
+    store.delete("deepseek-web")
+    saved = store.save_if_revision(
+        "deepseek-web",
+        {
+            "cookie": "ds_session_id=stale-session",
+            "bearer": "stale-bearer",
+            "userAgent": "Chrome Test",
+        },
+        capture_revision,
+    )
+
+    assert saved is None
+    assert store.get("deepseek-web") is None
+    assert store.get_profile("deepseek-web", "default") is None
+
+
+def test_credential_store_serializes_legacy_profile_save_and_delete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = CredentialStore(tmp_path / "credentials")
+    profile_save_entered = threading.Event()
+    release_profile_save = threading.Event()
+    delete_finished = threading.Event()
+    errors: list[BaseException] = []
+    original_save_profile = store._save_profile_locked
+
+    def blocking_save_profile(provider_id: str, profile_id: str, credential: dict[str, Any]) -> dict[str, Any]:
+        profile_save_entered.set()
+        if not release_profile_save.wait(2):
+            raise TimeoutError("test did not release profile save")
+        return original_save_profile(provider_id, profile_id, credential)
+
+    monkeypatch.setattr(store, "_save_profile_locked", blocking_save_profile)
+
+    def save_credential() -> None:
+        try:
+            store.save(
+                "deepseek-web",
+                {
+                    "cookie": "ds_session_id=session-secret",
+                    "bearer": "bearer-secret",
+                    "userAgent": "Chrome Test",
+                },
+            )
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    def delete_credential() -> None:
+        try:
+            store.delete("deepseek-web")
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+        finally:
+            delete_finished.set()
+
+    save_thread = threading.Thread(target=save_credential)
+    delete_thread = threading.Thread(target=delete_credential)
+    save_thread.start()
+    assert profile_save_entered.wait(1)
+    delete_thread.start()
+    assert not delete_finished.wait(0.05)
+    release_profile_save.set()
+    save_thread.join(2)
+    delete_thread.join(2)
+
+    assert not save_thread.is_alive()
+    assert not delete_thread.is_alive()
+    assert errors == []
+    assert store.get("deepseek-web") is None
+    assert store.get_profile("deepseek-web", "default") is None
+
+
+@pytest.mark.parametrize(
+    ("provider_id", "credential"),
+    [
+        ("deepseek-web", {"cookie": "", "bearer": "undefined"}),
+        ("qwen", {"cookie": "qwen_session=null", "bearer": "", "metadata": {"sessionToken": "null"}}),
+    ],
+)
+def test_credential_store_rejects_placeholder_secrets(
+    tmp_path: Path,
+    provider_id: str,
+    credential: dict[str, Any],
+) -> None:
+    store = CredentialStore(tmp_path / "credentials")
+
+    with pytest.raises(ValueError):
+        store.save(provider_id, credential)
+
+    assert store.get(provider_id) is None
+
+
 def test_deepseek_store_rejects_cookie_only_credential(tmp_path: Path) -> None:
     store = CredentialStore(tmp_path / "credentials")
 
@@ -15787,7 +16150,7 @@ def test_remote_auth_callback_url_imports_qwen_credentials_without_leaking_url(t
         "/api/admin/web-auth/callback-url",
         json={
             "provider": "qwen",
-            "url": "https://callback.local/done#cookie=qwen_session%3Dqwen-secret&session_token=qwen-secret",
+            "url": "https://callback.local/done#session_token=Bearer%20qwen-secret",
             "userAgent": "Remote Chrome",
         },
     )
@@ -15803,6 +16166,37 @@ def test_remote_auth_callback_url_imports_qwen_credentials_without_leaking_url(t
     assert saved["cookie"] == "qwen_session=qwen-secret"
     assert saved["metadata"]["sessionToken"] == "qwen-secret"
     assert saved["userAgent"] == "Remote Chrome"
+
+
+@pytest.mark.parametrize(
+    ("provider_id", "fragment"),
+    [
+        ("deepseek-web", "access_token=Bearer%20"),
+        ("deepseek-web", "access_token=undefined"),
+        ("qwen", "session_token=null"),
+    ],
+)
+def test_remote_auth_callback_url_rejects_placeholder_credentials(
+    tmp_path: Path,
+    provider_id: str,
+    fragment: str,
+) -> None:
+    store = CredentialStore(tmp_path / "credentials")
+    client = TestClient(
+        create_app(
+            config=_config(),
+            credential_store=store,
+            http_client=_not_found_client(),
+        )
+    )
+
+    response = client.post(
+        "/api/admin/web-auth/callback-url",
+        json={"provider": provider_id, "url": f"https://callback.local/done#{fragment}"},
+    )
+
+    assert response.status_code == 400
+    assert store.get(provider_id) is None
 
 
 def test_remote_auth_callback_url_imports_deepseek_bearer_without_leaking_token(tmp_path: Path) -> None:
@@ -15886,11 +16280,70 @@ def test_onboarding_marks_existing_qwen_cookie_only_file_unauthorized(tmp_path: 
     assert "visitor" not in response.text
 
 
+class _FakeQwenAuthResponse:
+    def __init__(
+        self,
+        ok: bool,
+        *,
+        url: str,
+        payload: Any | None = None,
+        content_type: str = "application/json",
+    ) -> None:
+        self.ok = ok
+        self.url = url
+        self.headers = {"content-type": content_type}
+        self._payload = payload if payload is not None else {"id": "user-1", "email": "user@example.com"}
+
+    async def json(self) -> Any:
+        return self._payload
+
+
+class _FakeQwenAuthRequest:
+    def __init__(
+        self,
+        ok: bool,
+        *,
+        response_url: str = "",
+        payload: Any | None = None,
+        content_type: str = "application/json",
+    ) -> None:
+        self.ok = ok
+        self.response_url = response_url
+        self.payload = payload
+        self.content_type = content_type
+        self.urls: list[str] = []
+
+    async def get(self, url: str, headers: dict[str, str]) -> _FakeQwenAuthResponse:
+        self.urls.append(url)
+        return _FakeQwenAuthResponse(
+            self.ok,
+            url=self.response_url or url,
+            payload=self.payload,
+            content_type=self.content_type,
+        )
+
+
 class _FakeQwenContext:
-    def __init__(self, cookies: list[dict[str, str]]) -> None:
+    def __init__(
+        self,
+        cookies: list[dict[str, str]],
+        *,
+        auth_ok: bool = True,
+        response_url: str = "",
+        auth_payload: Any | None = None,
+        content_type: str = "application/json",
+    ) -> None:
         self._cookies = cookies
+        self.request = _FakeQwenAuthRequest(
+            auth_ok,
+            response_url=response_url,
+            payload=auth_payload,
+            content_type=content_type,
+        )
+        self.cookie_urls: Any = None
 
     async def cookies(self, urls):
+        self.cookie_urls = urls
         return self._cookies
 
 
@@ -15908,6 +16361,17 @@ def test_read_qwen_credential_ignores_visitor_cookies() -> None:
                     {"name": "device_id", "value": "device"},
                 ]
             ),
+            _FakeQwenPage(),
+        )
+    )
+
+    assert credential is None
+
+
+def test_read_qwen_credential_ignores_visitor_session_named_cookie() -> None:
+    credential = asyncio.run(
+        _read_qwen_credential(
+            _FakeQwenContext([{"name": "visitor_session_id", "value": "visitor-session"}]),
             _FakeQwenPage(),
         )
     )
@@ -15942,6 +16406,134 @@ def test_read_qwen_coder_credential_uses_coder_origin() -> None:
 
     assert credential is not None
     assert credential["metadata"]["sessionToken"] == "coder-session"
+    assert credential["bearer"] == ""
+    assert context.request.urls == ["https://coder.qwen.ai/api/v1/auths/"]
+
+
+def test_read_qwen_credential_requires_real_auth_probe() -> None:
+    credential = asyncio.run(
+        _read_qwen_credential(
+            _FakeQwenContext([{"name": "token", "value": "candidate-token"}], auth_ok=False),
+            _FakeQwenPage(),
+        )
+    )
+
+    assert credential is None
+
+
+def test_read_qwen_credential_rejects_redirected_login_html() -> None:
+    credential = asyncio.run(
+        _read_qwen_credential(
+            _FakeQwenContext(
+                [{"name": "token", "value": "candidate-token"}],
+                response_url="https://chat.qwen.ai/auth/login",
+                content_type="text/html",
+            ),
+            _FakeQwenPage(),
+        )
+    )
+
+    assert credential is None
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"is_guest": True, "id": "guest-1", "email": "guest@guest.com"},
+        {"role": "guest", "id": "guest-2"},
+        {"detail": "visitor"},
+        {"id": "request-123", "data": {"is_guest": True, "id": "guest-3"}},
+        {"id": "request-456"},
+        {"id": "request-123", "name": "auth-response", "data": {"detail": "visitor"}},
+        {"id": "request-123", "permissions": [], "data": {"detail": "visitor"}},
+        {"data": {"id": "guest-1", "is_guest": "true", "email": "guest@not-guest.example"}},
+        {"id": "guest-4", "email": "user@guest.com"},
+    ],
+)
+def test_read_qwen_credential_rejects_visitor_auth_payload(payload: dict[str, Any]) -> None:
+    credential = asyncio.run(
+        _read_qwen_credential(
+            _FakeQwenContext(
+                [{"name": "token", "value": "candidate-token"}],
+                auth_payload=payload,
+            ),
+            _FakeQwenPage(),
+        )
+    )
+
+    assert credential is None
+
+
+def test_read_qwen_credential_accepts_nested_authenticated_user_payload() -> None:
+    credential = asyncio.run(
+        _read_qwen_credential(
+            _FakeQwenContext(
+                [{"name": "token", "value": "candidate-token"}],
+                auth_payload={"data": {"user_id": "user-2", "name": "Qwen User"}},
+            ),
+            _FakeQwenPage(),
+        )
+    )
+
+    assert credential is not None
+    assert credential["bearer"] == "candidate-token"
+
+
+def test_read_qwen_credential_accepts_data_user_authenticated_payload() -> None:
+    credential = asyncio.run(
+        _read_qwen_credential(
+            _FakeQwenContext(
+                [{"name": "token", "value": "candidate-token"}],
+                auth_payload={"data": {"user": {"user_id": "real-user", "email": "real@example.com"}}},
+            ),
+            _FakeQwenPage(),
+        )
+    )
+
+    assert credential is not None
+    assert credential["bearer"] == "candidate-token"
+
+
+def test_read_qwen_credential_accepts_numeric_authenticated_user_id() -> None:
+    credential = asyncio.run(
+        _read_qwen_credential(
+            _FakeQwenContext(
+                [{"name": "token", "value": "candidate-token"}],
+                auth_payload={"id": 12345, "email": "user@example.com"},
+            ),
+            _FakeQwenPage(),
+        )
+    )
+
+    assert credential is not None
+
+
+def test_read_qwen_credential_promotes_exact_token_cookie_to_bearer() -> None:
+    credential = asyncio.run(
+        _read_qwen_credential(
+            _FakeQwenContext([{"name": "token", "value": "cookie-token"}]),
+            _FakeQwenPage(),
+        )
+    )
+
+    assert credential is not None
+    assert credential["bearer"] == "cookie-token"
+
+
+def test_read_qwen_credential_uses_local_storage_token() -> None:
+    class LocalStorageTokenPage:
+        async def evaluate(self, script: str) -> dict[str, str]:
+            return {"userAgent": "Chrome Test", "token": "local-token"}
+
+    credential = asyncio.run(
+        _read_qwen_credential(
+            _FakeQwenContext([]),
+            LocalStorageTokenPage(),
+        )
+    )
+
+    assert credential is not None
+    assert credential["bearer"] == "local-token"
 
 
 def test_qwen_coder_auth_service_captures_browser_login(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -15961,6 +16553,7 @@ def test_qwen_coder_auth_service_captures_browser_login(monkeypatch: pytest.Monk
     class FakeContext:
         def __init__(self) -> None:
             self.pages = [FakePage()]
+            self.request = _FakeQwenAuthRequest(True)
 
         async def cookies(self, urls: Any) -> list[dict[str, str]]:
             seen["cookie_urls"] = urls
@@ -16165,6 +16758,80 @@ def test_web_auth_job_captures_and_persists_credentials(tmp_path: Path) -> None:
     assert body["credential"]["authorized"] is True
     assert "bearer-secret" not in response.text
     assert store.get("deepseek-web")["bearer"] == "bearer-secret"
+
+
+def test_clearing_credentials_invalidates_running_web_auth_capture(tmp_path: Path) -> None:
+    class RecordingCredentialStore(CredentialStore):
+        def __init__(self, root: Path) -> None:
+            super().__init__(root)
+            self.stale_save_attempted = threading.Event()
+            self.stale_save_result: dict[str, Any] | None = None
+
+        def save_if_revision(
+            self,
+            provider_id: str,
+            credential: dict[str, Any],
+            expected_revision: int,
+        ) -> dict[str, Any] | None:
+            try:
+                self.stale_save_result = super().save_if_revision(
+                    provider_id,
+                    credential,
+                    expected_revision,
+                )
+                return self.stale_save_result
+            finally:
+                self.stale_save_attempted.set()
+
+    class BlockingAuthService:
+        def __init__(self) -> None:
+            self.started = threading.Event()
+            self.release = threading.Event()
+
+        async def capture(self, provider_id: str, cdp_url: str, progress):
+            progress("waiting for login")
+            self.started.set()
+            released = await asyncio.to_thread(self.release.wait, 2)
+            if not released:
+                raise TimeoutError("test did not release auth capture")
+            return {
+                "cookie": "ds_session_id=stale-session",
+                "bearer": "stale-bearer",
+                "userAgent": "Chrome Test",
+            }
+
+    store = RecordingCredentialStore(tmp_path / "credentials")
+    auth_service = BlockingAuthService()
+    app = create_app(
+        config=_config(),
+        credential_store=store,
+        web_auth_service=auth_service,
+        run_auth_jobs_inline=False,
+        http_client=_not_found_client(),
+    )
+
+    with TestClient(app) as client:
+        started = client.post(
+            "/api/admin/web-auth/jobs",
+            json={"provider": "deepseek-web", "cdpUrl": "http://127.0.0.1:9222"},
+        )
+        assert started.status_code == 200
+        job_id = started.json()["id"]
+        assert auth_service.started.wait(1)
+
+        cleared = client.delete("/api/admin/web-auth/credentials/deepseek-web")
+        assert cleared.status_code == 200
+        assert cleared.json()["credential"]["authorized"] is False
+        auth_service.release.set()
+        assert store.stale_save_attempted.wait(2)
+
+        job = client.get(f"/api/admin/web-auth/jobs/{job_id}").json()
+
+    assert job["status"] == "failed"
+    assert job["cancelled"] is True
+    assert store.stale_save_result is None
+    assert store.get("deepseek-web") is None
+    assert store.get_profile("deepseek-web", "default") is None
 
 
 def test_web_auth_browser_start_returns_beginner_friendly_action() -> None:
@@ -16386,6 +17053,8 @@ def test_deepseek_web_client_preserves_ds2api_http_status() -> None:
 
 
 def test_deepseek_web_chat_propagates_ds2api_rate_limit_and_records_diagnostic(tmp_path: Path) -> None:
+    attempts = 0
+
     class RateLimitedDeepSeekClient:
         last_diagnostic = {"model": "deepseek-v4-pro", "ds2api_base_url": "http://127.0.0.1:9331/v1"}
 
@@ -16393,6 +17062,8 @@ def test_deepseek_web_chat_propagates_ds2api_rate_limit_and_records_diagnostic(t
             self.credential = credential
 
         def chat_completions(self, payload: dict[str, Any]) -> dict[str, Any]:
+            nonlocal attempts
+            attempts += 1
             raise DeepSeekDs2apiError(429, "ds2api DeepSeek 调用失败：HTTP 429 rate limit from ds2api")
 
     store = CredentialStore(tmp_path / "credentials")
@@ -16420,6 +17091,7 @@ def test_deepseek_web_chat_propagates_ds2api_rate_limit_and_records_diagnostic(t
     )
 
     assert response.status_code == 429
+    assert attempts == 1
     assert "rate limit from ds2api" in response.text
     diagnostics = client.get("/api/admin/request-diagnostics").json()["events"]
     error_event = next(item for item in reversed(diagnostics) if item["kind"] == "completion_error")
@@ -16474,7 +17146,7 @@ def test_deepseek_web_chat_maps_expired_ds2api_auth_to_relogin_hint(tmp_path: Pa
     assert "config.keys" not in detail
 
 
-def test_deepseek_gateway_retries_transient_ds2api_rate_limit(tmp_path: Path) -> None:
+def test_deepseek_gateway_does_not_replay_terminal_ds2api_rate_limit(tmp_path: Path) -> None:
     attempts = 0
 
     class FlakyDeepSeekClient:
@@ -16503,7 +17175,6 @@ def test_deepseek_gateway_retries_transient_ds2api_rate_limit(tmp_path: Path) ->
         deepseek_client_factory=FlakyDeepSeekClient,
         http_client=_not_found_client(),
     )
-    app.state.deepseek_ds2api_retry_delays = (0.0,)
     client = TestClient(app)
 
     response = client.post(
@@ -16512,10 +17183,10 @@ def test_deepseek_gateway_retries_transient_ds2api_rate_limit(tmp_path: Path) ->
         json={"model": "deepseek-v4-pro", "messages": [{"role": "user", "content": "hi"}]},
     )
 
-    assert response.status_code == 200
-    assert attempts == 2
+    assert response.status_code == 429
+    assert attempts == 1
     diagnostics = client.get("/api/admin/request-diagnostics").json()["events"]
-    assert not [item for item in diagnostics if item["kind"] == "completion_error" and item.get("statusCode") == 429]
+    assert [item for item in diagnostics if item["kind"] == "completion_error" and item.get("statusCode") == 429]
 
 
 def test_deepseek_gateway_limits_bearer_ds2api_inflight(tmp_path: Path) -> None:
@@ -16578,20 +17249,17 @@ def test_deepseek_gateway_limits_bearer_ds2api_inflight(tmp_path: Path) -> None:
     assert max_active == 1
 
 
-def test_deepseek_gateway_cools_down_after_upstream_empty_output_rate_limit(tmp_path: Path) -> None:
+def test_deepseek_gateway_cools_down_after_any_ds2api_rate_limit(tmp_path: Path) -> None:
     starts: list[float] = []
 
-    class EmptyOutputThenOkClient:
+    class RateLimitedThenOkClient:
         def __init__(self, credential: dict[str, Any], **_: Any) -> None:
             self.credential = credential
 
         def chat_completions(self, payload: dict[str, Any]) -> dict[str, Any]:
             starts.append(time.monotonic())
             if len(starts) == 1:
-                raise DeepSeekDs2apiError(
-                    429,
-                    'ds2api DeepSeek 调用失败：HTTP 429 {"error":{"code":"upstream_empty_output"}}',
-                )
+                raise DeepSeekDs2apiError(429, "ds2api DeepSeek 调用失败：HTTP 429 rate limit from ds2api")
             return _openai_response("ok")
 
     store = CredentialStore(tmp_path / "credentials")
@@ -16612,10 +17280,9 @@ def test_deepseek_gateway_cools_down_after_upstream_empty_output_rate_limit(tmp_
             ),
         ),
         credential_store=store,
-        deepseek_client_factory=EmptyOutputThenOkClient,
+        deepseek_client_factory=RateLimitedThenOkClient,
         http_client=_not_found_client(),
     )
-    app.state.deepseek_ds2api_retry_delays = ()
     client = TestClient(app)
 
     first = client.post(
@@ -16634,6 +17301,92 @@ def test_deepseek_gateway_cools_down_after_upstream_empty_output_rate_limit(tmp_
     assert second.status_code == 200
     assert len(starts) == 2
     assert starts[1] - second_started >= 0.04
+
+
+def test_deepseek_response_language_retry_reuses_live_gate_helper(tmp_path: Path) -> None:
+    payloads: list[dict[str, Any]] = []
+
+    class EnglishThenChineseDeepSeekClient:
+        def __init__(self, credential: dict[str, Any], **_: Any) -> None:
+            self.credential = credential
+
+        def chat_completions(self, payload: dict[str, Any]) -> dict[str, Any]:
+            payloads.append(payload)
+            if len(payloads) == 1:
+                return _openai_response(
+                    "The gateway is working, but this answer is intentionally written in English. "
+                    "It contains enough explanatory prose to represent a normal final response from the browser model. "
+                    "The response describes routing, retries, diagnostics, authentication, model discovery, and protocol "
+                    "conversion, while deliberately avoiding Chinese text so the configured language guard must retry it."
+                )
+            return _openai_response("网关工作正常。")
+
+    store = CredentialStore(tmp_path / "credentials")
+    store.save(
+        "deepseek-web",
+        {
+            "cookie": "ds_session_id=session-secret",
+            "bearer": "bearer-secret",
+            "userAgent": "Chrome Test",
+        },
+    )
+    client = TestClient(
+        create_app(
+            config=_config(),
+            credential_store=store,
+            deepseek_client_factory=EnglishThenChineseDeepSeekClient,
+            http_client=_not_found_client(),
+        )
+    )
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers=_headers(),
+        json={"model": "deepseek-v4-pro", "messages": [{"role": "user", "content": "请用中文回答"}]},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["choices"][0]["message"]["content"] == "网关工作正常。"
+    assert len(payloads) == 2
+    assert payloads[1]["_webai_response_language_retry"] is True
+
+
+def test_direct_provider_gate_rejects_missing_strict_target_without_waiting() -> None:
+    gate = _DirectProviderPoolGate(max_inflight_per_account=1, max_queue=5, cooldown_seconds=30)
+
+    started = time.monotonic()
+    acquired = gate.acquire(["direct:qwen:default"], target="direct:qwen:missing")
+
+    assert acquired == ""
+    assert time.monotonic() - started < 0.1
+
+
+def test_direct_provider_gate_preserves_inflight_lease_across_authorization_refresh() -> None:
+    gate = _DirectProviderPoolGate(max_inflight_per_account=1, max_queue=2, cooldown_seconds=30)
+    account_id = "direct:qwen:default"
+
+    assert gate.acquire([account_id], target=account_id) == account_id
+    gate.snapshot(["direct:qwen:alt"])
+    refreshed = gate.snapshot([account_id])
+
+    assert refreshed["in_use"] == 1
+    assert refreshed["in_use_accounts"] == [account_id]
+    assert refreshed["available"] == 0
+    gate.release(account_id)
+
+
+def test_direct_provider_gate_preserves_unexpired_cooldown_across_authorization_refresh() -> None:
+    gate = _DirectProviderPoolGate(max_inflight_per_account=1, max_queue=2, cooldown_seconds=30)
+    account_id = "direct:qwen:default"
+
+    assert gate.acquire([account_id], target=account_id) == account_id
+    gate.note_rate_limit(account_id)
+    gate.release(account_id)
+    gate.snapshot(["direct:qwen:alt"])
+    refreshed = gate.snapshot([account_id])
+
+    assert refreshed["available"] == 0
+    assert refreshed["available_accounts"] == []
 
 
 def test_qwen_direct_limits_inflight_requests(tmp_path: Path) -> None:
@@ -16764,6 +17517,51 @@ def test_qwen_direct_uses_selected_direct_profile_credential(tmp_path: Path) -> 
     registry.update_metadata("direct:qwen:default", {"providerId": "qwen", "displayName": "Default"})
     registry.update_metadata("direct:qwen:alt", {"providerId": "qwen", "displayName": "Alt"})
     registry.set_current("qwen", "direct:qwen:alt")
+
+    class CapturingQwenClient:
+        def __init__(self, credential: dict[str, Any], http_client: httpx.Client | None = None) -> None:
+            seen["credential"] = credential
+
+        def chat_completions(self, payload: dict[str, Any]) -> dict[str, Any]:
+            return _openai_response("ok")
+
+    client = TestClient(
+        create_app(
+            config=_config(),
+            config_path=tmp_path / "config.json",
+            credential_store=store,
+            qwen_client_factory=CapturingQwenClient,
+            http_client=_not_found_client(),
+        )
+    )
+    client.app.state.account_registry = registry
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers=_headers(),
+        json={"model": "qwen-web/qwen3.6-plus", "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    assert response.status_code == 200
+    assert seen["credential"]["bearer"] == "alt-bearer"
+
+
+def test_qwen_direct_skips_unauthorized_current_profile(tmp_path: Path) -> None:
+    seen: dict[str, Any] = {}
+    store = CredentialStore(tmp_path / "credentials")
+    store.save_profile(
+        "qwen",
+        "alt",
+        {
+            "cookie": "qwen_session=alt-session",
+            "bearer": "alt-bearer",
+            "userAgent": "Chrome Alt",
+        },
+    )
+    registry = AccountRegistry(tmp_path / ".webai-gateway" / "accounts.json")
+    registry.update_metadata("direct:qwen:missing", {"providerId": "qwen", "displayName": "Missing"})
+    registry.update_metadata("direct:qwen:alt", {"providerId": "qwen", "displayName": "Alt"})
+    registry.set_current("qwen", "direct:qwen:missing")
 
     class CapturingQwenClient:
         def __init__(self, credential: dict[str, Any], http_client: httpx.Client | None = None) -> None:
@@ -17002,6 +17800,7 @@ def test_qwen_direct_switches_unpinned_profile_after_rate_limit(tmp_path: Path) 
     )
     client.app.state.account_registry = registry
 
+    started = time.monotonic()
     response = client.post(
         "/v1/chat/completions",
         headers=_headers(),
@@ -17010,6 +17809,332 @@ def test_qwen_direct_switches_unpinned_profile_after_rate_limit(tmp_path: Path) 
 
     assert response.status_code == 200
     assert attempts == ["default-bearer", "alt-bearer"]
+    assert time.monotonic() - started < 2
+
+
+def test_qwen_direct_switches_unpinned_profile_after_non_http_rate_limit(tmp_path: Path) -> None:
+    attempts: list[str] = []
+    store = CredentialStore(tmp_path / "credentials")
+    registry = AccountRegistry(tmp_path / ".webai-gateway" / "accounts.json")
+    for profile_id in ("default", "alt"):
+        store.save_profile(
+            "qwen",
+            profile_id,
+            {
+                "cookie": f"qwen_session={profile_id}-session",
+                "bearer": f"{profile_id}-bearer",
+                "userAgent": "Chrome Test",
+            },
+        )
+        registry.update_metadata(f"direct:qwen:{profile_id}", {"providerId": "qwen", "displayName": profile_id})
+    registry.set_current("qwen", "direct:qwen:default")
+
+    class RuntimeRateLimitedQwenClient:
+        def __init__(self, credential: dict[str, Any], http_client: httpx.Client | None = None) -> None:
+            self.credential = credential
+
+        def chat_completions(self, payload: dict[str, Any]) -> dict[str, Any]:
+            bearer = str(self.credential.get("bearer") or "")
+            attempts.append(bearer)
+            if bearer == "default-bearer":
+                raise RuntimeError("provider rate limit")
+            return _openai_response("ok")
+
+    client = TestClient(
+        create_app(
+            config=_config(),
+            config_path=tmp_path / "config.json",
+            credential_store=store,
+            qwen_client_factory=RuntimeRateLimitedQwenClient,
+            http_client=_not_found_client(),
+        )
+    )
+    client.app.state.account_registry = registry
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers=_headers(),
+        json={"model": "qwen-web/qwen3.6-plus", "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    assert response.status_code == 200
+    assert attempts == ["default-bearer", "alt-bearer"]
+
+
+def test_qwen_direct_switches_unpinned_profile_after_auth_expiry(tmp_path: Path) -> None:
+    attempts: list[str] = []
+    store = CredentialStore(tmp_path / "credentials")
+    registry = AccountRegistry(tmp_path / ".webai-gateway" / "accounts.json")
+    for profile_id in ("default", "alt"):
+        store.save_profile(
+            "qwen",
+            profile_id,
+            {
+                "cookie": f"qwen_session={profile_id}-session",
+                "bearer": f"{profile_id}-bearer",
+                "userAgent": "Chrome Test",
+            },
+        )
+        registry.update_metadata(f"direct:qwen:{profile_id}", {"providerId": "qwen", "displayName": profile_id})
+    registry.set_current("qwen", "direct:qwen:default")
+
+    class ExpiredDefaultQwenClient:
+        def __init__(self, credential: dict[str, Any], http_client: httpx.Client | None = None) -> None:
+            self.credential = credential
+
+        def chat_completions(self, payload: dict[str, Any]) -> dict[str, Any]:
+            bearer = str(self.credential.get("bearer") or "")
+            attempts.append(bearer)
+            if bearer == "default-bearer":
+                request = httpx.Request("POST", "https://chat.qwen.ai/api/v2/chat/completions")
+                response = httpx.Response(401, json={"error": {"message": "session expired"}}, request=request)
+                raise httpx.HTTPStatusError("session expired", request=request, response=response)
+            return _openai_response("ok")
+
+    client = TestClient(
+        create_app(
+            config=_config(),
+            config_path=tmp_path / "config.json",
+            credential_store=store,
+            qwen_client_factory=ExpiredDefaultQwenClient,
+            http_client=_not_found_client(),
+        )
+    )
+    client.app.state.account_registry = registry
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers=_headers(),
+        json={"model": "qwen-web/qwen3.6-plus", "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    assert response.status_code == 200
+    assert attempts == ["default-bearer", "alt-bearer"]
+
+
+@pytest.mark.parametrize(
+    ("provider_id", "model", "factory_kwarg", "upstream_url"),
+    [
+        (
+            "qwen",
+            "qwen-web/qwen3.6-plus",
+            "qwen_client_factory",
+            "https://chat.qwen.ai/api/v2/chat/completions",
+        ),
+        (
+            "qwen-coder",
+            "qwen-coder/qwen-coder-plus",
+            "qwen_coder_client_factory",
+            "https://coder.qwen.ai/api/v2/chat/completions",
+        ),
+    ],
+)
+def test_qwen_auth_failed_account_is_skipped_until_credential_revision_changes(
+    tmp_path: Path,
+    provider_id: str,
+    model: str,
+    factory_kwarg: str,
+    upstream_url: str,
+) -> None:
+    attempts: list[str] = []
+    store = CredentialStore(tmp_path / "credentials")
+    registry = AccountRegistry(tmp_path / ".webai-gateway" / "accounts.json")
+    for profile_id in ("default", "alt"):
+        store.save_profile(
+            provider_id,
+            profile_id,
+            {
+                "cookie": f"qwen_session={profile_id}-session",
+                "bearer": f"{profile_id}-bearer",
+                "userAgent": "Chrome Test",
+            },
+        )
+        registry.update_metadata(
+            f"direct:{provider_id}:{profile_id}",
+            {"providerId": provider_id, "displayName": profile_id},
+        )
+    registry.set_current(provider_id, f"direct:{provider_id}:default")
+
+    class ExpiredDefaultClient:
+        def __init__(self, credential: dict[str, Any], **_: Any) -> None:
+            self.credential = credential
+
+        def chat_completions(self, payload: dict[str, Any]) -> dict[str, Any]:
+            bearer = str(self.credential.get("bearer") or "")
+            attempts.append(bearer)
+            if bearer == "default-bearer":
+                request = httpx.Request("POST", upstream_url)
+                response = httpx.Response(
+                    401,
+                    json={"error": {"message": "session expired"}},
+                    request=request,
+                )
+                raise httpx.HTTPStatusError("session expired", request=request, response=response)
+            return _openai_response("ok")
+
+    app = create_app(
+        config=_config(),
+        config_path=tmp_path / "config.json",
+        credential_store=store,
+        http_client=_not_found_client(),
+        **{factory_kwarg: ExpiredDefaultClient},
+    )
+    app.state.account_registry = registry
+    client = TestClient(app)
+    request_body = {"model": model, "messages": [{"role": "user", "content": "hi"}]}
+
+    first = client.post("/v1/chat/completions", headers=_headers(), json=request_body)
+    second = client.post("/v1/chat/completions", headers=_headers(), json=request_body)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert attempts == ["default-bearer", "alt-bearer", "alt-bearer"]
+
+    store.save_profile(
+        provider_id,
+        "default",
+        {
+            "cookie": "qwen_session=default-refreshed-session",
+            "bearer": "default-refreshed-bearer",
+            "userAgent": "Chrome Test",
+        },
+    )
+    third = client.post("/v1/chat/completions", headers=_headers(), json=request_body)
+
+    assert third.status_code == 200
+    assert attempts[-1] == "default-refreshed-bearer"
+
+
+def test_qwen_coder_switches_unpinned_profile_after_non_http_rate_limit(tmp_path: Path) -> None:
+    attempts: list[str] = []
+    store = CredentialStore(tmp_path / "credentials")
+    registry = AccountRegistry(tmp_path / ".webai-gateway" / "accounts.json")
+    for profile_id in ("default", "alt"):
+        store.save_profile(
+            "qwen-coder",
+            profile_id,
+            {
+                "cookie": f"qwen_session={profile_id}-session",
+                "bearer": f"{profile_id}-bearer",
+                "userAgent": "Chrome Test",
+            },
+        )
+        registry.update_metadata(
+            f"direct:qwen-coder:{profile_id}",
+            {"providerId": "qwen-coder", "displayName": profile_id},
+        )
+    registry.set_current("qwen-coder", "direct:qwen-coder:default")
+
+    class RuntimeRateLimitedQwenCoderClient:
+        def __init__(self, credential: dict[str, Any], **_: Any) -> None:
+            self.credential = credential
+
+        def chat_completions(self, payload: dict[str, Any]) -> dict[str, Any]:
+            bearer = str(self.credential.get("bearer") or "")
+            attempts.append(bearer)
+            if bearer == "default-bearer":
+                raise RuntimeError("provider rate limit")
+            return _openai_response("ok")
+
+    client = TestClient(
+        create_app(
+            config=_config(),
+            config_path=tmp_path / "config.json",
+            credential_store=store,
+            qwen_coder_client_factory=RuntimeRateLimitedQwenCoderClient,
+            http_client=_not_found_client(),
+        )
+    )
+    client.app.state.account_registry = registry
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers=_headers(),
+        json={"model": "qwen-coder/qwen-coder-plus", "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    assert response.status_code == 200
+    assert attempts == ["default-bearer", "alt-bearer"]
+
+
+@pytest.mark.parametrize(
+    ("provider_id", "model", "factory_kwarg"),
+    [
+        ("qwen", "qwen-web/qwen3.6-plus", "qwen_client_factory"),
+        ("qwen-coder", "qwen-coder/qwen-coder-plus", "qwen_coder_client_factory"),
+    ],
+)
+def test_qwen_unpinned_new_request_skips_cooldown_current_profile(
+    tmp_path: Path,
+    provider_id: str,
+    model: str,
+    factory_kwarg: str,
+) -> None:
+    attempts: list[str] = []
+    store = CredentialStore(tmp_path / "credentials")
+    registry = AccountRegistry(tmp_path / ".webai-gateway" / "accounts.json")
+    for profile_id in ("default", "alt"):
+        store.save_profile(
+            provider_id,
+            profile_id,
+            {
+                "cookie": f"qwen_session={profile_id}-session",
+                "bearer": f"{profile_id}-bearer",
+                "userAgent": "Chrome Test",
+            },
+        )
+        registry.update_metadata(
+            f"direct:{provider_id}:{profile_id}",
+            {"providerId": provider_id, "displayName": profile_id},
+        )
+    registry.set_current(provider_id, f"direct:{provider_id}:default")
+
+    class DefaultRateLimitedClient:
+        def __init__(self, credential: dict[str, Any], **_: Any) -> None:
+            self.credential = credential
+
+        def chat_completions(self, payload: dict[str, Any]) -> dict[str, Any]:
+            bearer = str(self.credential.get("bearer") or "")
+            attempts.append(bearer)
+            if bearer == "default-bearer":
+                request = httpx.Request("POST", "https://chat.qwen.ai/api/v2/chat/completions")
+                response = httpx.Response(429, json={"error": {"message": "rate limited"}}, request=request)
+                raise httpx.HTTPStatusError("rate limited", request=request, response=response)
+            return _openai_response("ok")
+
+    app = create_app(
+        config=GatewayConfig(
+            server=ServerConfig(api_key="local-dev-key"),
+            provider_runtime=ProviderRuntimeConfig(
+                qwen_direct_max_inflight=1,
+                qwen_direct_max_queue=2,
+                qwen_direct_rate_limit_cooldown_seconds=0.5,
+            ),
+        ),
+        config_path=tmp_path / "config.json",
+        credential_store=store,
+        http_client=_not_found_client(),
+        **{factory_kwarg: DefaultRateLimitedClient},
+    )
+    app.state.account_registry = registry
+    client = TestClient(app)
+
+    first = client.post(
+        "/v1/chat/completions",
+        headers={**_headers(), "X-Ds2-Target-Account": f"direct:{provider_id}:default"},
+        json={"model": model, "messages": [{"role": "user", "content": "first"}]},
+    )
+    second_started = time.monotonic()
+    second = client.post(
+        "/v1/chat/completions",
+        headers=_headers(),
+        json={"model": model, "messages": [{"role": "user", "content": "second"}]},
+    )
+
+    assert first.status_code == 429
+    assert second.status_code == 200
+    assert attempts == ["default-bearer", "alt-bearer"]
+    assert time.monotonic() - second_started < 0.25
 
 
 def test_qwen_direct_does_not_switch_pinned_profile_after_rate_limit(tmp_path: Path) -> None:
@@ -28875,7 +30000,7 @@ def test_qwen_web_allows_safe_generic_tool_use_under_local_agent_policy(tmp_path
             "cookie": "qwen_session=session-secret",
             "bearer": "",
             "userAgent": "Chrome Test",
-            "metadata": {"sessionToken": "session-token"},
+            "metadata": {"sessionToken": "session-secret"},
         },
     )
     client = TestClient(

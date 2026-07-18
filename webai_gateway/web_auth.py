@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import subprocess
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -20,12 +21,79 @@ DEEPSEEK_WEB_AVAILABLE_REASON = (
     "DeepSeek Web 现通过本地 ds2api sidecar 接入。完成网页登录授权并检测通过后，可使用 `deepseek-v4-pro`；"
     "如果检测失败，请按页面提示检查本地 ds2api、网页账号状态或重新授权。"
 )
-QWEN_LOGIN_COOKIE_HINTS = ("session", "token", "auth", "login", "sso")
+QWEN_LOGIN_COOKIE_NAMES = frozenset({"token", "qwen_session", "sessiontoken", "session_token", "qwensession"})
 QWEN_DIRECT_PROVIDER_IDS = {"qwen", "qwen-coder"}
 QWEN_CREDENTIAL_ORIGINS: dict[str, tuple[str, ...]] = {
     "qwen": ("https://chat.qwen.ai", "https://qwen.ai"),
     "qwen-coder": ("https://coder.qwen.ai", "https://qwen.ai"),
 }
+_EMPTY_CREDENTIAL_VALUES = {"null", "undefined", "none", "nil"}
+
+
+def _normalized_credential_secret(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    normalized = value.strip()
+    if not normalized or normalized.lower() in _EMPTY_CREDENTIAL_VALUES:
+        return ""
+    return normalized
+
+
+def _normalized_bearer(value: Any) -> str:
+    token = _normalized_credential_secret(value)
+    if not token:
+        return ""
+    parts = token.split(None, 1)
+    if parts[0].lower() != "bearer":
+        return token
+    if len(parts) == 1:
+        return ""
+    return _normalized_credential_secret(parts[1])
+
+
+def _normalized_session_token(value: Any) -> str:
+    token = _normalized_credential_secret(value)
+    if not token:
+        return ""
+    if token.lower() == "bearer" or token.lower().startswith("bearer "):
+        return _normalized_bearer(token)
+    return token
+
+
+def _normalized_cookie_header(value: Any) -> str:
+    return _normalized_credential_secret(value)
+
+
+def _cookie_header_has_usable_value(value: Any) -> bool:
+    cookie = _normalized_cookie_header(value)
+    if not cookie:
+        return False
+    saw_pair = False
+    for part in cookie.split(";"):
+        name, separator, item_value = part.strip().partition("=")
+        if not separator:
+            continue
+        saw_pair = True
+        if name.strip() and _normalized_credential_secret(item_value):
+            return True
+    return not saw_pair
+
+
+def _normalized_credential_metadata(value: Any) -> dict[str, Any]:
+    metadata = dict(value) if isinstance(value, dict) else {}
+    if "sessionToken" in metadata:
+        metadata["sessionToken"] = _normalized_session_token(metadata.get("sessionToken"))
+    return metadata
+
+
+def _normalize_loaded_credential(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    normalized = dict(value)
+    normalized["cookie"] = _normalized_cookie_header(value.get("cookie"))
+    normalized["bearer"] = _normalized_bearer(value.get("bearer"))
+    normalized["metadata"] = _normalized_credential_metadata(value.get("metadata"))
+    return normalized
 
 
 def default_cdp_url() -> str:
@@ -501,6 +569,8 @@ def catalog_model_payloads(*, include_webai2api: bool = True) -> list[dict[str, 
 class CredentialStore:
     def __init__(self, root: str | Path = "credentials") -> None:
         self.root = Path(root)
+        self._lock = threading.RLock()
+        self._revisions: dict[str, int] = {}
 
     def _path(self, provider_id: str) -> Path:
         return self.root / f"{provider_id}.json"
@@ -510,12 +580,48 @@ class CredentialStore:
         return self.root / "direct" / provider_id / f"{safe_profile}.json"
 
     def save(self, provider_id: str, credential: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            data = self._save_locked(provider_id, credential)
+            self._advance_revision_locked(provider_id)
+            return data
+
+    def revision(self, provider_id: str) -> int:
+        get_provider(provider_id)
+        with self._lock:
+            return self._revisions.get(provider_id, 0)
+
+    def save_if_revision(
+        self,
+        provider_id: str,
+        credential: dict[str, Any],
+        expected_revision: int,
+    ) -> dict[str, Any] | None:
+        """Save a captured credential only while its authorization generation is current.
+
+        Browser capture can take minutes. A credential clear or a newer explicit
+        save that happens meanwhile advances the generation, so the stale capture
+        cannot recreate or overwrite the user's current credential.
+        """
+
+        get_provider(provider_id)
+        with self._lock:
+            if self._revisions.get(provider_id, 0) != expected_revision:
+                return None
+            data = self._save_locked(provider_id, credential)
+            self._advance_revision_locked(provider_id)
+            return data
+
+    def _advance_revision_locked(self, provider_id: str) -> None:
+        self._revisions[provider_id] = self._revisions.get(provider_id, 0) + 1
+
+    def _save_locked(self, provider_id: str, credential: dict[str, Any]) -> dict[str, Any]:
         get_provider(provider_id)
         existing = self.get(provider_id) or {}
-        cookie = str(credential.get("cookie") or "")
-        bearer = str(credential.get("bearer") or "")
-        user_agent = str(credential.get("userAgent") or credential.get("user_agent") or "")
-        if not cookie and not bearer:
+        cookie = _normalized_cookie_header(credential.get("cookie"))
+        bearer = _normalized_bearer(credential.get("bearer"))
+        user_agent = _normalized_credential_secret(credential.get("userAgent") or credential.get("user_agent"))
+        metadata = _normalized_credential_metadata(credential.get("metadata"))
+        if not _cookie_header_has_usable_value(cookie) and not bearer:
             raise ValueError("没有捕获到可用的 cookie 或 bearer，网页登录可能尚未完成")
         now = utc_now()
         data = {
@@ -523,7 +629,7 @@ class CredentialStore:
             "cookie": cookie,
             "bearer": bearer,
             "userAgent": user_agent,
-            "metadata": credential.get("metadata") if isinstance(credential.get("metadata"), dict) else {},
+            "metadata": metadata,
             "createdAt": str(existing.get("createdAt") or now),
             "updatedAt": now,
         }
@@ -539,17 +645,24 @@ class CredentialStore:
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         tmp.replace(path)
         if provider_id in QWEN_DIRECT_PROVIDER_IDS or provider_id == "deepseek-web":
-            self.save_profile(provider_id, "default", credential)
+            self._save_profile_locked(provider_id, "default", credential)
         return data
 
     def save_profile(self, provider_id: str, profile_id: str, credential: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            data = self._save_profile_locked(provider_id, profile_id, credential)
+            self._advance_revision_locked(provider_id)
+            return data
+
+    def _save_profile_locked(self, provider_id: str, profile_id: str, credential: dict[str, Any]) -> dict[str, Any]:
         get_provider(provider_id)
         profile = str(profile_id or "default").strip() or "default"
         existing = self.get_profile(provider_id, profile) or {}
-        cookie = str(credential.get("cookie") or "")
-        bearer = str(credential.get("bearer") or "")
-        user_agent = str(credential.get("userAgent") or credential.get("user_agent") or "")
-        if not cookie and not bearer:
+        cookie = _normalized_cookie_header(credential.get("cookie"))
+        bearer = _normalized_bearer(credential.get("bearer"))
+        user_agent = _normalized_credential_secret(credential.get("userAgent") or credential.get("user_agent"))
+        metadata = _normalized_credential_metadata(credential.get("metadata"))
+        if not _cookie_header_has_usable_value(cookie) and not bearer:
             raise ValueError("没有捕获到可用的网页登录凭据，请重新完成授权")
         now = utc_now()
         data = {
@@ -558,7 +671,7 @@ class CredentialStore:
             "cookie": cookie,
             "bearer": bearer,
             "userAgent": user_agent,
-            "metadata": credential.get("metadata") if isinstance(credential.get("metadata"), dict) else {},
+            "metadata": metadata,
             "createdAt": str(existing.get("createdAt") or now),
             "updatedAt": now,
         }
@@ -572,39 +685,64 @@ class CredentialStore:
         return data
 
     def get(self, provider_id: str) -> dict[str, Any] | None:
-        path = self._path(provider_id)
-        if not path.exists():
-            return None
-        data = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            return None
-        return data
+        with self._lock:
+            path = self._path(provider_id)
+            if not path.exists():
+                return None
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                return None
+            return _normalize_loaded_credential(data)
 
     def get_profile(self, provider_id: str, profile_id: str) -> dict[str, Any] | None:
-        profile = str(profile_id or "default").strip() or "default"
-        path = self._profile_path(provider_id, profile)
-        if path.exists():
-            data = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                return data
-        if profile == "default":
-            return self.get(provider_id)
-        return None
+        with self._lock:
+            profile = str(profile_id or "default").strip() or "default"
+            path = self._profile_path(provider_id, profile)
+            if path.exists():
+                try:
+                    data = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, UnicodeError, json.JSONDecodeError):
+                    data = None
+                normalized = _normalize_loaded_credential(data)
+                if normalized is not None:
+                    return normalized
+            if profile == "default":
+                return self.get(provider_id)
+            return None
 
     def list_profile_ids(self, provider_id: str) -> list[str]:
-        ids: list[str] = []
-        root = self.root / "direct" / provider_id
-        if root.exists():
-            for path in sorted(root.glob("*.json")):
-                ids.append(unquote(path.stem))
-        if self.get(provider_id) is not None and "default" not in ids:
-            ids.insert(0, "default")
-        return ids
+        with self._lock:
+            ids: list[str] = []
+            root = self.root / "direct" / provider_id
+            if root.exists():
+                for path in sorted(root.glob("*.json")):
+                    ids.append(unquote(path.stem))
+            if self.get(provider_id) is not None and "default" not in ids:
+                ids.insert(0, "default")
+            return ids
 
     def delete(self, provider_id: str) -> None:
-        path = self._path(provider_id)
-        if path.exists():
-            path.unlink()
+        get_provider(provider_id)
+        with self._lock:
+            # Advance even when no file exists: clearing credentials is an
+            # explicit invalidation barrier for every capture already running.
+            self._advance_revision_locked(provider_id)
+            path = self._path(provider_id)
+            if path.exists():
+                path.unlink()
+            profile_root = self.root / "direct" / provider_id
+            is_junction = getattr(profile_root, "is_junction", lambda: False)
+            if profile_root.is_dir() and not profile_root.is_symlink() and not is_junction():
+                for profile_path in profile_root.glob("*.json"):
+                    if profile_path.is_file():
+                        profile_path.unlink()
+                try:
+                    profile_root.rmdir()
+                except OSError:
+                    # Preserve unrelated files instead of recursively deleting a
+                    # credential directory that may contain user-managed data.
+                    pass
 
     def summary(self, provider_id: str) -> dict[str, Any]:
         credential = self.get(provider_id)
@@ -620,9 +758,9 @@ def credential_summary(provider_id: str, credential: dict[str, Any] | None) -> d
         "authorized": is_credential_authorized(provider_id, credential),
         "updatedAt": credential.get("updatedAt") if credential else None,
         "fields": {
-            "cookie": bool(credential and credential.get("cookie")),
-            "bearer": bool(credential and credential.get("bearer")),
-            "userAgent": bool(credential and credential.get("userAgent")),
+            "cookie": bool(credential and _cookie_header_has_usable_value(credential.get("cookie"))),
+            "bearer": bool(credential and _normalized_bearer(credential.get("bearer"))),
+            "userAgent": bool(credential and _normalized_credential_secret(credential.get("userAgent"))),
         },
     }
 
@@ -630,16 +768,15 @@ def credential_summary(provider_id: str, credential: dict[str, Any] | None) -> d
 def is_credential_authorized(provider_id: str, credential: dict[str, Any] | None) -> bool:
     if not credential:
         return False
-    if provider_id == "qwen":
-        metadata = credential.get("metadata") if isinstance(credential.get("metadata"), dict) else {}
-        return bool(credential.get("bearer") or metadata.get("sessionToken"))
-    if provider_id == "qwen-coder":
-        # Qwen Coder 使用与 Qwen 相同的认证方式
-        metadata = credential.get("metadata") if isinstance(credential.get("metadata"), dict) else {}
-        return bool(credential.get("bearer") or metadata.get("sessionToken"))
+    bearer = _normalized_bearer(credential.get("bearer"))
+    if provider_id in QWEN_DIRECT_PROVIDER_IDS:
+        metadata = _normalized_credential_metadata(credential.get("metadata"))
+        session_token = _normalized_session_token(metadata.get("sessionToken"))
+        cookie_session = _qwen_session_from_cookie_header(_normalized_cookie_header(credential.get("cookie")))
+        return bool(bearer or (session_token and cookie_session and session_token == cookie_session))
     if provider_id == "deepseek-web":
-        return bool(credential.get("bearer"))
-    return bool(credential.get("cookie") or credential.get("bearer"))
+        return bool(bearer)
+    return bool(_cookie_header_has_usable_value(credential.get("cookie")) or bearer)
 
 
 def credential_from_remote_auth_url(provider_id: str, auth_url: str, user_agent: str = "") -> dict[str, Any]:
@@ -651,15 +788,13 @@ def credential_from_remote_auth_url(provider_id: str, auth_url: str, user_agent:
 
     params = _remote_auth_url_params(parsed)
     bearer = _strip_bearer_prefix(_first_remote_auth_param(params, REMOTE_AUTH_TOKEN_KEYS))
-    cookie = _first_remote_auth_param(params, REMOTE_AUTH_COOKIE_KEYS)
-    session_token = _first_remote_auth_param(params, REMOTE_AUTH_SESSION_KEYS)
+    cookie = _normalized_cookie_header(_first_remote_auth_param(params, REMOTE_AUTH_COOKIE_KEYS))
+    session_token = _normalized_session_token(_first_remote_auth_param(params, REMOTE_AUTH_SESSION_KEYS))
     code = _first_remote_auth_param(params, REMOTE_AUTH_CODE_KEYS)
     parsed_user_agent = _first_remote_auth_param(params, REMOTE_AUTH_USER_AGENT_KEYS)
 
-    if not cookie and provider.id in QWEN_DIRECT_PROVIDER_IDS:
-        qwen_cookie = params.get("qwen_session") or params.get("sessionToken") or params.get("session_token")
-        if qwen_cookie:
-            cookie = f"qwen_session={qwen_cookie}"
+    if not cookie and provider.id in QWEN_DIRECT_PROVIDER_IDS and session_token:
+        cookie = f"qwen_session={session_token}"
     if not session_token and provider.id in QWEN_DIRECT_PROVIDER_IDS and cookie:
         session_token = _qwen_session_from_cookie_header(cookie)
 
@@ -705,18 +840,15 @@ def _first_remote_auth_param(params: dict[str, str], names: tuple[str, ...]) -> 
 
 
 def _strip_bearer_prefix(value: str) -> str:
-    token = str(value or "").strip()
-    if token.lower().startswith("bearer "):
-        return token.split(None, 1)[1].strip()
-    return token
+    return _normalized_bearer(value)
 
 
 def _qwen_session_from_cookie_header(cookie: str) -> str:
     for part in str(cookie or "").split(";"):
         name, _, value = part.strip().partition("=")
         lowered = name.lower()
-        if value and any(hint in lowered for hint in QWEN_LOGIN_COOKIE_HINTS):
-            return value.strip()
+        if value and lowered in QWEN_LOGIN_COOKIE_NAMES:
+            return _normalized_session_token(value)
     return ""
 
 
@@ -928,15 +1060,44 @@ async def _read_qwen_credential(
     *,
     origins: tuple[str, ...] = QWEN_CREDENTIAL_ORIGINS["qwen"],
 ) -> dict[str, Any] | None:
-    cookies = await context.cookies(list(origins))
+    # Ask Playwright for cookies applicable to the provider origin. Parent
+    # domain cookies are included automatically, while host-only cookies from
+    # the sibling Qwen application cannot overwrite one another here.
+    cookies = await context.cookies(origins[0])
     cookie_text = "; ".join(f"{item.get('name')}={item.get('value')}" for item in cookies if item.get("name") and item.get("value"))
-    user_agent = await page.evaluate("() => navigator.userAgent")
-    session_token = bearer_seen or _qwen_session_token_from_cookies(cookies)
-    if not cookie_text or not session_token:
+    try:
+        browser_state = await page.evaluate(
+            "() => ({ userAgent: navigator.userAgent, token: window.localStorage?.getItem('token') || '' })"
+        )
+    except Exception:
+        try:
+            browser_state = {"userAgent": await page.evaluate("() => navigator.userAgent"), "token": ""}
+        except Exception:
+            browser_state = {}
+    if isinstance(browser_state, dict):
+        user_agent = str(browser_state.get("userAgent") or "")
+        local_storage_token = _normalized_session_token(browser_state.get("token"))
+    else:
+        # Kept for lightweight alternate Playwright adapters and test doubles.
+        user_agent = str(browser_state or "")
+        local_storage_token = ""
+    captured_bearer = _normalized_bearer(bearer_seen)
+    cookie_session_token = _qwen_session_token_from_cookies(cookies)
+    session_token = captured_bearer or local_storage_token or cookie_session_token
+    if not session_token:
+        return None
+    bearer = captured_bearer or local_storage_token or _qwen_bearer_token_from_cookies(cookies)
+    if not await _verify_qwen_login_state(
+        context,
+        origin=origins[0],
+        cookie=cookie_text,
+        user_agent=user_agent,
+        bearer=bearer,
+    ):
         return None
     return {
         "cookie": cookie_text,
-        "bearer": bearer_seen,
+        "bearer": bearer,
         "userAgent": user_agent,
         "metadata": {"sessionToken": session_token},
     }
@@ -945,11 +1106,151 @@ async def _read_qwen_credential(
 def _qwen_session_token_from_cookies(cookies: list[dict[str, Any]]) -> str:
     for item in cookies:
         name = str(item.get("name") or "").lower()
-        if any(token in name for token in QWEN_LOGIN_COOKIE_HINTS):
-            value = str(item.get("value") or "")
+        if name in QWEN_LOGIN_COOKIE_NAMES:
+            value = _normalized_session_token(item.get("value"))
             if value:
                 return value
     return ""
+
+
+def _qwen_bearer_token_from_cookies(cookies: list[dict[str, Any]]) -> str:
+    for item in cookies:
+        if str(item.get("name") or "").lower() == "token":
+            return _normalized_bearer(item.get("value"))
+    return ""
+
+
+async def _verify_qwen_login_state(
+    context: Any,
+    *,
+    origin: str,
+    cookie: str,
+    user_agent: str,
+    bearer: str,
+) -> bool:
+    request_context = getattr(context, "request", None)
+    request_get = getattr(request_context, "get", None)
+    if not callable(request_get):
+        return False
+    headers = {
+        "Cookie": cookie,
+        "User-Agent": user_agent,
+        "Accept": "application/json",
+    }
+    if bearer:
+        headers["Authorization"] = f"Bearer {bearer}"
+    try:
+        auth_url = f"{str(origin).rstrip('/')}/api/v1/auths/"
+        response = await request_get(auth_url, headers=headers)
+    except Exception:
+        return False
+    if not bool(getattr(response, "ok", False)):
+        return False
+    response_url = str(getattr(response, "url", "") or "")
+    if response_url and not _same_qwen_auth_endpoint(auth_url, response_url):
+        return False
+    response_headers = getattr(response, "headers", {})
+    content_type = ""
+    if isinstance(response_headers, dict):
+        content_type = str(response_headers.get("content-type") or response_headers.get("Content-Type") or "")
+    if content_type and "json" not in content_type.lower():
+        return False
+    response_json = getattr(response, "json", None)
+    if not callable(response_json):
+        return False
+    try:
+        payload = await response_json()
+    except Exception:
+        return False
+    return _qwen_auth_payload_has_authenticated_user(payload)
+
+
+def _same_qwen_auth_endpoint(expected_url: str, response_url: str) -> bool:
+    expected = urlparse(expected_url)
+    actual = urlparse(response_url)
+    return (
+        actual.scheme.lower() == expected.scheme.lower()
+        and actual.netloc.lower() == expected.netloc.lower()
+        and actual.path.rstrip("/") == expected.path.rstrip("/")
+    )
+
+
+def _qwen_auth_payload_has_authenticated_user(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+
+    candidates: list[tuple[dict[str, Any], bool]] = [(payload, True)]
+    has_root_envelope = False
+    for key in ("user", "account", "data"):
+        nested = payload.get(key)
+        if not isinstance(nested, dict):
+            continue
+        has_root_envelope = True
+        candidates.append((nested, False))
+    data = payload.get("data")
+    if isinstance(data, dict):
+        for key in ("user", "account"):
+            nested = data.get(key)
+            if isinstance(nested, dict):
+                candidates.append((nested, False))
+
+    # Reject a guest marker from any supported identity envelope before
+    # considering positive identity evidence. Qwen has returned both JSON
+    # booleans and stringified booleans for this field.
+    for candidate, _is_root in candidates:
+        is_guest = _normalized_qwen_bool(candidate.get("is_guest")) or _normalized_qwen_bool(
+            candidate.get("isGuest")
+        )
+        role = _normalized_credential_secret(candidate.get("role")).lower()
+        email = _normalized_credential_secret(candidate.get("email")).lower()
+        if is_guest or role in {"guest", "visitor"} or email.endswith("@guest.com"):
+            return False
+
+    strong_identity_fields = (
+        "email",
+        "profile_image_url",
+        "profileImageUrl",
+        "avatar_url",
+        "avatarUrl",
+        "picture",
+        "phone",
+    )
+    for candidate, is_root in candidates:
+        explicit_user_id = candidate.get("user_id") or candidate.get("userId") or candidate.get("uid")
+        if _normalized_qwen_identity_id(explicit_user_id):
+            return True
+
+        # A generic `id` is ambiguous: auth envelopes also use it as a
+        # request/response identifier. It is accepted only alongside strong
+        # identity evidence on the same object, and never from a root envelope
+        # that already contains a user/account/data object.
+        if is_root and has_root_envelope:
+            continue
+        user_id = _normalized_qwen_identity_id(candidate.get("id"))
+        has_strong_identity = any(
+            _normalized_credential_secret(candidate.get(key)) for key in strong_identity_fields
+        )
+        if user_id and has_strong_identity:
+            return True
+    return False
+
+
+def _normalized_qwen_bool(value: Any) -> bool:
+    if value is True:
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "1", "yes", "y", "on"}
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value == 1
+    return False
+
+
+def _normalized_qwen_identity_id(value: Any) -> str:
+    if isinstance(value, bool) or value is None:
+        return ""
+    if isinstance(value, (int, float)):
+        return str(value)
+    return _normalized_credential_secret(value)
 
 
 def _deep_get(data: Any, path: tuple[str, ...]) -> Any:
